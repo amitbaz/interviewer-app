@@ -146,3 +146,11 @@ Acceptance requires a real Supabase migration run and an authenticated deployed 
 
 After grounded profile interviews are reliable, add optional role-level research. Research should be cached, source-attributed, freshness-labelled, and used to enrich competency expectations—not to override the candidate evidence model. It should be a separate provider boundary so the core interview remains useful when research is unavailable.
 
+## Deferred roadmap commitments
+
+These are intentionally deferred from the first accuracy milestone but remain important follow-up work:
+
+1. Live web research and a cached market-intelligence layer for current software-engineering interview expectations.
+2. Executable candidate-code evaluation and a cloud-IDE-style workspace with preview, tests, console, and runtime feedback.
+
+They should return as dedicated design and implementation slices after profile grounding and rubric-based evaluation are reliable.
