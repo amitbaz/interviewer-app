@@ -107,6 +107,40 @@ describe("calculateProgress", () => {
     });
   });
 
+  it("withholds readiness until there is at least one scored completed session", () => {
+    const competencies = [
+      competency({
+        id: "react",
+        averageScore: 8,
+        recentScore: 8,
+        confidence: "high",
+      }),
+    ];
+
+    expect(calculateProgress(competencies, [
+      session({
+        id: "active-session",
+        status: "active",
+        completedAt: null,
+        updatedAt: "2026-08-29T12:05:00.000Z",
+        overallScore: 8.2,
+      }),
+      session({
+        id: "complete-without-score",
+        completedAt: "2026-08-29T12:00:00.000Z",
+        updatedAt: "2026-08-29T12:05:00.000Z",
+        overallScore: null,
+      }),
+    ])).toMatchObject({
+      readiness: null,
+      latestScore: null,
+      trend: null,
+      recentScores: [],
+      strongest: expect.objectContaining({ id: "react" }),
+      weakest: expect.objectContaining({ id: "react" }),
+    });
+  });
+
   it("sorts completed sessions newest-first and marks an improving trend above the boundary", () => {
     const competencies = [
       competency({ id: "react", averageScore: 8, confidence: "high" }),

@@ -17,9 +17,21 @@ const evaluationDimensionLabels = [
 
 type EvaluationDimensionKey = keyof InterviewSession["evaluations"][number]["dimensions"];
 
+function slugToken(value: string | null | undefined, fallback: string): string {
+  const normalized = (value ?? "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || fallback;
+}
+
 function evaluationKey(session: InterviewSession, index: number): string {
   const evaluation = session.evaluations[index];
-  return `${evaluation.competencyId ?? "general"}-${evaluation.competency}-${index}`;
+  const scope = evaluation.questionId
+    ? `question-${slugToken(evaluation.questionId, `question-${index}`)}`
+    : `${slugToken(evaluation.competencyId, "general")}-${slugToken(evaluation.competency, `evaluation-${index}`)}`;
+  return `${scope}-${index}`;
 }
 
 function startViewTransition(update: () => void) {
@@ -37,6 +49,7 @@ function startViewTransition(update: () => void) {
  */
 export function ResultsFeedbackCards({ session }: { session: InterviewSession }) {
   const answeredQuestions = session.questions.filter((question) => Boolean(question.answer));
+  const answeredQuestionsById = new Map(answeredQuestions.map((question) => [question.id, question]));
   const [expandedEvaluationKey, setExpandedEvaluationKey] = useState<string | null>(null);
 
   return (
@@ -46,7 +59,9 @@ export function ResultsFeedbackCards({ session }: { session: InterviewSession })
         const expanded = expandedEvaluationKey === currentKey;
         const buttonId = `${currentKey}-toggle`;
         const regionId = `${currentKey}-details`;
-        const answeredQuestion = answeredQuestions[index] ?? null;
+        const answeredQuestion = evaluation.questionId
+          ? answeredQuestionsById.get(evaluation.questionId) ?? null
+          : answeredQuestions[index] ?? null;
         const dimensions = evaluationDimensionLabels.filter(([key]) => {
           const value = evaluation.dimensions[key as EvaluationDimensionKey];
           return typeof value === "number" && Number.isFinite(value);
@@ -92,7 +107,7 @@ export function ResultsFeedbackCards({ session }: { session: InterviewSession })
               <div
                 id={regionId}
                 role="region"
-                aria-label={`${evaluation.competency} feedback details`}
+                aria-labelledby={buttonId}
                 className="mt-5 space-y-5 border-t border-[var(--line)] pt-5 text-sm"
               >
                 {answeredQuestion && (

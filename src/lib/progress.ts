@@ -85,6 +85,8 @@ function recurringWeaknesses(sessions: InterviewSession[]): string[] {
 }
 
 function readinessScore(competencies: Competency[], recentScores: number[]): number | null {
+  if (recentScores.length === 0) return null;
+
   const withEvidence = evidenceCompetencies(competencies);
   if (withEvidence.length === 0) return null;
 

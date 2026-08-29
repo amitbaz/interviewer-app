@@ -42,6 +42,46 @@ describe("mapSession", () => {
     }]);
   });
 
+  it("orders question evaluations by their persisted question sequence before hydrating results feedback", () => {
+    const mapped = mapSession(
+      {
+        id: "session-1", user_id: "user-1", kind: "conversation", status: "complete",
+        started_at: "2026-08-29T10:00:00.000Z", completed_at: "2026-08-29T10:30:00.000Z", exercise: {}, result_summary: {},
+        overall_score: 7, created_at: "2026-08-29T10:00:00.000Z", updated_at: "2026-08-29T10:30:00.000Z",
+      },
+      [
+        {
+          id: "question-1", sequence: 1, category: "experience", competency_id: "competency-1",
+          difficulty: "senior", is_follow_up: false, prompt: "Tell me about the migration.", answer: "I phased by route.",
+          created_at: "2026-08-29T10:01:00.000Z", answered_at: "2026-08-29T10:02:00.000Z",
+        },
+        {
+          id: "question-2", sequence: 2, category: "technical", competency_id: "competency-2",
+          difficulty: "senior", is_follow_up: false, prompt: "How did you handle focus state?", answer: "I kept it outside each row.",
+          created_at: "2026-08-29T10:03:00.000Z", answered_at: "2026-08-29T10:04:00.000Z",
+        },
+      ],
+      [
+        { id: "evaluation-2", question_id: "question-2", overall_score: 6, dimensions: {}, strengths: ["Scoped focus state"], weaknesses: ["Quantify latency"] },
+        { id: "evaluation-1", question_id: "question-1", overall_score: 8, dimensions: {}, strengths: ["Clear rollout"], weaknesses: ["Name the rollback trigger"] },
+      ],
+      [],
+      new Map([
+        ["competency-1", "React architecture"],
+        ["competency-2", "Performance"],
+      ]),
+    );
+
+    expect(mapped.evaluations.map((evaluation) => evaluation.competency)).toEqual([
+      "React architecture",
+      "Performance",
+    ]);
+    expect(mapped.questions.map((question) => question.prompt)).toEqual([
+      "Tell me about the migration.",
+      "How did you handle focus state?",
+    ]);
+  });
+
   it("rejects a plan that is not the exact five-question backbone before persistence", () => {
     expect(() => assertConversationPlan([
       { id: "1", sequence: 1, category: "introduction", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "one", answer: null, createdAt: "" },

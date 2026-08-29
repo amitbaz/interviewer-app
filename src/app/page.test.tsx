@@ -307,12 +307,12 @@ describe("ResultsFeedbackCards", () => {
 
     const toggle = screen.getByRole("button", { name: "React architecture feedback" });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByRole("region", { name: "React architecture feedback details" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "React architecture feedback" })).not.toBeInTheDocument();
 
     fireEvent.click(toggle);
 
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    const details = screen.getByRole("region", { name: "React architecture feedback details" });
+    const details = screen.getByRole("region", { name: "React architecture feedback" });
     expect(details).toBeInTheDocument();
     expect(screen.getByText("How would you phase a large React migration?")).toBeInTheDocument();
     expect(screen.getByText("I would phase by route, keep the old shell available, and track rollback gates per milestone.")).toBeInTheDocument();
@@ -331,12 +331,81 @@ describe("ResultsFeedbackCards", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Performance feedback" }));
 
-    const details = screen.getByRole("region", { name: "Performance feedback details" });
+    const details = screen.getByRole("region", { name: "Performance feedback" });
     expect(details).toBeInTheDocument();
     expect(screen.getByText("How do you keep a search UI responsive at 50,000 results?")).toBeInTheDocument();
     expect(screen.getByText("I would virtualize the list, debounce network work, and keep keyboard focus state outside each row.")).toBeInTheDocument();
     expect(within(details).queryByText("Missing points")).not.toBeInTheDocument();
     expect(within(details).queryByText("Better structure")).not.toBeInTheDocument();
     expect(within(details).queryByText("Improved answer")).not.toBeInTheDocument();
+  });
+
+  it("pairs each evaluation with the matching answered question even when evaluation rows were hydrated out of order", () => {
+    render(<ResultsFeedbackCards session={session({
+      evaluations: [
+        {
+          score: 6,
+          questionId: "question-2",
+          competencyId: "performance",
+          competency: "Performance",
+          dimensions: {},
+          strengths: ["Recognized virtualization quickly."],
+          needsWork: ["Explain how keyboard state survives list windowing."],
+          missingPoints: [],
+          betterStructure: [],
+          improvedAnswer: "",
+        },
+        {
+          score: 8,
+          questionId: "question-1",
+          competencyId: "react-architecture",
+          competency: "React architecture",
+          dimensions: { structure: 9, tradeOffAwareness: 8, clarity: 7 },
+          strengths: ["Phased the migration with rollback gates."],
+          needsWork: ["Call out how you would verify each rollout stage."],
+          missingPoints: ["Name the signal that would trigger a rollback."],
+          betterStructure: ["Start with constraints, then walk through phases, and close with rollback criteria."],
+          improvedAnswer: "I would begin with the constraints, phase the migration by route, and define explicit rollback criteria for each milestone.",
+        },
+      ],
+    })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Performance feedback" }));
+
+    const details = screen.getByRole("region", { name: "Performance feedback" });
+    expect(within(details).getByText("How do you keep a search UI responsive at 50,000 results?")).toBeInTheDocument();
+    expect(within(details).getByText("I would virtualize the list, debounce network work, and keep keyboard focus state outside each row.")).toBeInTheDocument();
+    expect(within(details).queryByText("How would you phase a large React migration?")).not.toBeInTheDocument();
+  });
+
+  it("uses whitespace-free stable disclosure ids and labels the region from its toggle", () => {
+    render(<ResultsFeedbackCards session={session({
+      evaluations: [
+        {
+          score: 8,
+          questionId: "question-1",
+          competencyId: "react architecture",
+          competency: "React architecture",
+          dimensions: { structure: 9, tradeOffAwareness: 8, clarity: 7 },
+          strengths: ["Phased the migration with rollback gates."],
+          needsWork: ["Call out how you would verify each rollout stage."],
+          missingPoints: ["Name the signal that would trigger a rollback."],
+          betterStructure: ["Start with constraints, then walk through phases, and close with rollback criteria."],
+          improvedAnswer: "I would begin with the constraints, phase the migration by route, and define explicit rollback criteria for each milestone.",
+        },
+      ],
+    })} />);
+
+    const toggle = screen.getByRole("button", { name: "React architecture feedback" });
+    fireEvent.click(toggle);
+
+    const region = screen.getByRole("region", { name: "React architecture feedback" });
+    const controls = toggle.getAttribute("aria-controls");
+    expect(controls).toBeTruthy();
+    expect(controls).not.toMatch(/\s/);
+    expect(toggle.id).not.toMatch(/\s/);
+    expect(region.id).toBe(controls);
+    expect(region).toHaveAttribute("aria-labelledby", toggle.id);
+    expect(region.parentElement?.style.viewTransitionName).toBe("evaluation-card-question-question-1-0");
   });
 });

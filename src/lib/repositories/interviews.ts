@@ -45,6 +45,7 @@ function mapQuestion(row: Row, competencyNames: Map<string, string>): PlannedQue
 function mapEvaluation(row: Row, question: PlannedQuestion): Evaluation {
   return {
     score: Number(row.overall_score ?? 0),
+    questionId: stringValue(row.question_id) || null,
     competencyId: question.competencyId,
     competency: question.competencyName ?? "Communication",
     dimensions: jsonRecord(row.dimensions) as Evaluation["dimensions"],
@@ -60,6 +61,7 @@ function mapSessionEvaluation(row: Row, competencyNames: Map<string, string>): E
   const competencyId = typeof row.competency_id === "string" ? row.competency_id : null;
   return {
     score: Number(row.overall_score ?? 0),
+    questionId: null,
     competencyId,
     competency: competencyId
       ? competencyNames.get(competencyId) ?? stringValue(row.competency_name)
@@ -145,13 +147,20 @@ export function mapSession(
     typeof question.answered_at === "string" ? question.answered_at : stringValue(question.created_at),
   ]));
   const questionsById = new Map(questions.map((question) => [question.id, question]));
-  const questionEvaluations = evaluationRows.map((evaluation) => {
+  const questionEvaluations = [...evaluationRows]
+    .sort((left, right) => {
+      const leftQuestion = questionsById.get(stringValue(left.question_id));
+      const rightQuestion = questionsById.get(stringValue(right.question_id));
+      return (leftQuestion?.sequence ?? Number.MAX_SAFE_INTEGER)
+        - (rightQuestion?.sequence ?? Number.MAX_SAFE_INTEGER);
+    })
+    .map((evaluation) => {
     const question = questionsById.get(stringValue(evaluation.question_id));
     return mapEvaluation(evaluation, question ?? {
       id: "", sequence: 0, category: "communication", competencyId: null, competencyName: null,
       difficulty: "foundational", isFollowUp: false, prompt: "", answer: null, createdAt: "",
     });
-  });
+    });
   const checkpoints = [...checkpointRows]
     .sort((left, right) => stringValue(left.created_at).localeCompare(stringValue(right.created_at)))
     .map(mapCheckpoint);

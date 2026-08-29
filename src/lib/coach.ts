@@ -14,7 +14,7 @@ const profileSchema = z.object({
 });
 const evaluationSchema = z.object({
   score: z.number().min(0).max(10), competency: z.string().optional(),
-  dimensions: z.object(Object.fromEntries(dimensions.map((dimension) => [dimension, z.number().min(0).max(10).optional()]))).optional(),
+  dimensions: z.object(Object.fromEntries(dimensions.map((dimension) => [dimension, z.number().min(0).max(10)]))),
   strengths: z.array(z.string()), needsWork: z.array(z.string()),
   missingPoints: z.array(z.string()).min(1),
   betterStructure: z.array(z.string()).min(1),
@@ -135,13 +135,30 @@ function promptForPlan(planned: PlannedQuestion, source: ProfileSource): string 
 function evaluationFor(planned: PlannedQuestion, answer: string): Evaluation {
   const lower = answer.toLowerCase();
   const score = Math.min(9, Math.max(5.5, 5.8 + (lower.includes("trade-off") ? 1 : 0) + (lower.includes("measure") ? 0.7 : 0) + (answer.length > 280 ? 0.6 : 0)));
+  const clarity = Number(Math.min(10, 5 + answer.length / 150).toFixed(1));
+  const tradeOffAwareness = lower.includes("trade-off") ? 7 : 5;
+  const practicalExperience = lower.includes("i ") || lower.includes("we ") ? 7 : 5.5;
+  const structure = Number(Math.min(10, clarity + (answer.includes(".") ? 0.4 : 0)).toFixed(1));
+  const communication = Number(Math.min(10, clarity + 0.3).toFixed(1));
+  const relevance = planned.competencyName ? 8 : 7;
+  const confidence = answer.trim().length > 120 ? 7 : 5.5;
+  const correctness = Number(Math.min(10, score + 0.2).toFixed(1));
+  const depth = Number(Math.min(10, score + (answer.length > 220 ? 0.4 : 0)).toFixed(1));
   return {
     score: Number(score.toFixed(1)),
+    questionId: planned.id,
     competencyId: planned.competencyId,
     competency: planned.competencyName ?? "Communication",
     dimensions: {
-      clarity: Number(Math.min(10, 5 + answer.length / 150).toFixed(1)),
-      tradeOffAwareness: lower.includes("trade-off") ? 7 : 5,
+      correctness,
+      depth,
+      clarity,
+      structure,
+      practicalExperience,
+      tradeOffAwareness,
+      communication,
+      confidence,
+      relevance,
     },
     strengths: [
       "Grounded the answer in practical experience.",
@@ -168,9 +185,10 @@ function evaluationFor(planned: PlannedQuestion, answer: string): Evaluation {
 function normalizedEvaluation(planned: PlannedQuestion, value: z.infer<typeof evaluationSchema>): Evaluation {
   return {
     score: value.score,
+    questionId: planned.id,
     competencyId: planned.competencyId,
     competency: planned.competencyName ?? value.competency ?? "Communication",
-    dimensions: value.dimensions ?? {},
+    dimensions: value.dimensions,
     strengths: value.strengths,
     needsWork: value.needsWork,
     missingPoints: value.missingPoints,

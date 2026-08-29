@@ -46,6 +46,7 @@ export type FollowUpDraft = Pick<
 
 export type Evaluation = {
   score: number;
+  questionId?: string | null;
   competencyId: string | null;
   competency: string;
   dimensions: Partial<Record<
