@@ -1,57 +1,92 @@
+export type QuestionCategory =
+  | "introduction"
+  | "experience"
+  | "technical"
+  | "practical"
+  | "architecture"
+  | "system-design"
+  | "behavioral"
+  | "communication";
+
+export type Difficulty = "foundational" | "intermediate" | "senior" | "advanced";
+
 export type Competency = {
+  id: string;
   name: string;
-  score: number;
-  focus: string;
+  relevance: number;
+  expectedLevel: Difficulty;
+  estimatedLevel: Difficulty | null;
+  confidence: "low" | "medium" | "high" | null;
+  lastPracticedAt: string | null;
+  questionCount: number;
+  averageScore: number | null;
+  recentScore: number | null;
+  strengths: string[];
+  weaknesses: string[];
 };
 
-export type Profile = {
-  role: string;
-  seniority: string;
-  summary: string;
-  narrative: string;
-  expertise: string[];
-  characteristics: string[];
-  competencies: Competency[];
-  cvText: string;
-  coverLetter: string;
-};
-
-export type Message = {
-  role: "interviewer" | "candidate";
-  content: string;
+export type PlannedQuestion = {
+  id: string;
+  sequence: number;
+  category: QuestionCategory;
+  competencyId: string | null;
+  competencyName: string | null;
+  difficulty: Difficulty;
+  isFollowUp: boolean;
+  prompt: string;
+  answer: string | null;
   createdAt: string;
 };
 
 export type Evaluation = {
   score: number;
+  competencyId: string | null;
+  competency: string;
+  dimensions: Partial<Record<
+    | "correctness"
+    | "depth"
+    | "clarity"
+    | "structure"
+    | "practicalExperience"
+    | "tradeOffAwareness"
+    | "communication"
+    | "confidence"
+    | "relevance",
+    number
+  >>;
   strengths: string[];
   needsWork: string[];
-  competency: string;
 };
 
-export type HandsOnExercise = {
-  title: string;
-  durationMinutes: number;
-  briefing: string;
-  requirements: string[];
-  starterCode: string;
+export type Profile = {
+  userId: string;
+  role: string | null;
+  seniority: string | null;
+  summary: string | null;
+  narrative: string | null;
+  expertise: string[];
+  characteristics: string[];
+  createdAt: string;
+  updatedAt: string;
 };
 
-export type CodeCheckpoint = {
-  code: string;
-  note: string;
+export type Message = {
+  id: string;
+  role: "interviewer" | "candidate";
+  content: string;
   createdAt: string;
 };
 
 export type InterviewSession = {
-  id: number;
-  kind?: "conversation" | "hands-on";
+  id: string;
+  userId: string;
+  kind: "conversation" | "hands-on";
   status: "active" | "complete";
-  messages: Message[];
-  evaluations: Evaluation[];
-  exercise?: HandsOnExercise;
-  checkpoints?: CodeCheckpoint[];
-  summary?: string;
-  overallScore?: number;
+  startedAt: string;
+  completedAt: string | null;
+  exercise: Record<string, unknown>;
+  resultSummary: Record<string, unknown>;
+  overallScore: number | null;
   createdAt: string;
+  updatedAt: string;
 };
