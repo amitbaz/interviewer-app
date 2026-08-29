@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { completeSession as summarizeSession, evaluateHandsOn, handsOnCheckpoint, handsOnExercise, initialQuestion, nextTurn } from "@/lib/coach";
 import { buildInterviewPlan } from "@/lib/interview-planner";
+import { calculateProgress } from "@/lib/progress";
 import {
   completeHandsOnSession,
   completeSession,
@@ -21,7 +22,13 @@ export const runtime = "nodejs";
 export async function GET() {
   try {
     const { supabase, user } = await requireUser();
-    return NextResponse.json({ sessions: await listRecentSessions(supabase, user.id) });
+    const profile = await getProfile(supabase, user.id);
+    const sessions = await listRecentSessions(supabase, user.id);
+    const completedSessions = sessions.filter((session) => session.status === "complete");
+    return NextResponse.json({
+      sessions,
+      progress: calculateProgress(profile?.competencies ?? [], completedSessions),
+    });
   } catch (error) {
     return errorResponse(error);
   }

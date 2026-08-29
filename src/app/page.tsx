@@ -1,7 +1,7 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { HandsOnExercise, InterviewSession, Profile } from "@/lib/types";
+import { FormEvent, useEffect, useRef, useState } from "react";
+import type { HandsOnExercise, InterviewSession, Profile, ProgressSnapshot } from "@/lib/types";
 import { createBrowserSupabaseClient } from "@/lib/supabase/client";
 import { MAX_CV_PDF_BYTES } from "@/lib/upload-limits";
 
@@ -17,10 +17,6 @@ class ApiError extends Error {
   }
 }
 
-function hasEvidenceForCompetencies(competencies: Array<Pick<Profile["competencies"][number], "questionCount">>): boolean {
-  return competencies.some((item) => item.questionCount > 0);
-}
-
 async function api<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, { ...options, headers: { "Content-Type": "application/json", ...(options?.headers ?? {}) } });
   const body = await response.json();
@@ -28,10 +24,32 @@ async function api<T>(url: string, options?: RequestInit): Promise<T> {
   return body as T;
 }
 
+type CoachData = {
+  profile: Profile | null;
+  demoMode: boolean;
+  sessions: InterviewSession[];
+  progress: ProgressSnapshot;
+};
+
+async function loadCoachData(): Promise<CoachData> {
+  const [profileResult, sessionsResult] = await Promise.all([
+    api<{ profile: Profile | null; demoMode: boolean }>("/api/profile"),
+    api<{ sessions: InterviewSession[]; progress: ProgressSnapshot }>("/api/interview"),
+  ]);
+
+  return {
+    profile: profileResult.profile,
+    demoMode: profileResult.demoMode,
+    sessions: sessionsResult.sessions,
+    progress: sessionsResult.progress,
+  };
+}
+
 export default function App() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [session, setSession] = useState<InterviewSession | null>(null);
   const [sessions, setSessions] = useState<InterviewSession[]>([]);
+  const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
   const [view, setView] = useState<View>("onboarding");
   const [authState, setAuthState] = useState<AuthState>("loading");
   const [coachDataLoading, setCoachDataLoading] = useState(true);
@@ -77,20 +95,18 @@ export default function App() {
   useEffect(() => {
     if (authState !== "signed-in") return;
     let active = true;
-    Promise.all([
-      api<{ profile: Profile | null; demoMode: boolean }>("/api/profile"),
-      api<{ sessions: InterviewSession[] }>("/api/interview"),
-    ]).then(([profileResult, sessionsResult]) => {
+    loadCoachData().then((coachData) => {
       if (!active) return;
-      setProfile(profileResult.profile);
-      setDemoMode(profileResult.demoMode);
-      setSessions(sessionsResult.sessions);
-      setView(profileResult.profile ? "home" : "onboarding");
+      setProfile(coachData.profile);
+      setDemoMode(coachData.demoMode);
+      setSessions(coachData.sessions);
+      setProgress(coachData.progress);
+      setView(coachData.profile ? "home" : "onboarding");
       setCoachDataLoading(false);
     }).catch((caught) => {
       if (!active) return;
       if (caught instanceof ApiError && caught.status === 401) {
-        setProfile(null); setSession(null); setSessions([]); setView("onboarding"); setAuthState("signed-out"); setCoachDataLoading(false);
+        setProfile(null); setProgress(null); setSession(null); setSessions([]); setView("onboarding"); setAuthState("signed-out"); setCoachDataLoading(false);
         return;
       }
       setError(caught instanceof Error ? caught.message : "Could not open your coach data.");
@@ -99,14 +115,10 @@ export default function App() {
     return () => { active = false; };
   }, [authState]);
 
-  const hasEvidence = hasEvidenceForCompetencies(profile?.competencies ?? []);
-  const readiness = useMemo(() => {
-    if (!profile || !hasEvidence) return null;
-    const scores = profile.competencies.flatMap((item) => item.averageScore === null ? [] : [item.averageScore]);
-    return scores.length ? Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length * 10) : null;
-  }, [hasEvidence, profile]);
+  const readiness = progress?.readiness ?? null;
+  const hasEvidence = readiness !== null;
   const complete = sessions.find((item) => item.status === "complete");
-  const weakest = hasEvidence ? [...(profile?.competencies ?? [])].filter((item) => item.averageScore !== null).sort((a, b) => (a.averageScore ?? 0) - (b.averageScore ?? 0))[0] ?? null : null;
+  const weakest = progress?.weakest ?? null;
   const handsOn = session?.kind === "hands-on";
   const exercise = handsOn ? session?.exercise as HandsOnExercise : null;
   const sessionSummary = session ? String(session.resultSummary.summary ?? "Complete a few questions to receive personalized feedback.") : "";
@@ -127,7 +139,7 @@ export default function App() {
   }
   function handleRequestError(caught: unknown, fallback: string) {
     if (caught instanceof ApiError && caught.status === 401) {
-      setProfile(null); setSession(null); setSessions([]); setView("onboarding"); setAuthState("signed-out");
+      setProfile(null); setProgress(null); setSession(null); setSessions([]); setView("onboarding"); setAuthState("signed-out");
       return;
     }
     setError(caught instanceof Error ? caught.message : fallback);
@@ -182,7 +194,11 @@ export default function App() {
       const result = await api<{ session: InterviewSession; profile?: Profile }>("/api/interview", { method: "POST", body: JSON.stringify({ action: "respond", sessionId: session.id, answer }) });
       setAnswer(""); persistSession(result.session);
       if (result.session.status === "complete" && result.profile) {
-        setProfile(result.profile);
+        const coachData = await loadCoachData();
+        setProfile(coachData.profile ?? result.profile);
+        setDemoMode(coachData.demoMode);
+        setSessions(coachData.sessions);
+        setProgress(coachData.progress);
         navigate("results");
       }
     } catch (caught) { handleRequestError(caught, "Could not send answer."); } finally { setBusy(false); }
@@ -233,7 +249,13 @@ export default function App() {
     if (!session) return; setBusy(true); setError("");
     try {
       const result = await api<{ session: InterviewSession; profile: Profile }>("/api/interview", { method: "POST", body: JSON.stringify({ action: "complete", sessionId: session.id }) });
-      persistSession(result.session); setProfile(result.profile); navigate("results");
+      persistSession(result.session);
+      const coachData = await loadCoachData();
+      setProfile(coachData.profile ?? result.profile);
+      setDemoMode(coachData.demoMode);
+      setSessions(coachData.sessions);
+      setProgress(coachData.progress);
+      navigate("results");
     } catch (caught) { handleRequestError(caught, "Could not finish interview."); } finally { setBusy(false); }
   }
   async function signInWithGoogle() {
@@ -258,7 +280,7 @@ export default function App() {
     try {
       const { error: authError } = await supabase.current.auth.signOut();
       if (authError) throw authError;
-      setProfile(null); setSession(null); setSessions([]); setAnswer(""); setCode(""); setCheckpointNote(""); setView("onboarding"); setAuthState("signed-out");
+      setProfile(null); setProgress(null); setSession(null); setSessions([]); setAnswer(""); setCode(""); setCheckpointNote(""); setView("onboarding"); setAuthState("signed-out");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not sign out.");
     } finally { setBusy(false); }

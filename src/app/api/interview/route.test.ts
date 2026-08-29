@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { InterviewSession, PlannedQuestion, Profile } from "@/lib/types";
+import type { Competency, InterviewSession, PlannedQuestion, Profile } from "@/lib/types";
 
 const mocks = vi.hoisted(() => ({
   requireUser: vi.fn(),
@@ -43,7 +43,22 @@ vi.mock("@/lib/coach", () => ({
   handsOnExercise: mocks.handsOnExercise,
 }));
 
-import { POST } from "@/app/api/interview/route";
+import { GET, POST } from "@/app/api/interview/route";
+
+const competency: Competency = {
+  id: "react-id",
+  name: "React architecture",
+  relevance: 5,
+  expectedLevel: "senior",
+  estimatedLevel: "senior",
+  confidence: "high",
+  lastPracticedAt: "2026-08-29T10:00:00.000Z",
+  questionCount: 4,
+  averageScore: 8.4,
+  recentScore: 9,
+  strengths: ["Frames trade-offs clearly."],
+  weaknesses: ["Adds too much implementation detail before the decision."],
+};
 
 const profile: Profile = {
   userId: "user-1",
@@ -53,7 +68,7 @@ const profile: Profile = {
   narrative: "Owns frontend platforms.",
   expertise: ["React"],
   characteristics: ["Pragmatic"],
-  competencies: [],
+  competencies: [competency],
   source: { cvText: "At Acme I led a React migration.", coverLetter: "" },
   createdAt: "2026-08-29T10:00:00.000Z",
   updatedAt: "2026-08-29T10:00:00.000Z",
@@ -190,5 +205,49 @@ describe("POST /api/interview", () => {
 
     expect(response.status).toBe(200);
     expect(mocks.completeSession).toHaveBeenCalledOnce();
+  });
+});
+
+describe("GET /api/interview", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.requireUser.mockResolvedValue({ supabase: { client: true }, user: { id: "user-1" } });
+    mocks.getProfile.mockResolvedValue(profile);
+  });
+
+  it("returns completed-session progress with the authenticated session list", async () => {
+    mocks.listRecentSessions.mockResolvedValue([
+      session([question(1, "answered")], "complete"),
+      session([question(1, "answered")]),
+    ]);
+
+    const response = await GET();
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.sessions).toHaveLength(2);
+    expect(body.progress).toMatchObject({
+      readiness: 81,
+      latestScore: 7,
+      trend: "baseline",
+      recentScores: [7],
+      strongest: expect.objectContaining({ id: "react-id" }),
+      weakest: expect.objectContaining({ id: "react-id" }),
+      recurringWeaknesses: [],
+    });
+    expect(mocks.getProfile).toHaveBeenCalledWith(expect.anything(), "user-1");
+    expect(mocks.listRecentSessions).toHaveBeenCalledWith(expect.anything(), "user-1");
+  });
+
+  it("returns 401 without exposing progress when authentication is absent", async () => {
+    mocks.requireUser.mockRejectedValue(new Error("UNAUTHENTICATED"));
+
+    const response = await GET();
+    const body = await response.json();
+
+    expect(response.status).toBe(401);
+    expect(body).toEqual({ error: "Sign in to continue." });
+    expect(mocks.getProfile).not.toHaveBeenCalled();
+    expect(mocks.listRecentSessions).not.toHaveBeenCalled();
   });
 });
