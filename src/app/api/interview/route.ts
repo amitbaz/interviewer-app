@@ -163,6 +163,18 @@ function visibleConversation(session: InterviewSession): InterviewSession {
 }
 
 function errorResponse(error: unknown) {
+  if (error instanceof Error) {
+    const code = typeof error === "object" && error !== null && "code" in error
+      ? (error as { code?: unknown }).code
+      : undefined;
+    console.error("[api/interview] request failed", {
+      name: error.name,
+      message: error.message,
+      code,
+    });
+  } else {
+    console.error("[api/interview] request failed", error);
+  }
   if (error instanceof Error && error.message === "UNAUTHENTICATED") {
     return NextResponse.json({ error: "Sign in to continue." }, { status: 401 });
   }
