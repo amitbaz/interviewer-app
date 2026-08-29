@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useRef, useState } from "react";
 import type { HandsOnExercise, InterviewSession, Profile, ProgressSnapshot } from "@/lib/types";
+import { progressViewModel } from "@/app/progress-view-model";
 import { createBrowserSupabaseClient } from "@/lib/supabase/client";
 import { MAX_CV_PDF_BYTES } from "@/lib/upload-limits";
 
@@ -115,10 +116,8 @@ export default function App() {
     return () => { active = false; };
   }, [authState]);
 
-  const readiness = progress?.readiness ?? null;
-  const hasEvidence = readiness !== null;
+  const { hasEvidence, readiness, weakest } = progressViewModel(progress);
   const complete = sessions.find((item) => item.status === "complete");
-  const weakest = progress?.weakest ?? null;
   const handsOn = session?.kind === "hands-on";
   const exercise = handsOn ? session?.exercise as HandsOnExercise : null;
   const sessionSummary = session ? String(session.resultSummary.summary ?? "Complete a few questions to receive personalized feedback.") : "";
