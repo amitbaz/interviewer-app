@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
+import { buildFallbackInterviewBlueprint } from "@/lib/interview-planner";
 import {
   assertConversationPlan,
   completeHandsOnSession,
@@ -11,7 +12,80 @@ import {
   recordAnswerAndEvaluation,
   recordConversationTurn,
 } from "@/lib/repositories/interviews";
-import type { InterviewBlueprint } from "@/lib/types";
+import type { Competency, EvidenceItem, InterviewBlueprint, ProfileDraft } from "@/lib/types";
+
+const fallbackProfile: ProfileDraft = {
+  role: "Frontend Engineer",
+  seniority: "Senior",
+  summary: "Frontend engineer focused on performance and delivery.",
+  narrative: "Owns frontend platforms and reliability work.",
+  expertise: ["React", "TypeScript", "Next.js"],
+  characteristics: ["Pragmatic"],
+  competencies: [
+    { name: "React architecture", relevance: 1 },
+    { name: "System design", relevance: 0.8 },
+  ],
+};
+
+const fallbackEvidence: EvidenceItem[] = [
+  {
+    id: "evidence-1",
+    sourceKind: "cv",
+    sourceExcerpt: "Led a React migration for checkout.",
+    projectOrEmployer: "Checkout Platform",
+    ownership: "Owned the frontend migration end to end.",
+    technologies: ["React", "TypeScript"],
+    decision: "Split a large route into smaller bundles.",
+    constraint: "Tight launch window.",
+    outcome: "Cut bundle size by 28%.",
+    recency: "2025-02",
+    confidence: 0.94,
+  },
+  {
+    id: "evidence-2",
+    sourceKind: "cv",
+    sourceExcerpt: "Built observability for API regressions.",
+    projectOrEmployer: "Reliability Tooling",
+    ownership: "Designed the dashboard and alerting flow.",
+    technologies: ["Next.js", "Postgres"],
+    decision: "Added release health dashboards.",
+    constraint: "Small team with limited bandwidth.",
+    outcome: "Reduced incident triage time by 35%.",
+    recency: "2024-11",
+    confidence: 0.91,
+  },
+];
+
+const fallbackCompetencies: Competency[] = [
+  {
+    id: "fallback-competency-1",
+    name: "React architecture",
+    relevance: 1,
+    expectedLevel: "senior",
+    estimatedLevel: null,
+    confidence: null,
+    lastPracticedAt: null,
+    questionCount: 0,
+    averageScore: null,
+    recentScore: null,
+    strengths: [],
+    weaknesses: [],
+  },
+  {
+    id: "0d7f2d0c-8e26-4ae6-b4b2-f9f44c4f4ab8",
+    name: "System design",
+    relevance: 0.8,
+    expectedLevel: "senior",
+    estimatedLevel: null,
+    confidence: null,
+    lastPracticedAt: null,
+    questionCount: 0,
+    averageScore: null,
+    recentScore: null,
+    strengths: [],
+    weaknesses: [],
+  },
+];
 
 describe("mapSession", () => {
   it("maps persisted questions into an ordered plan and transcript", () => {
@@ -315,6 +389,59 @@ describe("mapSession", () => {
               sequence: 2,
               objective: "Probe the migration ownership and impact.",
               evidence_ids: ["evidence-1"],
+            }),
+          ]),
+        }),
+      }),
+    }]);
+  });
+
+  it("strips non-UUID fallback competency ids before the blueprint RPC while keeping persisted UUID links", async () => {
+    const calls: Array<{ name: string; payload: unknown }> = [];
+    const sessionRow = {
+      id: "session-1", user_id: "user-1", kind: "conversation", status: "active",
+      started_at: "2026-08-30T10:00:00.000Z", completed_at: null, exercise: {}, result_summary: {},
+      overall_score: null, blueprint_status: "limited-grounding", blueprint_fallback_reason: "Gemini returned invalid blueprint JSON after one repair attempt.",
+      created_at: "2026-08-30T10:00:00.000Z", updated_at: "2026-08-30T10:00:00.000Z",
+    };
+    const emptyQuery = {
+      eq: () => emptyQuery,
+      order: async () => ({ data: [], error: null }),
+      in: async () => ({ data: [], error: null }),
+    };
+    const sessionQuery = {
+      eq: () => sessionQuery,
+      maybeSingle: async () => ({ data: sessionRow, error: null }),
+    };
+    const supabase = {
+      rpc: async (name: string, payload: unknown) => {
+        calls.push({ name, payload });
+        return { data: [{ session_id: "session-1" }], error: null };
+      },
+      from: (table: string) => ({ select: () => table === "interview_sessions" ? sessionQuery : emptyQuery }),
+    };
+    const blueprint = buildFallbackInterviewBlueprint(
+      fallbackProfile,
+      fallbackCompetencies,
+      fallbackEvidence,
+      new Date("2026-08-30T10:00:00.000Z"),
+    );
+
+    await createSessionWithBlueprint(supabase as never, "user-1", blueprint);
+
+    expect(calls).toEqual([{
+      name: "create_conversation_session_with_blueprint",
+      payload: expect.objectContaining({
+        p_blueprint: expect.objectContaining({
+          status: "limited-grounding",
+          questions: expect.arrayContaining([
+            expect.objectContaining({
+              sequence: 2,
+              competency_id: null,
+            }),
+            expect.objectContaining({
+              sequence: 4,
+              competency_id: "0d7f2d0c-8e26-4ae6-b4b2-f9f44c4f4ab8",
             }),
           ]),
         }),

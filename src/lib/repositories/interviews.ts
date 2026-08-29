@@ -19,6 +19,7 @@ type Row = Record<string, unknown>;
 const backboneCategories: PlannedQuestion["category"][] = [
   "introduction", "experience", "technical", "architecture", "behavioral",
 ];
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const stringValue = (value: unknown): string => typeof value === "string" ? value : "";
 const stringArray = (value: unknown): string[] => Array.isArray(value)
@@ -27,6 +28,12 @@ const stringArray = (value: unknown): string[] => Array.isArray(value)
 const jsonRecord = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value)
   ? value as Record<string, unknown>
   : {};
+
+function persistableCompetencyId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return uuidPattern.test(trimmed) ? trimmed : null;
+}
 
 function mapQuestion(row: Row, competencyNames: Map<string, string>): PlannedQuestion {
   const competencyId = typeof row.competency_id === "string" ? row.competency_id : null;
@@ -321,7 +328,7 @@ export async function createSessionWithPlan(
     p_plan: plan.map((question) => ({
       sequence: question.sequence,
       category: question.category,
-      competency_id: question.competencyId,
+      competency_id: persistableCompetencyId(question.competencyId),
       difficulty: question.difficulty,
       is_follow_up: question.isFollowUp,
       prompt: question.prompt,
@@ -355,7 +362,7 @@ export async function createSessionWithBlueprint(
       questions: blueprint.questions.map((question) => ({
         sequence: question.sequence,
         category: question.category,
-        competency_id: question.competencyId,
+        competency_id: persistableCompetencyId(question.competencyId),
         difficulty: question.difficulty,
         prompt: question.prompt,
         objective: question.objective,
