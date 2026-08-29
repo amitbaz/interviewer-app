@@ -6,10 +6,11 @@ import {
   assessProfileReadiness,
   extractEngineeringEvidence,
   extractPdfText,
+  generateInterviewBlueprint,
   initialQuestion,
   nextTurn,
 } from "@/lib/coach";
-import type { InterviewSession, PlannedQuestion } from "@/lib/types";
+import type { EvidenceItem, InterviewSession, PlannedQuestion, ProfileDraft } from "@/lib/types";
 
 const planned = (overrides: Partial<PlannedQuestion>): PlannedQuestion => ({
   id: "question-1",
@@ -54,6 +55,48 @@ const dimensionKeys = [
   "confidence",
   "relevance",
 ] as const;
+
+const blueprintEvidence: EvidenceItem[] = [
+  {
+    id: "evidence-1",
+    sourceKind: "cv",
+    sourceExcerpt: "Led a React migration for checkout.",
+    projectOrEmployer: "Checkout Platform",
+    ownership: "Owned the frontend migration end to end.",
+    technologies: ["React", "TypeScript"],
+    decision: "Split a large route into smaller bundles.",
+    constraint: "Tight launch window.",
+    outcome: "Cut bundle size by 28%.",
+    recency: "2025-02",
+    confidence: 0.94,
+  },
+  {
+    id: "evidence-2",
+    sourceKind: "cv",
+    sourceExcerpt: "Built observability for API regressions.",
+    projectOrEmployer: "Reliability Tooling",
+    ownership: "Designed the dashboard and alerting flow.",
+    technologies: ["Next.js", "Postgres"],
+    decision: "Added release health dashboards.",
+    constraint: "Small team with limited bandwidth.",
+    outcome: "Reduced incident triage time by 35%.",
+    recency: "2024-11",
+    confidence: 0.91,
+  },
+];
+
+const blueprintProfile: ProfileDraft = {
+  role: "Frontend Engineer",
+  seniority: "Senior",
+  summary: "Frontend engineer focused on performance and delivery.",
+  narrative: "Owns frontend platforms and reliability work.",
+  expertise: ["React", "TypeScript", "Next.js"],
+  characteristics: ["Pragmatic"],
+  competencies: [
+    { name: "React architecture", relevance: 1 },
+    { name: "System design", relevance: 0.8 },
+  ],
+};
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -357,6 +400,241 @@ describe("extractEngineeringEvidence", () => {
       recency: "2025-02",
       confidence: 0.94,
     })]);
+  });
+});
+
+describe("generateInterviewBlueprint", () => {
+  it("returns a validated grounded blueprint that preserves evidence ids and objectives", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{
+        content: {
+          parts: [{
+            text: JSON.stringify({
+              status: "grounded",
+              fallbackReason: null,
+              maxFollowUps: 3,
+              maxQuestions: 8,
+              questions: [
+                {
+                  sequence: 1,
+                  category: "introduction",
+                  competencyName: null,
+                  difficulty: "senior",
+                  objective: "Establish recent engineering ownership.",
+                  evidenceIds: [],
+                  expectedSignals: ["role summary", "recent ownership"],
+                  missingSignalPrompts: ["Name the most recent engineering area you owned."],
+                  followUpLimit: 0,
+                  prompt: "Give me a concise introduction to yourself and the frontend work you have owned recently.",
+                  sourceConfidence: null,
+                },
+                {
+                  sequence: 2,
+                  category: "experience",
+                  competencyName: "React architecture",
+                  difficulty: "senior",
+                  objective: "Probe the checkout migration ownership and impact.",
+                  evidenceIds: ["evidence-1"],
+                  expectedSignals: ["role", "trade-off", "outcome"],
+                  missingSignalPrompts: ["Name the launch trade-off you accepted."],
+                  followUpLimit: 1,
+                  prompt: "Tell me about the Checkout Platform migration.",
+                  sourceConfidence: 0.94,
+                },
+                {
+                  sequence: 3,
+                  category: "technical",
+                  competencyName: "React architecture",
+                  difficulty: "senior",
+                  objective: "Probe the migration trade-off decision.",
+                  evidenceIds: ["evidence-1"],
+                  expectedSignals: ["decision", "constraint", "trade-off"],
+                  missingSignalPrompts: ["What trade-off did you reject?"],
+                  followUpLimit: 1,
+                  prompt: "Walk me through the route-splitting decision.",
+                  sourceConfidence: 0.94,
+                },
+                {
+                  sequence: 4,
+                  category: "architecture",
+                  competencyName: "System design",
+                  difficulty: "senior",
+                  objective: "Probe observability system design choices.",
+                  evidenceIds: ["evidence-2"],
+                  expectedSignals: ["requirements", "signal design", "constraint"],
+                  missingSignalPrompts: ["Which alert trade-off mattered most?"],
+                  followUpLimit: 1,
+                  prompt: "How did you shape observability for API regressions?",
+                  sourceConfidence: 0.91,
+                },
+                {
+                  sequence: 5,
+                  category: "behavioral",
+                  competencyName: "System design",
+                  difficulty: "senior",
+                  objective: "Probe cross-functional delivery around observability work.",
+                  evidenceIds: ["evidence-2"],
+                  expectedSignals: ["collaboration", "decision", "impact"],
+                  missingSignalPrompts: ["Who disagreed and how did you resolve it?"],
+                  followUpLimit: 0,
+                  prompt: "How did you align the team on the release-health dashboards?",
+                  sourceConfidence: 0.91,
+                },
+              ],
+            }),
+          }],
+        },
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    await expect(generateInterviewBlueprint(blueprintProfile, blueprintEvidence)).resolves.toMatchObject({
+      status: "grounded",
+      questions: expect.arrayContaining([
+        expect.objectContaining({
+          sequence: 2,
+          evidenceIds: ["evidence-1"],
+          objective: "Probe the checkout migration ownership and impact.",
+        }),
+      ]),
+    });
+  });
+
+  it("retries once when the first blueprint response fails validation", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        candidates: [{
+          content: {
+            parts: [{
+              text: JSON.stringify({
+                status: "grounded",
+                fallbackReason: null,
+                maxFollowUps: 3,
+                maxQuestions: 8,
+                questions: [{
+                  sequence: 1,
+                  category: "experience",
+                  competencyName: "React architecture",
+                  difficulty: "senior",
+                  objective: "",
+                  evidenceIds: ["missing-evidence"],
+                  expectedSignals: [],
+                  missingSignalPrompts: [],
+                  followUpLimit: 4,
+                  prompt: "bad",
+                  sourceConfidence: 0.9,
+                }],
+              }),
+            }],
+          },
+        }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        candidates: [{
+          content: {
+            parts: [{
+              text: JSON.stringify({
+                status: "grounded",
+                fallbackReason: null,
+                maxFollowUps: 3,
+                maxQuestions: 8,
+                questions: [
+                  {
+                    sequence: 1,
+                    category: "introduction",
+                    competencyName: null,
+                    difficulty: "senior",
+                    objective: "Establish recent engineering ownership.",
+                    evidenceIds: [],
+                    expectedSignals: ["role summary"],
+                    missingSignalPrompts: ["Name the area you owned."],
+                    followUpLimit: 0,
+                    prompt: "Give me a concise introduction to yourself and the frontend work you have owned recently.",
+                    sourceConfidence: null,
+                  },
+                  {
+                    sequence: 2,
+                    category: "experience",
+                    competencyName: "React architecture",
+                    difficulty: "senior",
+                    objective: "Probe the checkout migration ownership and impact.",
+                    evidenceIds: ["evidence-1"],
+                    expectedSignals: ["role", "outcome"],
+                    missingSignalPrompts: ["Name the trade-off."],
+                    followUpLimit: 1,
+                    prompt: "Tell me about the Checkout Platform migration.",
+                    sourceConfidence: 0.94,
+                  },
+                  {
+                    sequence: 3,
+                    category: "technical",
+                    competencyName: "React architecture",
+                    difficulty: "senior",
+                    objective: "Probe the route-splitting decision.",
+                    evidenceIds: ["evidence-1"],
+                    expectedSignals: ["decision", "constraint"],
+                    missingSignalPrompts: ["What option did you reject?"],
+                    followUpLimit: 1,
+                    prompt: "Walk me through the route-splitting decision.",
+                    sourceConfidence: 0.94,
+                  },
+                  {
+                    sequence: 4,
+                    category: "architecture",
+                    competencyName: "System design",
+                    difficulty: "senior",
+                    objective: "Probe the observability system design choices.",
+                    evidenceIds: ["evidence-2"],
+                    expectedSignals: ["requirements", "signal design"],
+                    missingSignalPrompts: ["How did you tune the alerts?"],
+                    followUpLimit: 1,
+                    prompt: "How did you shape observability for API regressions?",
+                    sourceConfidence: 0.91,
+                  },
+                  {
+                    sequence: 5,
+                    category: "behavioral",
+                    competencyName: "System design",
+                    difficulty: "senior",
+                    objective: "Probe collaboration during observability delivery.",
+                    evidenceIds: ["evidence-2"],
+                    expectedSignals: ["collaboration", "impact"],
+                    missingSignalPrompts: ["Who did you need alignment from?"],
+                    followUpLimit: 0,
+                    prompt: "How did you align the team on release health?",
+                    sourceConfidence: 0.91,
+                  },
+                ],
+              }),
+            }],
+          },
+        }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    const blueprint = await generateInterviewBlueprint(blueprintProfile, blueprintEvidence);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(blueprint.status).toBe("grounded");
+    expect(blueprint.questions[1].evidenceIds).toEqual(["evidence-1"]);
+  });
+
+  it("falls back to a limited-grounding blueprint after two invalid model responses", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "{}" }] } }] }), { status: 200, headers: { "Content-Type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "{}" }] } }] }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    const blueprint = await generateInterviewBlueprint(blueprintProfile, blueprintEvidence);
+
+    expect(blueprint.status).toBe("limited-grounding");
+    expect(blueprint.fallbackReason).toContain("Gemini");
+    expect(blueprint.questions).toHaveLength(5);
+    expect(blueprint.questions[1].evidenceIds).toEqual(["evidence-1"]);
   });
 });
 

@@ -5,11 +5,13 @@ vi.mock("server-only", () => ({}));
 import {
   assertConversationPlan,
   completeHandsOnSession,
+  createSessionWithBlueprint,
   createSessionWithPlan,
   mapSession,
   recordAnswerAndEvaluation,
   recordConversationTurn,
 } from "@/lib/repositories/interviews";
+import type { InterviewBlueprint } from "@/lib/types";
 
 describe("mapSession", () => {
   it("maps persisted questions into an ordered plan and transcript", () => {
@@ -82,6 +84,49 @@ describe("mapSession", () => {
     ]);
   });
 
+  it("hydrates persisted blueprint metadata and limited-grounding state", () => {
+    const mapped = mapSession(
+      {
+        id: "session-1", user_id: "user-1", kind: "conversation", status: "active",
+        started_at: "2026-08-29T10:00:00.000Z", completed_at: null, exercise: {}, result_summary: {},
+        overall_score: null, blueprint_status: "limited-grounding", blueprint_fallback_reason: "Gemini returned invalid blueprint JSON.",
+        created_at: "2026-08-29T10:00:00.000Z", updated_at: "2026-08-29T10:00:00.000Z",
+      },
+      [{
+        id: "question-1",
+        sequence: 1,
+        category: "experience",
+        competency_id: "competency-1",
+        difficulty: "senior",
+        is_follow_up: false,
+        prompt: "Tell me about React.",
+        answer: null,
+        objective: "Probe the migration ownership and impact.",
+        evidence_ids: ["evidence-1"],
+        expected_signals: ["role", "impact"],
+        missing_signal_prompts: ["Name the trade-off."],
+        follow_up_limit: 1,
+        source_confidence: 0.94,
+        created_at: "2026-08-29T10:01:00.000Z",
+      }],
+      [],
+      [],
+      new Map([["competency-1", "React architecture"]]),
+    );
+
+    expect(mapped.blueprint).toMatchObject({
+      status: "limited-grounding",
+      fallbackReason: "Gemini returned invalid blueprint JSON.",
+      questions: [expect.objectContaining({
+        id: "question-1",
+        objective: "Probe the migration ownership and impact.",
+        evidenceIds: ["evidence-1"],
+        expectedSignals: ["role", "impact"],
+        followUpLimit: 1,
+      })],
+    });
+  });
+
   it("rejects a plan that is not the exact five-question backbone before persistence", () => {
     expect(() => assertConversationPlan([
       { id: "1", sequence: 1, category: "introduction", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "one", answer: null, createdAt: "" },
@@ -124,6 +169,150 @@ describe("mapSession", () => {
     expect(calls).toEqual([{
       name: "create_conversation_session_with_plan",
       payload: { p_plan: expect.arrayContaining([expect.objectContaining({ sequence: 1, category: "introduction" })]) },
+    }]);
+  });
+
+  it("persists a grounded blueprint through the atomic blueprint RPC", async () => {
+    const calls: Array<{ name: string; payload: unknown }> = [];
+    const sessionRow = {
+      id: "session-1", user_id: "user-1", kind: "conversation", status: "active",
+      started_at: "2026-08-29T10:00:00.000Z", completed_at: null, exercise: {}, result_summary: {},
+      overall_score: null, blueprint_status: "grounded", blueprint_fallback_reason: null,
+      created_at: "2026-08-29T10:00:00.000Z", updated_at: "2026-08-29T10:00:00.000Z",
+    };
+    const emptyQuery = {
+      eq: () => emptyQuery,
+      order: async () => ({ data: [], error: null }),
+      in: async () => ({ data: [], error: null }),
+    };
+    const sessionQuery = {
+      eq: () => sessionQuery,
+      maybeSingle: async () => ({ data: sessionRow, error: null }),
+    };
+    const supabase = {
+      rpc: async (name: string, payload: unknown) => {
+        calls.push({ name, payload });
+        return { data: [{ session_id: "session-1" }], error: null };
+      },
+      from: (table: string) => ({ select: () => table === "interview_sessions" ? sessionQuery : emptyQuery }),
+    };
+    const blueprint: InterviewBlueprint = {
+      status: "grounded",
+      fallbackReason: null,
+      maxFollowUps: 3,
+      maxQuestions: 8,
+      createdAt: "2026-08-29T10:00:00.000Z",
+      questions: [
+        {
+          id: "question-1",
+          sequence: 1,
+          category: "introduction",
+          competencyId: null,
+          competencyName: null,
+          difficulty: "senior",
+          isFollowUp: false,
+          prompt: "Give me a concise introduction to yourself and the frontend work you have owned recently.",
+          answer: null,
+          createdAt: "2026-08-29T10:00:00.000Z",
+          objective: "Establish recent engineering ownership.",
+          evidenceIds: [],
+          expectedSignals: ["role summary"],
+          missingSignalPrompts: ["Name the recent engineering area you owned."],
+          followUpLimit: 0,
+          sourceConfidence: null,
+        },
+        {
+          id: "question-2",
+          sequence: 2,
+          category: "experience",
+          competencyId: "competency-1",
+          competencyName: "React architecture",
+          difficulty: "senior",
+          isFollowUp: false,
+          prompt: "Tell me about the migration.",
+          answer: null,
+          createdAt: "2026-08-29T10:00:00.000Z",
+          objective: "Probe the migration ownership and impact.",
+          evidenceIds: ["evidence-1"],
+          expectedSignals: ["role", "impact"],
+          missingSignalPrompts: ["Name the trade-off."],
+          followUpLimit: 1,
+          sourceConfidence: 0.94,
+        },
+        {
+          id: "question-3",
+          sequence: 3,
+          category: "technical",
+          competencyId: "competency-1",
+          competencyName: "React architecture",
+          difficulty: "senior",
+          isFollowUp: false,
+          prompt: "Walk me through the route-splitting decision.",
+          answer: null,
+          createdAt: "2026-08-29T10:00:00.000Z",
+          objective: "Probe the route-splitting trade-off.",
+          evidenceIds: ["evidence-1"],
+          expectedSignals: ["decision"],
+          missingSignalPrompts: ["What option did you reject?"],
+          followUpLimit: 1,
+          sourceConfidence: 0.94,
+        },
+        {
+          id: "question-4",
+          sequence: 4,
+          category: "architecture",
+          competencyId: "competency-2",
+          competencyName: "System design",
+          difficulty: "senior",
+          isFollowUp: false,
+          prompt: "How did you shape observability for API regressions?",
+          answer: null,
+          createdAt: "2026-08-29T10:00:00.000Z",
+          objective: "Probe observability system design choices.",
+          evidenceIds: ["evidence-2"],
+          expectedSignals: ["requirements"],
+          missingSignalPrompts: ["What alert trade-off mattered most?"],
+          followUpLimit: 1,
+          sourceConfidence: 0.91,
+        },
+        {
+          id: "question-5",
+          sequence: 5,
+          category: "behavioral",
+          competencyId: "competency-2",
+          competencyName: "System design",
+          difficulty: "senior",
+          isFollowUp: false,
+          prompt: "How did you align the team on release health?",
+          answer: null,
+          createdAt: "2026-08-29T10:00:00.000Z",
+          objective: "Probe collaboration during observability delivery.",
+          evidenceIds: ["evidence-2"],
+          expectedSignals: ["collaboration"],
+          missingSignalPrompts: ["Who did you need alignment from?"],
+          followUpLimit: 0,
+          sourceConfidence: 0.91,
+        },
+      ],
+    };
+
+    const session = await createSessionWithBlueprint(supabase as never, "user-1", blueprint);
+
+    expect(session.id).toBe("session-1");
+    expect(calls).toEqual([{
+      name: "create_conversation_session_with_blueprint",
+      payload: expect.objectContaining({
+        p_blueprint: expect.objectContaining({
+          status: "grounded",
+          questions: expect.arrayContaining([
+            expect.objectContaining({
+              sequence: 2,
+              objective: "Probe the migration ownership and impact.",
+              evidence_ids: ["evidence-1"],
+            }),
+          ]),
+        }),
+      }),
     }]);
   });
 

@@ -3,12 +3,16 @@ import "server-only";
 import { z } from "zod";
 import { applyEvaluation } from "@/lib/competencies";
 import { geminiModel, geminiRequestError } from "@/lib/gemini";
+import { buildFallbackInterviewBlueprint, validateInterviewBlueprint } from "@/lib/interview-planner";
 import { MAX_CV_PDF_BYTES } from "@/lib/upload-limits";
 import type {
+  BlueprintQuestion,
+  Competency,
   EvidenceItem,
   Evaluation,
   FollowUpDraft,
   HandsOnExercise,
+  InterviewBlueprint,
   InterviewSession,
   PlannedQuestion,
   Profile,
@@ -51,6 +55,26 @@ const evidenceSchema = z.object({
 });
 const evidenceListSchema = z.union([z.array(evidenceSchema), z.object({ evidence: z.array(evidenceSchema) })]);
 const workExampleVerbPattern = /\b(led|built|shipped|migrated|designed|owned|improved|implemented|launched|reduced|scaled|developed)\b/i;
+const blueprintQuestionDraftSchema = z.object({
+  sequence: z.number().int().min(1).max(5),
+  category: z.enum(["introduction", "experience", "technical", "architecture", "behavioral"]),
+  competencyName: z.string().nullable().optional(),
+  difficulty: z.enum(["foundational", "intermediate", "senior", "advanced"]),
+  objective: z.string().min(1),
+  evidenceIds: z.array(z.string().min(1)).default([]),
+  expectedSignals: z.array(z.string().min(1)).min(1),
+  missingSignalPrompts: z.array(z.string().min(1)).min(1),
+  followUpLimit: z.number().int().min(0).max(3),
+  prompt: z.string().min(1),
+  sourceConfidence: z.number().min(0).max(1).nullable().optional(),
+});
+const blueprintDraftSchema = z.object({
+  status: z.enum(["grounded", "limited-grounding"]).optional(),
+  fallbackReason: z.string().nullable().optional(),
+  maxFollowUps: z.number().int().min(0).max(3).default(3),
+  maxQuestions: z.number().int().min(5).max(8).default(8),
+  questions: z.array(blueprintQuestionDraftSchema).length(5),
+});
 
 const handsOnStarter = `import { useEffect, useRef, useState } from "react";
 
@@ -167,6 +191,73 @@ function fallbackEngineeringEvidence(cvText: string, coverLetter: string): Evide
   return items;
 }
 
+function normalizeBlueprintQuestion(
+  value: z.infer<typeof blueprintQuestionDraftSchema>,
+  createdAt: string,
+): BlueprintQuestion {
+  return {
+    id: `blueprint-question-${value.sequence}`,
+    sequence: value.sequence,
+    category: value.category,
+    competencyId: null,
+    competencyName: normalizeText(value.competencyName),
+    difficulty: value.difficulty,
+    isFollowUp: false,
+    prompt: value.prompt.trim(),
+    answer: null,
+    createdAt,
+    objective: value.objective.trim(),
+    evidenceIds: value.evidenceIds,
+    expectedSignals: value.expectedSignals.map((signal) => signal.trim()),
+    missingSignalPrompts: value.missingSignalPrompts.map((prompt) => prompt.trim()),
+    followUpLimit: value.followUpLimit,
+    sourceConfidence: value.sourceConfidence ?? null,
+  };
+}
+
+function normalizeBlueprint(
+  value: z.infer<typeof blueprintDraftSchema>,
+  createdAt: string,
+): InterviewBlueprint {
+  return {
+    status: value.status ?? "grounded",
+    fallbackReason: normalizeText(value.fallbackReason),
+    maxFollowUps: value.maxFollowUps,
+    maxQuestions: value.maxQuestions,
+    createdAt,
+    questions: value.questions.map((question) => normalizeBlueprintQuestion(question, createdAt)),
+  };
+}
+
+function fallbackBlueprintCompetencies(
+  profile: Pick<ProfileDraft, "seniority" | "expertise" | "competencies">,
+): Competency[] {
+  const expectedLevel = /staff|principal|lead|advanced/i.test(profile.seniority ?? "")
+    ? "advanced"
+    : /senior/i.test(profile.seniority ?? "")
+      ? "senior"
+      : /junior|entry|graduate|foundational/i.test(profile.seniority ?? "")
+        ? "foundational"
+        : "intermediate";
+  const names = profile.competencies.length
+    ? profile.competencies.map((competency) => competency.name)
+    : profile.expertise;
+  return names.map((name, index) => ({
+    id: `fallback-competency-${index + 1}`,
+    name,
+    relevance: profile.competencies[index]?.relevance ?? 1,
+    expectedLevel,
+    estimatedLevel: null,
+    confidence: null,
+    lastPracticedAt: null,
+    questionCount: 0,
+    averageScore: null,
+    recentScore: null,
+    strengths: [],
+    weaknesses: [],
+  }));
+}
+
 /**
  * Extracts software-engineering evidence items from user-provided source text.
  * Returns only schema-validated facts, preserves nulls for unknown optional
@@ -181,6 +272,59 @@ export async function extractEngineeringEvidence(cvText: string, coverLetter: st
   if (!result) return fallbackEngineeringEvidence(cvText, coverLetter);
   const list = Array.isArray(result) ? result : result.evidence;
   return list.map((item, index) => normalizeEvidenceItem(item, index));
+}
+
+/**
+ * Generates the persisted five-question interview blueprint from the validated
+ * profile and extracted evidence. It retries once on malformed or unsupported
+ * model output, then falls back to a deterministic limited-grounding plan.
+ */
+export async function generateInterviewBlueprint(
+  profile: Pick<ProfileDraft, "role" | "seniority" | "summary" | "narrative" | "expertise" | "characteristics" | "competencies">,
+  evidence: EvidenceItem[],
+): Promise<InterviewBlueprint> {
+  const createdAt = new Date().toISOString();
+  const competencyContext = profile.competencies.map((competency) => ({
+    name: competency.name,
+    relevance: competency.relevance,
+  }));
+  const prompt = (repair: boolean) => [
+    "You are planning a software-engineering interview blueprint.",
+    "Return only valid JSON.",
+    "Use the exact five-question backbone in this order: introduction, experience, technical, architecture, behavioral.",
+    "Every question must include objective, evidenceIds, expectedSignals, missingSignalPrompts, followUpLimit, prompt, difficulty, and optional competencyName/sourceConfidence.",
+    "Only reference evidence ids that appear below.",
+    "Do not invent projects, technologies, or outcomes.",
+    repair ? "The previous response failed validation. Repair it and satisfy every schema field exactly." : "",
+    `Profile: ${JSON.stringify(profile)}`,
+    `Competencies: ${JSON.stringify(competencyContext)}`,
+    `Evidence: ${JSON.stringify(evidence)}`,
+  ].filter(Boolean).join("\n");
+
+  for (const repair of [false, true]) {
+    const result = await modelJson(prompt(repair), blueprintDraftSchema);
+    if (!result) continue;
+    try {
+      return validateInterviewBlueprint(normalizeBlueprint(result, createdAt), evidence);
+    } catch {
+      continue;
+    }
+  }
+
+  return buildFallbackInterviewBlueprint(
+    {
+      role: profile.role,
+      seniority: profile.seniority,
+      summary: profile.summary,
+      narrative: profile.narrative,
+      expertise: profile.expertise,
+      characteristics: profile.characteristics,
+      competencies: profile.competencies,
+    },
+    fallbackBlueprintCompetencies(profile),
+    evidence,
+    new Date(createdAt),
+  );
 }
 
 function hasConcreteWorkAnchor(item: EvidenceItem): boolean {

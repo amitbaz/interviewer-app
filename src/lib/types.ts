@@ -46,6 +46,8 @@ export type ProfileReadiness = {
   missing: string[];
 };
 
+export type BlueprintStatus = "grounded" | "limited-grounding";
+
 export type PlannedQuestion = {
   id: string;
   sequence: number;
@@ -57,6 +59,29 @@ export type PlannedQuestion = {
   prompt: string;
   answer: string | null;
   createdAt: string;
+};
+
+/**
+ * A persisted interview question contract whose objective, evidence targets,
+ * and rubric hints must remain stable across the session.
+ */
+export type BlueprintQuestion = PlannedQuestion & {
+  objective: string;
+  evidenceIds: string[];
+  expectedSignals: string[];
+  missingSignalPrompts: string[];
+  followUpLimit: number;
+  sourceConfidence: number | null;
+};
+
+/** The five-question interview plan generated before the first answer is collected. */
+export type InterviewBlueprint = {
+  status: BlueprintStatus;
+  fallbackReason: string | null;
+  maxFollowUps: number;
+  maxQuestions: number;
+  createdAt: string;
+  questions: BlueprintQuestion[];
 };
 
 /** Server-generated follow-up content; sequence and identifiers are assigned transactionally. */
@@ -167,6 +192,8 @@ export type InterviewSession = {
   resultSummary: Record<string, unknown>;
   overallScore: number | null;
   questions: PlannedQuestion[];
+  /** The persisted planning contract for grounded sessions; legacy rows may omit it. */
+  blueprint?: InterviewBlueprint | null;
   checkpoints: HandsOnCheckpoint[];
   evaluations: Evaluation[];
   messages: Message[];

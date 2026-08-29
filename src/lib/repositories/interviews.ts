@@ -2,10 +2,12 @@ import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type {
+  BlueprintQuestion,
   Evaluation,
   FollowUpDraft,
   HandsOnCheckpoint,
   HandsOnExercise,
+  InterviewBlueprint,
   InterviewSession,
   Message,
   PlannedQuestion,
@@ -39,6 +41,22 @@ function mapQuestion(row: Row, competencyNames: Map<string, string>): PlannedQue
     prompt: stringValue(row.prompt),
     answer: typeof row.answer === "string" ? row.answer : null,
     createdAt: stringValue(row.created_at),
+  };
+}
+
+function mapBlueprintQuestion(row: Row, competencyNames: Map<string, string>): BlueprintQuestion | null {
+  if (typeof row.objective !== "string" || !row.objective.trim()) return null;
+  const question = mapQuestion(row, competencyNames);
+  return {
+    ...question,
+    objective: row.objective.trim(),
+    evidenceIds: stringArray(row.evidence_ids),
+    expectedSignals: stringArray(row.expected_signals),
+    missingSignalPrompts: stringArray(row.missing_signal_prompts),
+    followUpLimit: Number(row.follow_up_limit ?? 0),
+    sourceConfidence: row.source_confidence === null || row.source_confidence === undefined
+      ? null
+      : Number(row.source_confidence),
   };
 }
 
@@ -142,6 +160,10 @@ export function mapSession(
   const questions = [...questionRows]
     .sort((left, right) => Number(left.sequence ?? 0) - Number(right.sequence ?? 0))
     .map((question) => mapQuestion(question, competencyNames));
+  const blueprintQuestions = [...questionRows]
+    .sort((left, right) => Number(left.sequence ?? 0) - Number(right.sequence ?? 0))
+    .map((question) => mapBlueprintQuestion(question, competencyNames))
+    .filter((question): question is BlueprintQuestion => question !== null);
   const answerTimes = new Map(questionRows.map((question) => [
     stringValue(question.id),
     typeof question.answered_at === "string" ? question.answered_at : stringValue(question.created_at),
@@ -169,6 +191,20 @@ export function mapSession(
     ...sessionEvaluationRows.map((evaluation) => mapSessionEvaluation(evaluation, competencyNames)),
   ];
   const kind = row.kind === "hands-on" ? "hands-on" : "conversation";
+  const blueprint = kind === "conversation" && (
+    typeof row.blueprint_status === "string"
+    || typeof row.blueprint_fallback_reason === "string"
+    || blueprintQuestions.length > 0
+  )
+    ? {
+      status: row.blueprint_status === "limited-grounding" ? "limited-grounding" : "grounded",
+      fallbackReason: typeof row.blueprint_fallback_reason === "string" ? row.blueprint_fallback_reason : null,
+      maxFollowUps: 3,
+      maxQuestions: 8,
+      createdAt: stringValue(row.created_at),
+      questions: blueprintQuestions,
+    } satisfies InterviewBlueprint
+    : null;
 
   return {
     id: stringValue(row.id),
@@ -181,6 +217,7 @@ export function mapSession(
     resultSummary: jsonRecord(row.result_summary),
     overallScore: row.overall_score === null || row.overall_score === undefined ? null : Number(row.overall_score),
     questions,
+    blueprint,
     checkpoints,
     evaluations,
     messages: kind === "hands-on" ? handsOnTranscript(row, checkpoints) : transcriptFor(questions, answerTimes),
@@ -283,6 +320,46 @@ export async function createSessionWithPlan(
       is_follow_up: question.isFollowUp,
       prompt: question.prompt,
     })),
+  });
+  if (error || !data) throw new RepositoryError("Could not start the interview.", error?.code ?? "NO_OWNED_ROW");
+  const result = Array.isArray(data) ? data[0] as Row | undefined : data as Row;
+  const sessionId = result && stringValue(result.session_id);
+  if (!sessionId) throw new RepositoryError("Could not find the created interview session.", "NO_OWNED_ROW");
+  const session = await getSession(supabase, userId, sessionId);
+  if (!session) throw new RepositoryError("Could not reload the created interview session.", "NO_OWNED_ROW");
+  return session;
+}
+
+/**
+ * Persists the full five-question blueprint before the interview starts so
+ * later turns can reuse the exact objective and evidence targets.
+ */
+export async function createSessionWithBlueprint(
+  supabase: SupabaseClient,
+  userId: string,
+  blueprint: InterviewBlueprint,
+): Promise<InterviewSession> {
+  assertConversationPlan(blueprint.questions);
+  const { data, error } = await supabase.rpc("create_conversation_session_with_blueprint", {
+    p_blueprint: {
+      status: blueprint.status,
+      fallback_reason: blueprint.fallbackReason,
+      max_follow_ups: blueprint.maxFollowUps,
+      max_questions: blueprint.maxQuestions,
+      questions: blueprint.questions.map((question) => ({
+        sequence: question.sequence,
+        category: question.category,
+        competency_id: question.competencyId,
+        difficulty: question.difficulty,
+        prompt: question.prompt,
+        objective: question.objective,
+        evidence_ids: question.evidenceIds,
+        expected_signals: question.expectedSignals,
+        missing_signal_prompts: question.missingSignalPrompts,
+        follow_up_limit: question.followUpLimit,
+        source_confidence: question.sourceConfidence,
+      })),
+    },
   });
   if (error || !data) throw new RepositoryError("Could not start the interview.", error?.code ?? "NO_OWNED_ROW");
   const result = Array.isArray(data) ? data[0] as Row | undefined : data as Row;
