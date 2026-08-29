@@ -25,6 +25,7 @@ export type Competency = {
   weaknesses: string[];
 };
 
+/** A source-backed engineering fact that can justify question planning and feedback. */
 export type EvidenceItem = {
   id: string;
   sourceKind: "cv" | "cover_letter" | "summary" | null;
@@ -39,6 +40,7 @@ export type EvidenceItem = {
   confidence: number;
 };
 
+/** Deterministic profile gate result used to allow or reject grounded interviews. */
 export type ProfileReadiness = {
   ready: boolean;
   missing: string[];
@@ -121,7 +123,9 @@ export type Profile = {
   expertise: string[];
   characteristics: string[];
   competencies: Competency[];
+  /** Persisted source-backed evidence. Legacy rows may hydrate without it. */
   evidence?: EvidenceItem[];
+  /** Latest deterministic readiness decision. Legacy rows may hydrate without it. */
   readiness?: ProfileReadiness;
   source: ProfileSource;
   createdAt: string;

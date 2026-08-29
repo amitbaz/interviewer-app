@@ -361,6 +361,43 @@ describe("extractEngineeringEvidence", () => {
 });
 
 describe("assessProfileReadiness", () => {
+  it("does not treat generic skill summaries as two concrete work examples", () => {
+    expect(assessProfileReadiness([
+      {
+        id: "evidence-1",
+        sourceKind: "cv",
+        sourceExcerpt: "React and TypeScript developer.",
+        projectOrEmployer: null,
+        ownership: null,
+        technologies: ["React", "TypeScript"],
+        decision: null,
+        constraint: null,
+        outcome: null,
+        recency: null,
+        confidence: 0.3,
+      },
+      {
+        id: "evidence-2",
+        sourceKind: "cv",
+        sourceExcerpt: "Built user interfaces with JavaScript.",
+        projectOrEmployer: null,
+        ownership: null,
+        technologies: ["JavaScript"],
+        decision: null,
+        constraint: null,
+        outcome: null,
+        recency: null,
+        confidence: 0.3,
+      },
+    ])).toEqual({
+      ready: false,
+      missing: expect.arrayContaining([
+        "two concrete engineering projects or work examples",
+        "responsibilities or outcomes",
+      ]),
+    });
+  });
+
   it("rejects a generic profile with only one vague work example", () => {
     expect(assessProfileReadiness([{
       id: "evidence-1",

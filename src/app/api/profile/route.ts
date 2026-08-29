@@ -6,6 +6,7 @@ import type { ProfileDraft, ProfileSource } from "@/lib/types";
 
 export const runtime = "nodejs";
 
+/** Returns the signed-in user's saved profile bundle and current demo-mode flag. */
 export async function GET() {
   try {
     const { supabase, user } = await requireUser();
@@ -15,6 +16,11 @@ export async function GET() {
   }
 }
 
+/**
+ * Extracts a profile from pasted text or a PDF, enforces the deterministic
+ * readiness gate, and persists only profiles with enough grounding to support
+ * personalized interview planning.
+ */
 export async function POST(request: Request) {
   let supabase;
   let user;
@@ -74,6 +80,7 @@ export async function POST(request: Request) {
   }
 }
 
+/** Persists user-confirmed profile edits while preserving the stored evidence bundle. */
 export async function PUT(request: Request) {
   let supabase;
   let user;

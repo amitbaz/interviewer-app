@@ -50,6 +50,7 @@ const evidenceSchema = z.object({
   confidence: z.number().min(0).max(1),
 });
 const evidenceListSchema = z.union([z.array(evidenceSchema), z.object({ evidence: z.array(evidenceSchema) })]);
+const workExampleVerbPattern = /\b(led|built|shipped|migrated|designed|owned|improved|implemented|launched|reduced|scaled|developed)\b/i;
 
 const handsOnStarter = `import { useEffect, useRef, useState } from "react";
 
@@ -166,6 +167,12 @@ function fallbackEngineeringEvidence(cvText: string, coverLetter: string): Evide
   return items;
 }
 
+/**
+ * Extracts software-engineering evidence items from user-provided source text.
+ * Returns only schema-validated facts, preserves nulls for unknown optional
+ * fields, and falls back to deterministic sentence extraction on provider
+ * failure or malformed JSON.
+ */
 export async function extractEngineeringEvidence(cvText: string, coverLetter: string): Promise<EvidenceItem[]> {
   const result = await modelJson(
     `You are extracting engineering evidence for an interview coach. Return only valid JSON. Produce an array of evidence objects. Never invent facts. Preserve null for unknown optional fields. Each item must include a sourceExcerpt and may include sourceKind, projectOrEmployer, ownership, technologies, decision, constraint, outcome, recency, confidence, and a stable id if available. Use only facts explicitly supported by the supplied text.\nCV:\n${cvText}\nCover letter:\n${coverLetter}`,
@@ -176,14 +183,31 @@ export async function extractEngineeringEvidence(cvText: string, coverLetter: st
   return list.map((item, index) => normalizeEvidenceItem(item, index));
 }
 
+function hasConcreteWorkAnchor(item: EvidenceItem): boolean {
+  if (item.projectOrEmployer?.trim()) return true;
+  const supportingText = [
+    item.sourceExcerpt,
+    item.ownership,
+    item.decision,
+    item.constraint,
+    item.outcome,
+  ].filter((value): value is string => typeof value === "string" && value.trim().length > 0).join(" ");
+  return workExampleVerbPattern.test(supportingText)
+    && Boolean(item.ownership?.trim() || item.decision?.trim() || item.outcome?.trim() || item.constraint?.trim());
+}
+
 function concreteEvidenceCount(evidence: EvidenceItem[]): number {
   return evidence.filter((item) => {
-    const hasProject = Boolean(item.projectOrEmployer?.trim()) || Boolean(item.sourceExcerpt.trim());
     const hasSpecifics = item.technologies.length > 0 || Boolean(item.ownership?.trim()) || Boolean(item.outcome?.trim()) || Boolean(item.decision?.trim());
-    return hasProject && hasSpecifics;
+    return hasConcreteWorkAnchor(item) && hasSpecifics;
   }).length;
 }
 
+/**
+ * Applies the deterministic profile-quality gate for personalized interviews.
+ * The gate requires concrete work examples, identifiable technologies, and
+ * ownership or outcome signals before the profile can start a grounded session.
+ */
 export function assessProfileReadiness(evidence: EvidenceItem[]): ProfileReadiness {
   const missing = new Set<string>();
   if (concreteEvidenceCount(evidence) < 2) missing.add("two concrete engineering projects or work examples");

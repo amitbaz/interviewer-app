@@ -15,6 +15,7 @@ import type {
 
 type Row = Record<string, unknown>;
 
+/** Wraps storage-layer failures in user-safe messages plus a stable error code. */
 export class RepositoryError extends Error {
   constructor(message: string, public readonly code = "REPOSITORY_ERROR") {
     super(message);
@@ -157,6 +158,11 @@ export function profileScopeRows(userId: string, profile: ProfileDraft) {
   }));
 }
 
+/**
+ * Loads the signed-in user's latest profile bundle, including source documents,
+ * active competencies, persisted evidence, and a readiness state that can
+ * hydrate legacy rows when newer columns are absent.
+ */
 export async function getProfile(supabase: SupabaseClient, userId: string): Promise<Profile | null> {
   const { data: profile, error } = await supabase.from("profiles").select("*").eq("user_id", userId).maybeSingle();
   if (error) throw new RepositoryError("Could not load your profile.", error.code);
@@ -182,7 +188,10 @@ export async function getProfile(supabase: SupabaseClient, userId: string): Prom
   );
 }
 
-/** Replaces the owned profile bundle atomically while preserving inactive historical evidence. */
+/**
+ * Replaces the signed-in user's profile bundle atomically with the latest
+ * source text, extracted evidence, readiness state, and competency scope.
+ */
 export async function saveProfile(
   supabase: SupabaseClient,
   userId: string,
