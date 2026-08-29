@@ -147,3 +147,14 @@ export type InterviewSession = {
   createdAt: string;
   updatedAt: string;
 };
+
+/** Deterministic progress signals derived from completed coaching evidence. */
+export type ProgressSnapshot = {
+  readiness: number | null;
+  latestScore: number | null;
+  trend: "improving" | "stable" | "declining" | "baseline" | null;
+  recentScores: number[];
+  strongest: Competency | null;
+  weakest: Competency | null;
+  recurringWeaknesses: string[];
+};
