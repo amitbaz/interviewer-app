@@ -1,6 +1,6 @@
 # Relay — AI Interview Coach
 
-A personal, single-user interview-practice POC for experienced frontend engineers.
+A personal, authenticated interview-practice POC for experienced frontend engineers.
 
 ## What works now
 
@@ -37,7 +37,7 @@ Create the key in Google AI Studio. Gemini's free tier is rate-limited and Googl
 
 The hosted POC uses Supabase Postgres, Auth, and private Storage. For a local or Vercel deployment:
 
-1. Create a free Supabase project. Install and authenticate the Supabase CLI, link the repository to the project, and run `supabase db push`. If the CLI is unavailable, paste `supabase/migrations/202608290001_adaptive_interview_foundation.sql` into the Supabase SQL Editor and run it.
+1. Create a free Supabase project. Install and authenticate the Supabase CLI, link the repository to the project, and run `supabase db push`. If the CLI is unavailable, paste and run every file in `supabase/migrations/` in filename order in the Supabase SQL Editor. Existing projects must also run `202608290002_complete_adaptive_interview_loop.sql` after pulling this update.
 2. Copy the Supabase project URL and publishable key from Project Settings → API into `.env.local`:
 
    ```bash
@@ -56,6 +56,8 @@ The hosted POC uses Supabase Postgres, Auth, and private Storage. For a local or
 
 6. In Vercel, add `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `GEMINI_API_KEY`, and optional `GEMINI_MODEL` as project environment variables, then deploy from the connected repository.
 
+Keep uploaded CV PDFs under 4 MB. Vercel Functions accept request payloads up to 4.5 MB, and the smaller application limit leaves room for multipart form overhead. Gemini errors shown by the app include a safe status and provider message; a `401`/`403` points to the API key or its restrictions, `404` points to `GEMINI_MODEL`, and `429` indicates rate limiting.
+
 Supabase's free projects pause after one week of inactivity and do not include automatic backups. Resume inactive projects when needed and export/backup important data separately.
 
 ## Verify
@@ -69,6 +71,4 @@ The Webpack verification build is used because Turbopack's CSS worker cannot bin
 
 ## Next slices
 
-- PDF upload/text extraction and editable profile confirmation
-- Voice recording and transcription
 - Executable preview and automated test runner for the hands-on workspace

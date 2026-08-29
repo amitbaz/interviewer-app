@@ -89,4 +89,31 @@ describe("adaptive interview planning", () => {
     expect(withThree).toHaveLength(8);
     expect(appendFollowUp(withThree, followUp)).toBe(withThree);
   });
+
+  it("uses the injected current time when ranking practice recency", () => {
+    const practicedLongAgo: Competency = {
+      ...unassessedReact,
+      id: "older-practice",
+      name: "JavaScript",
+      relevance: 0.72,
+      confidence: "high",
+      lastPracticedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const practicedRecently: Competency = {
+      ...unassessedReact,
+      id: "recent-practice",
+      name: "TypeScript",
+      relevance: 0.9,
+      confidence: "high",
+      lastPracticedAt: "2026-12-31T00:00:00.000Z",
+    };
+
+    const plan = buildInterviewPlan(
+      [practicedRecently, practicedLongAgo],
+      "Senior",
+      new Date("2027-01-01T00:00:00.000Z"),
+    );
+
+    expect(plan[1].competencyName).toBe("JavaScript");
+  });
 });

@@ -2,7 +2,9 @@ import "server-only";
 
 import { z } from "zod";
 import { applyEvaluation } from "@/lib/competencies";
-import type { Evaluation, HandsOnExercise, InterviewSession, PlannedQuestion, Profile, ProfileDraft, ProfileSource } from "@/lib/types";
+import { geminiModel, geminiRequestError } from "@/lib/gemini";
+import { MAX_CV_PDF_BYTES } from "@/lib/upload-limits";
+import type { Evaluation, FollowUpDraft, HandsOnExercise, InterviewSession, PlannedQuestion, Profile, ProfileDraft, ProfileSource } from "@/lib/types";
 
 const dimensions = ["correctness", "depth", "clarity", "structure", "practicalExperience", "tradeOffAwareness", "communication", "confidence", "relevance"] as const;
 const profileSchema = z.object({
@@ -15,7 +17,11 @@ const evaluationSchema = z.object({
   dimensions: z.object(Object.fromEntries(dimensions.map((dimension) => [dimension, z.number().min(0).max(10).optional()]))).optional(),
   strengths: z.array(z.string()), needsWork: z.array(z.string()),
 });
-const turnSchema = z.object({ question: z.string().min(1), evaluation: evaluationSchema });
+const turnSchema = z.object({
+  question: z.string().min(1),
+  shouldFollowUp: z.boolean(),
+  evaluation: evaluationSchema,
+});
 
 const handsOnStarter = `import { useEffect, useRef, useState } from "react";
 
@@ -49,10 +55,10 @@ async function modelJson<T>(prompt: string, schema: z.ZodType<T>): Promise<T | n
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return null;
   try {
-    const model = process.env.GEMINI_MODEL ?? "gemini-3.6-flash";
+    const model = geminiModel();
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
       method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: `${prompt}\nReturn only valid JSON.` }] }], generationConfig: { responseMimeType: "application/json", temperature: 0.35 } }),
+      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: `${prompt}\nReturn only valid JSON.` }] }], generationConfig: { responseMimeType: "application/json" } }),
       signal: AbortSignal.timeout(45_000),
     });
     if (!response.ok) return null;
@@ -62,17 +68,26 @@ async function modelJson<T>(prompt: string, schema: z.ZodType<T>): Promise<T | n
   } catch { return null; }
 }
 
+/** Extracts factual CV text with Gemini, enforcing hosted upload limits and actionable failures. */
 export async function extractPdfText(file: File): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("Add GEMINI_API_KEY to extract text from a PDF.");
-  if (file.size > 10 * 1024 * 1024) throw new Error("Keep CV PDFs under 10 MB.");
-  const model = process.env.GEMINI_MODEL ?? "gemini-3.6-flash";
+  if (file.size > MAX_CV_PDF_BYTES) throw new Error("Keep CV PDFs under 4 MB so the upload fits Vercel's request limit.");
+  const model = geminiModel();
   const data = Buffer.from(await file.arrayBuffer()).toString("base64");
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
     method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-    body: JSON.stringify({ contents: [{ parts: [{ text: "Extract the readable text from this CV. Preserve factual details, headings, job titles, dates, technologies, and achievements. Return only the extracted text." }, { inlineData: { mimeType: "application/pdf", data } }] }], generationConfig: { temperature: 0 } }), signal: AbortSignal.timeout(60_000),
+    body: JSON.stringify({
+      contents: [{
+        parts: [
+          { text: "Extract the readable text from this CV. Preserve factual details, headings, job titles, dates, technologies, and achievements. Return only the extracted text." },
+          { inlineData: { mimeType: "application/pdf", data } },
+        ],
+      }],
+    }),
+    signal: AbortSignal.timeout(60_000),
   });
-  if (!response.ok) throw new Error("Gemini could not read this PDF. Paste the text instead.");
+  if (!response.ok) throw await geminiRequestError(response, "the PDF", model);
   const body = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
   const text = body.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("").trim();
   if (!text || text.length < 80) throw new Error("Not enough readable text was found in that PDF. Paste a summary instead.");
@@ -92,7 +107,10 @@ function cvExcerpt(source: ProfileSource, planned: PlannedQuestion): string {
   if (!text) return "";
   const tokens = (planned.competencyName ?? "").toLowerCase().split(/\W+/).filter(Boolean);
   const sentences = text.split(/(?<=[.!?])\s+/);
-  return sentences.find((sentence) => tokens.some((token) => token.length > 2 && sentence.toLowerCase().includes(token))) ?? sentences[0] ?? text.slice(0, 420);
+  const selected = sentences.find((sentence) => tokens.some((token) => token.length > 2 && sentence.toLowerCase().includes(token)))
+    ?? sentences[0]
+    ?? text;
+  return selected.slice(0, 420).trimEnd();
 }
 
 function promptForPlan(planned: PlannedQuestion, source: ProfileSource): string {
@@ -126,19 +144,83 @@ export function initialQuestion(profile: Pick<ProfileDraft, "role">, planned: Pl
   return promptForPlan(planned, source);
 }
 
-export async function nextTurn(profile: Pick<ProfileDraft, "role" | "seniority" | "expertise" | "narrative">, planned: PlannedQuestion, source: ProfileSource, session: InterviewSession, answer: string) {
+function deterministicFollowUp(planned: PlannedQuestion): string {
+  const competency = planned.competencyName ?? "that decision";
+  return `Make the ${competency} example more concrete: what trade-off did you choose, and how did you measure the outcome?`;
+}
+
+function followUpDraft(planned: PlannedQuestion, prompt: string): FollowUpDraft {
+  return {
+    category: planned.category,
+    competencyId: planned.competencyId,
+    competencyName: planned.competencyName,
+    difficulty: planned.difficulty,
+    isFollowUp: true,
+    prompt,
+  };
+}
+
+/** Evaluates the current answer and proposes either one persisted follow-up or the next plan prompt. */
+export async function nextTurn(
+  profile: Pick<ProfileDraft, "role" | "seniority" | "expertise" | "narrative">,
+  answeredQuestion: PlannedQuestion,
+  nextPlannedQuestion: PlannedQuestion | null,
+  source: ProfileSource,
+  session: InterviewSession,
+  answer: string,
+): Promise<{ evaluation: Evaluation; nextQuestion: string | null; followUp: FollowUpDraft | null }> {
   const transcript = session.messages.map((message) => `${message.role}: ${message.content}`).join("\n");
-  const context = { role: profile.role, seniority: profile.seniority, expertise: profile.expertise, narrative: profile.narrative, cvExcerpt: cvExcerpt(source, planned), plan: { category: planned.category, competency: planned.competencyName, difficulty: planned.difficulty }, transcript, latestAnswer: answer };
-  const result = await modelJson(`You are an experienced senior-frontend interviewer. Ask exactly one concise question for the supplied plan. Do not praise, coach, reveal scores, or teach. Privately evaluate the latest answer. Context: ${JSON.stringify(context)}`, turnSchema);
-  return result ? { question: result.question, evaluation: normalizedEvaluation(planned, result.evaluation) } : { question: promptForPlan(planned, source), evaluation: evaluationFor(planned, answer) };
+  const followUpCount = session.questions.filter((question) => question.isFollowUp).length;
+  const canFollowUp = !answeredQuestion.isFollowUp && session.questions.length < 8 && followUpCount < 3;
+  const context = {
+    role: profile.role,
+    seniority: profile.seniority,
+    expertise: profile.expertise,
+    narrative: profile.narrative,
+    cvExcerpt: cvExcerpt(source, answeredQuestion),
+    answeredPlan: {
+      category: answeredQuestion.category,
+      competency: answeredQuestion.competencyName,
+      difficulty: answeredQuestion.difficulty,
+    },
+    nextPlan: nextPlannedQuestion ? {
+      category: nextPlannedQuestion.category,
+      competency: nextPlannedQuestion.competencyName,
+      difficulty: nextPlannedQuestion.difficulty,
+      cvExcerpt: cvExcerpt(source, nextPlannedQuestion),
+    } : null,
+    canFollowUp,
+    transcript,
+    latestAnswer: answer,
+  };
+  const result = await modelJson(
+    `You are an experienced senior-frontend interviewer. Privately evaluate the latest answer. Set shouldFollowUp only when a concise clarification is necessary and canFollowUp is true. If following up, question must probe the answered plan. Otherwise, question must ask the supplied next plan. Do not praise, coach, reveal scores, or teach. Context: ${JSON.stringify(context)}`,
+    turnSchema,
+  );
+  const evaluation = result
+    ? normalizedEvaluation(answeredQuestion, result.evaluation)
+    : evaluationFor(answeredQuestion, answer);
+  const shouldFollowUp = canFollowUp && (result?.shouldFollowUp ?? (evaluation.score < 6.5 || answer.trim().length < 120));
+  if (shouldFollowUp) {
+    return {
+      evaluation,
+      nextQuestion: null,
+      followUp: followUpDraft(answeredQuestion, result?.question ?? deterministicFollowUp(answeredQuestion)),
+    };
+  }
+  return {
+    evaluation,
+    nextQuestion: nextPlannedQuestion ? result?.question ?? promptForPlan(nextPlannedQuestion, source) : null,
+    followUp: null,
+  };
 }
 
 export function handsOnExercise(profile: Pick<Profile, "role">): HandsOnExercise {
-  return { title: "Accessible product search", durationMinutes: 60, briefing: `You are joining a product team building a catalog experience. Implement a production-minded React + TypeScript search component appropriate for a ${profile.role ?? "frontend engineer"}. You may work from the starter and explain decisions as you go.`, requirements: ["Fetch matching products from /api/products?q=… after the user pauses typing.", "Show clear loading, empty, and recoverable error states.", "Prevent stale responses from replacing newer results.", "Make suggestions navigable with the keyboard and understandable to assistive technology.", "Keep component responsibilities and TypeScript models deliberate."], starterCode: handsOnStarter };
+  return { title: "Accessible product search", durationMinutes: 60, briefing: `You are joining a product team building a catalog experience. Implement a production-minded React + TypeScript search component appropriate for a ${profile.role ?? "frontend engineer"}. You may work from the starter and explain decisions as you go.`, requirements: ["Fetch matching products from /api/products?q=… after the user pauses typing.", "Show clear loading, empty, and recoverable error states.", "Prevent stale responses from replacing newer results.", "Make suggestions navigable with the keyboard and understandable to assistive technology.", "Keep component responsibilities and TypeScript models deliberate."], starterCode: handsOnStarter, interviewerOpening: "Start by reading the brief, then tell me which requirements you would clarify before you begin implementing." };
 }
 
 export async function handsOnCheckpoint(profile: Pick<Profile, "role" | "seniority">, session: InterviewSession, code: string, note: string) {
-  const count = Math.max(0, session.checkpoints.length - 1);
+  const count = session.checkpoints.length;
   const transcript = session.messages.slice(-6).map((message) => `${message.role}: ${message.content}`).join("\n");
   const result = await modelJson(`You are a senior frontend interviewer observing a live coding exercise. Do not provide code or solve the exercise. Ask one short, probing interviewer question grounded in the candidate's latest code and note. ${count >= 1 ? "Introduce this new requirement once: the API may return 50,000 results, and keyboard navigation must remain smooth." : "Focus on their current reasoning."}\nProfile: ${JSON.stringify({ role: profile.role, seniority: profile.seniority })}\nRecent transcript:\n${transcript}\nCandidate note: ${note}\nLatest code:\n${code}`, z.object({ question: z.string() }));
   if (result) return result.question;

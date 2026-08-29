@@ -47,31 +47,26 @@ describe("competencyScopeFor", () => {
     expect(rows.every((row) => !("estimated_level" in row) && !("average_score" in row))).toBe(true);
   });
 
-  it("upserts deterministic scope through the persisted normalized-name conflict target", async () => {
-    let conflictTarget = "";
-    let competencyRows: Array<Record<string, unknown>> = [];
+  it("saves profile, sources, and active scope through one ownership-scoped RPC", async () => {
+    const calls: Array<{ name: string; payload: Record<string, unknown> }> = [];
     const profileRow = {
       user_id: "user-1", role: "Frontend Engineer", seniority: "Senior", summary: "", narrative: "",
       expertise: ["React"], characteristics: [], created_at: "created", updated_at: "updated",
     };
     const supabase = {
+      rpc: async (name: string, payload: Record<string, unknown>) => {
+        calls.push({ name, payload });
+        return { data: null, error: null };
+      },
       from: (table: string) => {
         if (table === "profiles") return {
-          upsert: () => ({ select: () => ({ single: async () => ({ data: profileRow, error: null }) }) }),
           select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: profileRow, error: null }) }) }),
         };
         if (table === "source_documents") return {
-          delete: () => ({ eq: async () => ({ error: null }) }),
-          insert: async () => ({ error: null }),
           select: () => ({ eq: async () => ({ data: [], error: null }) }),
         };
         return {
-          upsert: async (rows: Array<Record<string, unknown>>, options: { onConflict: string }) => {
-            competencyRows = rows;
-            conflictTarget = options.onConflict;
-            return { error: null };
-          },
-          select: () => ({ eq: () => ({ order: async () => ({ data: [], error: null }) }) }),
+          select: () => ({ eq: () => ({ eq: () => ({ order: async () => ({ data: [], error: null }) }) }) }),
         };
       },
     };
@@ -81,8 +76,14 @@ describe("competencyScopeFor", () => {
       competencies: [{ name: "Model supplied but ignored", relevance: 0.01 }],
     }, { cvText: "CV", coverLetter: "" });
 
-    expect(conflictTarget).toBe("user_id,normalized_name");
-    expect(competencyRows).toContainEqual(expect.objectContaining({ name: "React architecture", relevance: 0.9 }));
-    expect(competencyRows).not.toContainEqual(expect.objectContaining({ name: "Model supplied but ignored" }));
+    expect(calls).toEqual([{
+      name: "save_profile_bundle",
+      payload: expect.objectContaining({
+        p_scope: expect.arrayContaining([expect.objectContaining({ name: "React architecture", relevance: 0.9 })]),
+      }),
+    }]);
+    expect((calls[0].payload.p_scope as Array<Record<string, unknown>>)).not.toContainEqual(
+      expect.objectContaining({ name: "Model supplied but ignored" }),
+    );
   });
 });

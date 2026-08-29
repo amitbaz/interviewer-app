@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { geminiModel, geminiRequestError } from "@/lib/gemini";
 import { requireUser } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -22,7 +23,7 @@ export async function POST(request: Request) {
   if (audio.size > 10 * 1024 * 1024) return NextResponse.json({ error: "Keep recordings under 10 MB for transcription." }, { status: 413 });
 
   try {
-    const model = process.env.GEMINI_MODEL ?? "gemini-3.6-flash";
+    const model = geminiModel();
     const data = Buffer.from(await audio.arrayBuffer()).toString("base64");
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
       method: "POST",
@@ -32,16 +33,21 @@ export async function POST(request: Request) {
           { text: "Transcribe this interview answer accurately. Return only the spoken words, preserving the speaker's meaning. Do not add a heading, notes, or commentary." },
           { inlineData: { mimeType: audio.type || "audio/webm", data } },
         ] }],
-        generationConfig: { temperature: 0 },
       }),
       signal: AbortSignal.timeout(45_000),
     });
-    if (!response.ok) return NextResponse.json({ error: "Gemini could not transcribe this recording. Please try again or type your answer." }, { status: 502 });
+    if (!response.ok) {
+      const providerError = await geminiRequestError(response, "the recording", model);
+      return NextResponse.json({ error: providerError.message }, { status: 502 });
+    }
     const body = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
     const transcript = body.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("").trim();
     if (!transcript) return NextResponse.json({ error: "No speech was detected. You can type your answer instead." }, { status: 422 });
     return NextResponse.json({ transcript });
-  } catch {
+  } catch (caught) {
+    if (caught instanceof Error && caught.message.startsWith("GEMINI_MODEL")) {
+      return NextResponse.json({ error: caught.message }, { status: 503 });
+    }
     return NextResponse.json({ error: "Transcription is unavailable right now. You can type your answer instead." }, { status: 502 });
   }
 }

@@ -134,7 +134,7 @@ export async function getProfile(supabase: SupabaseClient, userId: string): Prom
 
   const [documentsResult, competenciesResult] = await Promise.all([
     supabase.from("source_documents").select("*").eq("user_id", userId),
-    supabase.from("competencies").select("*").eq("user_id", userId).order("name"),
+    supabase.from("competencies").select("*").eq("user_id", userId).eq("is_active", true).order("name"),
   ]);
   if (documentsResult.error) throw new RepositoryError("Could not load your source documents.", documentsResult.error.code);
   if (competenciesResult.error) throw new RepositoryError("Could not load your competencies.", competenciesResult.error.code);
@@ -146,48 +146,31 @@ export async function getProfile(supabase: SupabaseClient, userId: string): Prom
   );
 }
 
+/** Replaces the owned profile bundle atomically while preserving inactive historical evidence. */
 export async function saveProfile(
   supabase: SupabaseClient,
   userId: string,
   profile: ProfileDraft,
   source: ProfileSource,
 ): Promise<Profile> {
-  const { data: savedProfile, error: profileError } = await supabase
-    .from("profiles")
-    .upsert({
-      user_id: userId,
-      role: profile.role,
-      seniority: profile.seniority,
-      summary: profile.summary,
-      narrative: profile.narrative,
-      expertise: profile.expertise,
-      characteristics: profile.characteristics,
-      updated_at: new Date().toISOString(),
-    }, { onConflict: "user_id" })
-    .select("*")
-    .single();
-  if (profileError || !savedProfile) throw new RepositoryError("Could not save your profile.", profileError?.code);
-
-  const { error: deleteError } = await supabase.from("source_documents").delete().eq("user_id", userId);
-  if (deleteError) throw new RepositoryError("Could not replace your source documents.", deleteError.code);
-
-  const sourceRows = [
-    { kind: "cv", content: source.cvText, file_name: source.cvFileName ?? null },
-    { kind: "cover_letter", content: source.coverLetter, file_name: source.coverLetterFileName ?? null },
-  ].filter((document) => document.content.trim().length > 0)
-    .map((document) => ({ ...document, user_id: userId }));
-  if (sourceRows.length) {
-    const { error: sourceError } = await supabase.from("source_documents").insert(sourceRows);
-    if (sourceError) throw new RepositoryError("Could not save your source documents.", sourceError.code);
-  }
-
-  const competencyRows = profileScopeRows(userId, profile);
-  if (competencyRows.length) {
-    const { error: competencyError } = await supabase
-      .from("competencies")
-      .upsert(competencyRows, { onConflict: "user_id,normalized_name" });
-    if (competencyError) throw new RepositoryError("Could not save your competency scope.", competencyError.code);
-  }
+  const { error } = await supabase.rpc("save_profile_bundle", {
+    p_role: profile.role,
+    p_seniority: profile.seniority,
+    p_summary: profile.summary,
+    p_narrative: profile.narrative,
+    p_expertise: profile.expertise,
+    p_characteristics: profile.characteristics,
+    p_cv_text: source.cvText,
+    p_cv_file_name: source.cvFileName ?? null,
+    p_cover_letter_text: source.coverLetter,
+    p_cover_letter_file_name: source.coverLetterFileName ?? null,
+    p_scope: profileScopeRows(userId, profile).map((row) => ({
+      name: row.name,
+      relevance: row.relevance,
+      expected_level: row.expected_level,
+    })),
+  });
+  if (error) throw new RepositoryError("Could not save your profile.", error.code);
 
   const saved = await getProfile(supabase, userId);
   if (!saved) throw new RepositoryError("Your saved profile could not be reloaded.", "NO_OWNED_ROW");

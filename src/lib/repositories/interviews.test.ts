@@ -2,7 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
-import { assertConversationPlan, createSessionWithPlan, mapSession } from "@/lib/repositories/interviews";
+import {
+  assertConversationPlan,
+  completeHandsOnSession,
+  createSessionWithPlan,
+  mapSession,
+  recordConversationTurn,
+} from "@/lib/repositories/interviews";
 
 describe("mapSession", () => {
   it("maps persisted questions into an ordered plan and transcript", () => {
@@ -74,4 +80,122 @@ describe("mapSession", () => {
       payload: { p_plan: expect.arrayContaining([expect.objectContaining({ sequence: 1, category: "introduction" })]) },
     }]);
   });
+
+  it("hydrates persisted hands-on evaluations and interviewer history", () => {
+    const mapped = mapSession(
+      {
+        id: "hands-on-1", user_id: "user-1", kind: "hands-on", status: "complete",
+        started_at: "2026-08-29T10:00:00.000Z", completed_at: "2026-08-29T11:00:00.000Z",
+        exercise: { interviewerOpening: "Clarify the brief first." }, result_summary: { summary: "Review" },
+        overall_score: 7, created_at: "2026-08-29T10:00:00.000Z", updated_at: "2026-08-29T11:00:00.000Z",
+      },
+      [],
+      [],
+      [{
+        id: "checkpoint-1", code: "const result = true;", note: "I separated state ownership.",
+        interviewer_prompt: "How will you prevent stale responses?", created_at: "2026-08-29T10:20:00.000Z",
+      }],
+      new Map([["architecture-id", "React architecture"]]),
+      [{
+        id: "evaluation-1", competency_id: "architecture-id", overall_score: 7,
+        dimensions: { structure: 8 }, strengths: ["Clear ownership"], weaknesses: ["Add cancellation"],
+      }],
+    );
+
+    expect(mapped.evaluations).toEqual([expect.objectContaining({
+      competencyId: "architecture-id",
+      competency: "React architecture",
+      score: 7,
+    })]);
+    expect(mapped.messages.map((message) => message.content)).toEqual([
+      "Clarify the brief first.",
+      "Checkpoint: I separated state ownership.",
+      "How will you prevent stale responses?",
+    ]);
+  });
+
+  it("records an answer and its next persisted question in one RPC", async () => {
+    const calls: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const supabase = rpcHydrationClient(calls, "conversation");
+
+    await recordConversationTurn(
+      supabase as never,
+      "user-1",
+      "question-1",
+      "I compared the trade-offs.",
+      { score: 7, competencyId: "react-id", competency: "React", dimensions: {}, strengths: ["Specific"], needsWork: ["Quantify"] },
+      { nextQuestionId: "question-2", nextPrompt: "How would you design the system?", followUp: null },
+    );
+
+    expect(calls).toEqual([{
+      name: "record_conversation_turn",
+      payload: expect.objectContaining({
+        p_question_id: "question-1",
+        p_next_question_id: "question-2",
+        p_next_prompt: "How would you design the system?",
+        p_follow_up: null,
+      }),
+    }]);
+  });
+
+  it("completes hands-on evaluation and competency evidence in one RPC", async () => {
+    const calls: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const supabase = rpcHydrationClient(calls, "hands-on", "complete");
+
+    await completeHandsOnSession(
+      supabase as never,
+      "user-1",
+      "session-1",
+      {
+        overallScore: 7,
+        summary: "A useful signal.",
+        evaluations: [{
+          score: 7,
+          competencyId: null,
+          competency: "React architecture",
+          dimensions: { structure: 8 },
+          strengths: ["Clear ownership"],
+          needsWork: ["Add cancellation"],
+        }],
+      },
+    );
+
+    expect(calls).toEqual([{
+      name: "complete_hands_on_session",
+      payload: expect.objectContaining({
+        p_session_id: "session-1",
+        p_overall_score: 7,
+        p_evaluations: [expect.objectContaining({ competency: "React architecture", score: 7 })],
+      }),
+    }]);
+  });
 });
+
+function rpcHydrationClient(
+  calls: Array<{ name: string; payload: Record<string, unknown> }>,
+  kind: "conversation" | "hands-on",
+  status: "active" | "complete" = "active",
+) {
+  const sessionRow = {
+    id: "session-1", user_id: "user-1", kind, status,
+    started_at: "2026-08-29T10:00:00.000Z", completed_at: status === "complete" ? "2026-08-29T11:00:00.000Z" : null,
+    exercise: {}, result_summary: {}, overall_score: status === "complete" ? 7 : null,
+    created_at: "2026-08-29T10:00:00.000Z", updated_at: "2026-08-29T10:00:00.000Z",
+  };
+  const emptyQuery = {
+    eq: () => emptyQuery,
+    in: async () => ({ data: [], error: null }),
+    order: async () => ({ data: [], error: null }),
+  };
+  const sessionQuery = {
+    eq: () => sessionQuery,
+    maybeSingle: async () => ({ data: sessionRow, error: null }),
+  };
+  return {
+    rpc: async (name: string, payload: Record<string, unknown>) => {
+      calls.push({ name, payload });
+      return { data: [{ session_id: "session-1" }], error: null };
+    },
+    from: (table: string) => ({ select: () => table === "interview_sessions" ? sessionQuery : emptyQuery }),
+  };
+}

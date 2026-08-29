@@ -8,7 +8,6 @@ import type {
 const difficulties: Difficulty[] = ["foundational", "intermediate", "senior", "advanced"];
 const categories: QuestionCategory[] = ["introduction", "experience", "technical", "architecture", "behavioral"];
 const plannerTimestamp = "1970-01-01T00:00:00.000Z";
-const stalenessReference = Date.parse("2026-08-29T00:00:00.000Z");
 
 function normalizedSeniority(seniority: string): Difficulty {
   const value = seniority.toLowerCase();
@@ -38,18 +37,18 @@ function uncertainty(competency: Competency): number {
   return 0;
 }
 
-function staleness(competency: Competency): number {
+function staleness(competency: Competency, referenceTime: number): number {
   if (!competency.lastPracticedAt) return 1;
   const timestamp = Date.parse(competency.lastPracticedAt);
   if (Number.isNaN(timestamp)) return 1;
-  return Math.max(0, Math.min(1, (stalenessReference - timestamp) / (365 * 24 * 60 * 60 * 1000)));
+  return Math.max(0, Math.min(1, (referenceTime - timestamp) / (365 * 24 * 60 * 60 * 1000)));
 }
 
-function priority(competency: Competency): number {
+function priority(competency: Competency, referenceTime: number): number {
   return competency.relevance * 0.45
     + weakness(competency) * 0.25
     + uncertainty(competency) * 0.2
-    + staleness(competency) * 0.1;
+    + staleness(competency, referenceTime) * 0.1;
 }
 
 function matchesCategory(competency: Competency, category: QuestionCategory): boolean {
@@ -64,12 +63,13 @@ function selectCompetency(
   competencies: Competency[],
   category: QuestionCategory,
   previousCompetencyId: string | null,
+  referenceTime: number,
 ): Competency | null {
   const eligible = competencies.filter((competency) => competency.id !== previousCompetencyId);
   const categoryMatches = eligible.filter((competency) => matchesCategory(competency, category));
   const candidates = categoryMatches.length ? categoryMatches : eligible;
 
-  return [...candidates].sort((left, right) => priority(right) - priority(left) || left.id.localeCompare(right.id))[0] ?? null;
+  return [...candidates].sort((left, right) => priority(right, referenceTime) - priority(left, referenceTime) || left.id.localeCompare(right.id))[0] ?? null;
 }
 
 function promptFor(category: QuestionCategory, competency: Competency | null): string {
@@ -99,13 +99,19 @@ export function chooseDifficulty(competency: Competency, seniority: string): Dif
   return competency.estimatedLevel;
 }
 
-export function buildInterviewPlan(competencies: Competency[], seniority: string): PlannedQuestion[] {
+/** Builds the five-question backbone using evidence priority relative to the injected current time. */
+export function buildInterviewPlan(
+  competencies: Competency[],
+  seniority: string,
+  now: Date = new Date(),
+): PlannedQuestion[] {
   let previousCompetencyId: string | null = null;
+  const referenceTime = Number.isNaN(now.getTime()) ? Date.now() : now.getTime();
 
   return categories.map((category, index) => {
     const competency = category === "introduction"
       ? null
-      : selectCompetency(competencies, category, previousCompetencyId);
+      : selectCompetency(competencies, category, previousCompetencyId, referenceTime);
     previousCompetencyId = competency?.id ?? previousCompetencyId;
 
     const sequence = index + 1;

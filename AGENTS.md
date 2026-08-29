@@ -24,6 +24,15 @@ No automated test runner is configured. When adding coverage, follow red → gre
 
 Use concise, imperative Conventional Commit-style subjects, such as `docs: add interview design` or `feat: save interview checkpoints`. PRs should describe user-visible behavior, list verification commands, link the relevant issue or design note, and include screenshots for UI changes. Keep secrets in `.env.local`; never commit `GEMINI_API_KEY` or the local SQLite database.
 
+## Source Code Documentation
+
+- Document public modules, exported functions and types, API routes, and complex domain models: state their purpose, inputs and outputs, side effects, failure behavior, and important invariants.
+- Write comments for intent and trade-offs—especially decisions, constraints, edge cases, security, or performance rationale that code alone cannot convey. Prefer clearer code over comments that merely restate it.
+- Keep documentation close to the code it describes and update or remove it in the same change when behavior changes.
+- Use examples for non-obvious APIs or workflows when they make correct usage clearer; keep examples minimal, runnable in context, and aligned with the current interface.
+- Do not leave stale, speculative, or redundant comments. Use actionable TODOs only when they include the reason and a tracked next step.
+- Treat documentation as part of code review: verify it is accurate, necessary, and helpful to a future maintainer.
+
 ## UI & Animation Guidelines (Mobile-First)
 
 1. **Hardware-Accelerated Animations Only**

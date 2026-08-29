@@ -38,6 +38,12 @@ export type PlannedQuestion = {
   createdAt: string;
 };
 
+/** Server-generated follow-up content; sequence and identifiers are assigned transactionally. */
+export type FollowUpDraft = Pick<
+  PlannedQuestion,
+  "category" | "competencyId" | "competencyName" | "difficulty" | "isFollowUp" | "prompt"
+>;
+
 export type Evaluation = {
   score: number;
   competencyId: string | null;
@@ -107,12 +113,14 @@ export type HandsOnExercise = {
   briefing: string;
   requirements: string[];
   starterCode: string;
+  interviewerOpening: string;
 };
 
 export type HandsOnCheckpoint = {
   id: string;
   code: string;
   note: string;
+  interviewerPrompt: string;
   createdAt: string;
 };
 

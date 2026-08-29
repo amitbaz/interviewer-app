@@ -43,3 +43,6 @@ next-env.d.ts
 
 # Personal POC data
 /data/
+
+# Supabase CLI project-link metadata
+/supabase/.temp/

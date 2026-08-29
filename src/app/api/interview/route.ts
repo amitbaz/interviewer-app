@@ -1,13 +1,23 @@
 import { NextResponse } from "next/server";
 import { completeSession as summarizeSession, evaluateHandsOn, handsOnCheckpoint, handsOnExercise, initialQuestion, nextTurn } from "@/lib/coach";
 import { buildInterviewPlan } from "@/lib/interview-planner";
-import { completeSession, createHandsOnSession, createSessionWithPlan, getSession, listRecentSessions, recordAnswerAndEvaluation, saveHandsOnCheckpoint } from "@/lib/repositories/interviews";
+import {
+  completeHandsOnSession,
+  completeSession,
+  createHandsOnSession,
+  createSessionWithPlan,
+  getSession,
+  listRecentSessions,
+  recordConversationTurn,
+  saveHandsOnCheckpoint,
+} from "@/lib/repositories/interviews";
 import { getProfile } from "@/lib/repositories/profile";
 import { requireUser } from "@/lib/supabase/server";
-import type { InterviewSession, Message, Profile } from "@/lib/types";
+import type { InterviewSession, Profile } from "@/lib/types";
 
 export const runtime = "nodejs";
 
+/** Lists only interview sessions owned by the authenticated caller. */
 export async function GET() {
   try {
     const { supabase, user } = await requireUser();
@@ -17,6 +27,7 @@ export async function GET() {
   }
 }
 
+/** Runs authenticated start, turn, checkpoint, and completion interview actions. */
 export async function POST(request: Request) {
   let supabase;
   let user;
@@ -42,7 +53,7 @@ export async function POST(request: Request) {
     if (body.action === "start") {
       if (body.mode === "hands-on") {
         const session = await createHandsOnSession(supabase, user.id, handsOnExercise(profile));
-        return NextResponse.json({ session: withHandsOnOpening(session) });
+        return NextResponse.json({ session });
       }
       const plan = buildInterviewPlan(profile.competencies, profile.seniority ?? "Intermediate");
       const firstQuestion = plan[0];
@@ -65,8 +76,28 @@ export async function POST(request: Request) {
       const question = session.questions.find((item) => !item.answer);
       if (!question) return finishConversation(supabase, user.id, profile, session);
 
-      const turn = await nextTurn(profile, question, profile.source, visibleConversation(session), answer);
-      const updated = await recordAnswerAndEvaluation(supabase, user.id, question.id, answer, turn.evaluation);
+      const questionIndex = session.questions.findIndex((item) => item.id === question.id);
+      const nextPlannedQuestion = session.questions.slice(questionIndex + 1).find((item) => !item.answer) ?? null;
+      const turn = await nextTurn(
+        profile,
+        question,
+        nextPlannedQuestion,
+        profile.source,
+        visibleConversation(session),
+        answer,
+      );
+      const updated = await recordConversationTurn(
+        supabase,
+        user.id,
+        question.id,
+        answer,
+        turn.evaluation,
+        {
+          nextQuestionId: turn.followUp ? null : nextPlannedQuestion?.id ?? null,
+          nextPrompt: turn.nextQuestion,
+          followUp: turn.followUp,
+        },
+      );
       if (!updated.questions.some((item) => !item.answer)) {
         return finishConversation(supabase, user.id, profile, updated);
       }
@@ -77,19 +108,21 @@ export async function POST(request: Request) {
       const code = typeof body.code === "string" ? body.code : "";
       const note = typeof body.note === "string" ? body.note.trim() : "";
       if (!code.trim() || !note) return NextResponse.json({ error: "Save your current code and a short think-aloud note." }, { status: 400 });
-      const updated = await saveHandsOnCheckpoint(supabase, user.id, session.id, code, note);
-      const prompt = await handsOnCheckpoint(profile, updated, code, note);
-      return NextResponse.json({ session: withHandsOnCheckpoint(updated, prompt) });
+      const prompt = await handsOnCheckpoint(profile, session, code, note);
+      const updated = await saveHandsOnCheckpoint(supabase, user.id, session.id, code, note, prompt);
+      return NextResponse.json({ session: updated });
     }
     if (body.action === "complete") {
-      if (session.kind === "conversation" && session.questions.some((question) => !question.answer)) {
-        return NextResponse.json({ error: "Answer the planned questions before completing this interview." }, { status: 400 });
+      if (session.kind === "conversation" && session.questions.filter((question) => question.answer).length < 5) {
+        return NextResponse.json({ error: "Answer at least five questions before completing this interview." }, { status: 400 });
       }
       if (session.kind === "hands-on" && !session.checkpoints.length) {
         return NextResponse.json({ error: "Save a coding checkpoint before completing this interview." }, { status: 400 });
       }
       const result = session.kind === "hands-on" ? evaluateHandsOn(session) : summarizeSession(session);
-      const completed = await completeSession(supabase, user.id, session.id, result);
+      const completed = session.kind === "hands-on"
+        ? await completeHandsOnSession(supabase, user.id, session.id, result as ReturnType<typeof evaluateHandsOn>)
+        : await completeSession(supabase, user.id, session.id, result);
       return NextResponse.json({
         session: completed.kind === "conversation" ? visibleConversation(completed) : completed,
         profile: await getProfile(supabase, user.id),
@@ -120,27 +153,6 @@ function visibleConversation(session: InterviewSession): InterviewSession {
     ...session,
     messages: session.messages.filter((message) => visibleQuestionIds.has(message.id.split(":")[0])),
   };
-}
-
-function withHandsOnOpening(session: InterviewSession): InterviewSession {
-  const message: Message = {
-    id: `${session.id}:opening`,
-    role: "interviewer",
-    content: "Start by reading the brief, then tell me which requirements you would clarify before you begin implementing.",
-    createdAt: session.createdAt,
-  };
-  return { ...session, messages: [...session.messages, message] };
-}
-
-function withHandsOnCheckpoint(session: InterviewSession, prompt: string): InterviewSession {
-  const checkpoint = session.checkpoints.at(-1);
-  if (!checkpoint) return session;
-  const messages: Message[] = [
-    ...session.messages,
-    { id: `${checkpoint.id}:candidate`, role: "candidate", content: `Checkpoint: ${checkpoint.note}`, createdAt: checkpoint.createdAt },
-    { id: `${checkpoint.id}:interviewer`, role: "interviewer", content: prompt, createdAt: new Date().toISOString() },
-  ];
-  return { ...session, messages };
 }
 
 function errorResponse(error: unknown) {

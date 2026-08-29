@@ -6,7 +6,7 @@ This document records the gaps between the current implementation and the approv
 
 ### Addressed: adaptive interview foundation
 
-The first recommended implementation slice is now addressed. The app has a normalized competency knowledge graph with evidence-backed state, passes scoped career context into conversational interviewing, and plans subsequent conversational interviews using competency relevance, confidence, recency, weakness, and difficulty fit. The deterministic fallback uses the same persisted plan and context, and sessions enforce the five-question backbone, controlled follow-ups, and the eight-question limit.
+The first recommended implementation slice is now addressed. The app has a normalized competency knowledge graph with evidence-backed state, passes bounded career context into conversational interviewing, and plans subsequent conversational interviews using competency relevance, confidence, current recency, weakness, and difficulty fit. Generated questions and conditional follow-ups are persisted, sessions enforce the five-question backbone and eight-question limit, and both conversational and hands-on evaluations update durable competency evidence.
 
 Relevant PRD: sections 7, 9, 14, 16–17, 20–21, 49, and 50.
 
@@ -79,6 +79,6 @@ Relevant PRD: sections 16–17, 28–34, and 30.7, 30.13–30.16.
 
 ## Out of scope for the POC
 
-Authentication, multi-user isolation, public deployment, job-description overlays, richer cloud IDE infrastructure, and other P2 items remain deliberately out of scope.
+Google authentication, multi-user isolation, and public deployment are now part of the foundation. Job-description overlays, richer cloud IDE infrastructure, and other P2 items remain deliberately out of scope.
 
 Relevant PRD: section 49.
