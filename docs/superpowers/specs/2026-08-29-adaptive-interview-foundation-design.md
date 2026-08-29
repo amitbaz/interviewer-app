@@ -52,7 +52,11 @@ Profile generation initializes the competency *scope* from the confirmed role, e
 
 ### `interview_sessions`
 
-Owns session kind, lifecycle status, timestamps, optional result summary, and overall score. This slice preserves the existing conversational interview and its existing hands-on mode without redesigning the hands-on evaluator.
+Owns session kind, lifecycle status, timestamps, optional exercise data, result summary, and overall score. This slice preserves the existing conversational interview and its existing hands-on mode without redesigning the hands-on evaluator.
+
+### `hands_on_checkpoints`
+
+Stores user-owned code snapshots and think-aloud notes for a hands-on session. It preserves the current checkpoint workflow and lets the existing hands-on evaluator and interviewer retrieve the latest code without relying on serialized SQLite session content.
 
 ### `interview_questions`
 
