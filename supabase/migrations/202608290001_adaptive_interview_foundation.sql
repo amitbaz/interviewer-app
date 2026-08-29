@@ -36,7 +36,8 @@ create table public.competencies (
   strengths jsonb not null default '[]'::jsonb,
   weaknesses jsonb not null default '[]'::jsonb,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  unique (id, user_id)
 );
 
 create table public.interview_sessions (
@@ -50,16 +51,17 @@ create table public.interview_sessions (
   result_summary jsonb not null default '{}'::jsonb,
   overall_score numeric,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  unique (id, user_id)
 );
 
 create table public.interview_questions (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
-  session_id uuid not null references public.interview_sessions(id) on delete cascade,
+  session_id uuid not null,
   sequence integer not null check (sequence > 0),
   category text not null,
-  competency_id uuid references public.competencies(id) on delete set null,
+  competency_id uuid,
   difficulty text not null check (difficulty in ('foundational', 'intermediate', 'senior', 'advanced')),
   is_follow_up boolean not null default false,
   prompt text not null,
@@ -67,29 +69,34 @@ create table public.interview_questions (
   asked_at timestamptz,
   answered_at timestamptz,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  unique (id, user_id),
+  foreign key (session_id, user_id) references public.interview_sessions (id, user_id) on delete cascade,
+  foreign key (competency_id, user_id) references public.competencies (id, user_id) on delete set null (competency_id)
 );
 
 create table public.question_evaluations (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
-  question_id uuid not null references public.interview_questions(id) on delete cascade,
+  question_id uuid not null,
   overall_score numeric not null,
   dimensions jsonb not null default '{}'::jsonb,
   strengths jsonb not null default '[]'::jsonb,
   weaknesses jsonb not null default '[]'::jsonb,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  foreign key (question_id, user_id) references public.interview_questions (id, user_id) on delete cascade
 );
 
 create table public.hands_on_checkpoints (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
-  session_id uuid not null references public.interview_sessions(id) on delete cascade,
+  session_id uuid not null,
   code text not null,
   note text,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  foreign key (session_id, user_id) references public.interview_sessions (id, user_id) on delete cascade
 );
 
 create unique index competencies_user_name_key on public.competencies (user_id, lower(name));
