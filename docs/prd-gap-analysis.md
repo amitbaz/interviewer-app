@@ -10,16 +10,15 @@ The first recommended implementation slice is now addressed. The app has a norma
 
 Relevant PRD: sections 7, 9, 14, 16–17, 20–21, 49, and 50.
 
-### Conversational interview structure and feedback
+### Addressed: conversational interview structure and feedback
 
-- Results do not offer expandable per-question feedback with the question, answer, missing points, better structure, and a tailored improved answer.
-- Individual evaluations do not capture the full set of relevant dimensions: correctness, depth, clarity, structure, practical experience, trade-offs, communication, confidence, and relevance.
+Results now offer expandable per-question feedback with the question, answer, strengths, missing points, better structure guidance, and a tailored improved answer. Individual evaluations also persist the PRD-aligned coaching dimensions needed to explain the signal behind each answer.
 
 Relevant PRD: sections 13–15 and 22–24.
 
-### Readiness and progress insights
+### Addressed: readiness and progress insights
 
-The Progress screen lacks fuller readiness scoring, recent-improvement trends, and recurring-weakness coaching. The new-user Home state correctly avoids presenting a readiness score before evidence exists.
+The Progress screen now distinguishes between no evidence, first-session baseline, and multi-session evidence states. It renders readiness, latest score, score trend, strongest competency, weakest competency, and recurring weakness coaching while the new-user Home state still avoids presenting readiness before evidence exists.
 
 Relevant PRD: sections 26–27 and 50.
 
@@ -72,10 +71,9 @@ Relevant PRD: sections 16–17, 28–34, and 30.7, 30.13–30.16.
 
 ## Recommended implementation order
 
-1. Add per-question feedback, fuller readiness, and progress trends.
-2. Improve hands-on execution and evaluation, then make exercises adapt to performance.
-3. Add document deletion/reset and complete the Profile settings.
-4. Add research/market intelligence, story coaching, focused practice, and interviewer hints.
+1. Improve hands-on execution and evaluation, then make exercises adapt to performance.
+2. Add document deletion/reset and complete the Profile settings.
+3. Add research/market intelligence, story coaching, focused practice, and interviewer hints.
 
 ## Out of scope for the POC
 

@@ -1,7 +1,9 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { HandsOnExercise, InterviewSession, Profile } from "@/lib/types";
+import { FormEvent, useEffect, useRef, useState } from "react";
+import { ResultsFeedbackCards } from "@/app/results-feedback-cards";
+import type { HandsOnExercise, InterviewSession, Profile, ProgressSnapshot } from "@/lib/types";
+import { progressViewModel } from "@/app/progress-view-model";
 import { createBrowserSupabaseClient } from "@/lib/supabase/client";
 import { MAX_CV_PDF_BYTES } from "@/lib/upload-limits";
 
@@ -9,16 +11,20 @@ type View = "home" | "onboarding" | "profile-review" | "interview" | "results" |
 type InterviewMode = "conversation" | "hands-on";
 type AuthState = "loading" | "signed-out" | "signed-in";
 const nav: View[] = ["home", "practice", "progress", "profile"];
+function startViewTransition(update: () => void) {
+  const documentWithTransition = document as Document & { startViewTransition?: (callback: () => void) => void };
+  if (documentWithTransition.startViewTransition) {
+    documentWithTransition.startViewTransition(update);
+    return;
+  }
+  update();
+}
 
 class ApiError extends Error {
   constructor(message: string, readonly status: number) {
     super(message);
     this.name = "ApiError";
   }
-}
-
-function hasEvidenceForCompetencies(competencies: Array<Pick<Profile["competencies"][number], "questionCount">>): boolean {
-  return competencies.some((item) => item.questionCount > 0);
 }
 
 async function api<T>(url: string, options?: RequestInit): Promise<T> {
@@ -28,10 +34,62 @@ async function api<T>(url: string, options?: RequestInit): Promise<T> {
   return body as T;
 }
 
+type CoachData = {
+  profile: Profile | null;
+  demoMode: boolean;
+  sessions: InterviewSession[];
+  progress: ProgressSnapshot;
+};
+
+async function loadCoachData(): Promise<CoachData> {
+  const [profileResult, sessionsResult] = await Promise.all([
+    api<{ profile: Profile | null; demoMode: boolean }>("/api/profile"),
+    api<{ sessions: InterviewSession[]; progress: ProgressSnapshot }>("/api/interview"),
+  ]);
+
+  return {
+    profile: profileResult.profile,
+    demoMode: profileResult.demoMode,
+    sessions: sessionsResult.sessions,
+    progress: sessionsResult.progress,
+  };
+}
+
+function progressTrendLabel(trend: ProgressSnapshot["trend"]): string | null {
+  switch (trend) {
+    case "baseline":
+      return "Baseline established";
+    case "improving":
+      return "Improving";
+    case "stable":
+      return "Stable";
+    case "declining":
+      return "Needs attention";
+    default:
+      return null;
+  }
+}
+
+function progressTrendDescription(trend: ProgressSnapshot["trend"]): string {
+  switch (trend) {
+    case "baseline":
+      return "Your first completed session sets the starting point for future comparisons.";
+    case "improving":
+      return "Your latest sessions are trending upward against your earlier practice history.";
+    case "stable":
+      return "Your recent sessions are holding steady, which makes focused practice the next lever.";
+    case "declining":
+      return "Recent sessions dipped below your earlier baseline, so revisit the recurring weak spots next.";
+    default:
+      return "Complete a few sessions to unlock a clearer progress trend.";
+  }
+}
+
 export default function App() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [session, setSession] = useState<InterviewSession | null>(null);
   const [sessions, setSessions] = useState<InterviewSession[]>([]);
+  const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
   const [view, setView] = useState<View>("onboarding");
   const [authState, setAuthState] = useState<AuthState>("loading");
   const [coachDataLoading, setCoachDataLoading] = useState(true);
@@ -77,20 +135,18 @@ export default function App() {
   useEffect(() => {
     if (authState !== "signed-in") return;
     let active = true;
-    Promise.all([
-      api<{ profile: Profile | null; demoMode: boolean }>("/api/profile"),
-      api<{ sessions: InterviewSession[] }>("/api/interview"),
-    ]).then(([profileResult, sessionsResult]) => {
+    loadCoachData().then((coachData) => {
       if (!active) return;
-      setProfile(profileResult.profile);
-      setDemoMode(profileResult.demoMode);
-      setSessions(sessionsResult.sessions);
-      setView(profileResult.profile ? "home" : "onboarding");
+      setProfile(coachData.profile);
+      setDemoMode(coachData.demoMode);
+      setSessions(coachData.sessions);
+      setProgress(coachData.progress);
+      setView(coachData.profile ? "home" : "onboarding");
       setCoachDataLoading(false);
     }).catch((caught) => {
       if (!active) return;
       if (caught instanceof ApiError && caught.status === 401) {
-        setProfile(null); setSession(null); setSessions([]); setView("onboarding"); setAuthState("signed-out"); setCoachDataLoading(false);
+        setProfile(null); setProgress(null); setSession(null); setSessions([]); setView("onboarding"); setAuthState("signed-out"); setCoachDataLoading(false);
         return;
       }
       setError(caught instanceof Error ? caught.message : "Could not open your coach data.");
@@ -99,26 +155,22 @@ export default function App() {
     return () => { active = false; };
   }, [authState]);
 
-  const hasEvidence = hasEvidenceForCompetencies(profile?.competencies ?? []);
-  const readiness = useMemo(() => {
-    if (!profile || !hasEvidence) return null;
-    const scores = profile.competencies.flatMap((item) => item.averageScore === null ? [] : [item.averageScore]);
-    return scores.length ? Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length * 10) : null;
-  }, [hasEvidence, profile]);
+  const { hasEvidence, readiness, weakest } = progressViewModel(progress);
   const complete = sessions.find((item) => item.status === "complete");
-  const weakest = hasEvidence ? [...(profile?.competencies ?? [])].filter((item) => item.averageScore !== null).sort((a, b) => (a.averageScore ?? 0) - (b.averageScore ?? 0))[0] ?? null : null;
   const handsOn = session?.kind === "hands-on";
   const exercise = handsOn ? session?.exercise as HandsOnExercise : null;
   const sessionSummary = session ? String(session.resultSummary.summary ?? "Complete a few questions to receive personalized feedback.") : "";
   const answeredQuestions = session?.questions.filter((question) => question.answer).length ?? 0;
+  const progressTrend = progress?.trend ?? null;
+  const progressTrendName = progressTrendLabel(progressTrend);
+  const latestScore = progress?.latestScore ?? null;
+  const strongest = progress?.strongest ?? null;
+  const recurringWeaknesses = progress?.recurringWeaknesses ?? [];
+  const progressHasBaseline = progressTrend === "baseline";
+  const progressHasRecurringWeaknesses = recurringWeaknesses.length > 0;
 
   function navigate(next: View) {
-    const documentWithTransition = document as Document & { startViewTransition?: (callback: () => void) => void };
-    if (documentWithTransition.startViewTransition) {
-      documentWithTransition.startViewTransition(() => setView(next));
-      return;
-    }
-    setView(next);
+    startViewTransition(() => setView(next));
   }
 
   function persistSession(updated: InterviewSession) {
@@ -127,7 +179,7 @@ export default function App() {
   }
   function handleRequestError(caught: unknown, fallback: string) {
     if (caught instanceof ApiError && caught.status === 401) {
-      setProfile(null); setSession(null); setSessions([]); setView("onboarding"); setAuthState("signed-out");
+      setProfile(null); setProgress(null); setSession(null); setSessions([]); setView("onboarding"); setAuthState("signed-out");
       return;
     }
     setError(caught instanceof Error ? caught.message : fallback);
@@ -182,7 +234,11 @@ export default function App() {
       const result = await api<{ session: InterviewSession; profile?: Profile }>("/api/interview", { method: "POST", body: JSON.stringify({ action: "respond", sessionId: session.id, answer }) });
       setAnswer(""); persistSession(result.session);
       if (result.session.status === "complete" && result.profile) {
-        setProfile(result.profile);
+        const coachData = await loadCoachData();
+        setProfile(coachData.profile ?? result.profile);
+        setDemoMode(coachData.demoMode);
+        setSessions(coachData.sessions);
+        setProgress(coachData.progress);
         navigate("results");
       }
     } catch (caught) { handleRequestError(caught, "Could not send answer."); } finally { setBusy(false); }
@@ -233,7 +289,13 @@ export default function App() {
     if (!session) return; setBusy(true); setError("");
     try {
       const result = await api<{ session: InterviewSession; profile: Profile }>("/api/interview", { method: "POST", body: JSON.stringify({ action: "complete", sessionId: session.id }) });
-      persistSession(result.session); setProfile(result.profile); navigate("results");
+      persistSession(result.session);
+      const coachData = await loadCoachData();
+      setProfile(coachData.profile ?? result.profile);
+      setDemoMode(coachData.demoMode);
+      setSessions(coachData.sessions);
+      setProgress(coachData.progress);
+      navigate("results");
     } catch (caught) { handleRequestError(caught, "Could not finish interview."); } finally { setBusy(false); }
   }
   async function signInWithGoogle() {
@@ -258,7 +320,7 @@ export default function App() {
     try {
       const { error: authError } = await supabase.current.auth.signOut();
       if (authError) throw authError;
-      setProfile(null); setSession(null); setSessions([]); setAnswer(""); setCode(""); setCheckpointNote(""); setView("onboarding"); setAuthState("signed-out");
+      setProfile(null); setProgress(null); setSession(null); setSessions([]); setAnswer(""); setCode(""); setCheckpointNote(""); setView("onboarding"); setAuthState("signed-out");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not sign out.");
     } finally { setBusy(false); }
@@ -281,8 +343,8 @@ export default function App() {
       {view === "home" && <><p className="text-sm text-[var(--ink-muted)]">Welcome back</p><h1 className="mt-1 text-4xl font-semibold tracking-[-.04em]">Ready when you are.</h1><div className="mt-7 grid gap-5 lg:grid-cols-[1.25fr_.75fr]"><article className="rounded-3xl bg-[var(--pine)] p-6 text-white md:p-8"><p className="text-sm text-[#c8d7cf]">Interview readiness</p>{hasEvidence && readiness !== null ? <strong className="mt-2 block text-6xl tracking-[-.06em]">{readiness}<span className="ml-2 text-2xl text-[#c8d7cf]">/ 100</span></strong> : <h2 className="mt-2 text-3xl font-semibold tracking-[-.04em]">Not enough data yet</h2>}<p className="mt-5 max-w-md leading-6 text-[#dbe7df]">{hasEvidence ? "A coaching signal based on your completed practice—not a hiring prediction." : "Your first mixed interview establishes a baseline across technical, architecture, and communication skills."}</p><div className="mt-7 flex flex-wrap gap-3"><button onClick={() => startInterview()} disabled={busy} className="rounded-full bg-[var(--lime)] px-5 py-3 text-sm font-semibold text-[#18281f]">{busy ? "Preparing…" : "Start interview"}</button><button onClick={() => startInterview("hands-on")} disabled={busy} className="rounded-full border border-[#8da79c] px-5 py-3 text-sm font-semibold text-white">Hands-on interview</button></div></article>{hasEvidence && weakest ? <article className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><p className="text-sm font-semibold text-[var(--ink-muted)]">Recommended focus</p><h2 className="mt-3 text-2xl font-semibold">{weakest.name}</h2><p className="mt-3 leading-6 text-[var(--ink-muted)]">{weakest.weaknesses[0] ?? "Practice this area to strengthen your next interview."}</p><button onClick={() => navigate("practice")} className="mt-6 text-sm font-semibold text-[var(--pine)]">Practice this →</button></article> : <article className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><p className="text-sm font-semibold text-[var(--ink-muted)]">What happens next</p><h2 className="mt-3 text-2xl font-semibold">Build your baseline.</h2><p className="mt-3 leading-6 text-[var(--ink-muted)]">Answer the five-question backbone and any useful follow-ups, then Relay can make a grounded recommendation.</p></article>}</div><article className="mt-7 rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><p className="text-sm font-semibold text-[var(--ink-muted)]">Your last session</p><h2 className="mt-1 text-xl font-semibold">{complete && complete.overallScore !== null ? `${complete.overallScore}/10 overall signal` : "No completed interviews yet"}</h2><p className="mt-4 leading-6 text-[var(--ink-muted)]">{complete?.resultSummary.summary ? String(complete.resultSummary.summary) : "Your first mixed interview establishes a starting point across technical, architecture, and communication skills."}</p></article></>}
       {view === "interview" && session && !handsOn && <><div className="flex items-start justify-between gap-4"><div><p className="text-sm text-[var(--ink-muted)]">Mixed interview · {answeredQuestions} of {session.questions.length} answered</p><h1 className="mt-1 text-3xl font-semibold tracking-[-.04em]">Stay in the conversation.</h1></div><button onClick={finishInterview} disabled={busy || answeredQuestions < 5} className="rounded-full border border-[var(--line)] px-4 py-2 text-sm font-semibold disabled:opacity-40">Finish</button></div><div className="mt-6 space-y-4">{session.messages.map((message) => <div key={message.id} className={`max-w-2xl rounded-2xl p-5 leading-7 ${message.role === "interviewer" ? "border border-[var(--line)] bg-[var(--paper)]" : "ml-auto bg-[#dff0d4]"}`}><p className="mb-2 text-xs font-semibold uppercase tracking-[.14em] text-[var(--ink-muted)]">{message.role === "interviewer" ? "Interviewer" : "You"}</p>{message.content}</div>)}</div><form onSubmit={sendAnswer} className="sticky bottom-3 mt-5 rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-3 shadow-[0_10px_30px_rgba(25,41,33,.1)]"><textarea value={answer} onChange={(event) => setAnswer(event.target.value)} disabled={busy} placeholder="Answer as if you were in the room…" className="min-h-28 w-full resize-none bg-transparent p-3 text-sm leading-6 outline-none" /><div className="flex items-center justify-between gap-3 border-t border-[var(--line)] px-2 pt-3"><button type="button" onClick={toggleRecording} disabled={busy} className={`rounded-full px-3 py-2 text-xs font-semibold ${isRecording ? "bg-[#fff0ed] text-[#8e3226]" : "bg-[#eef3e7] text-[#38502e]"}`}>{isRecording ? "■ Stop & transcribe" : "● Record answer"}</button><span className="text-xs text-[var(--ink-muted)]">Edit the transcript before sending.</span><button disabled={busy || !answer.trim()} className="rounded-full bg-[var(--pine)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{busy ? "Thinking…" : "Send answer"}</button></div></form></>}
       {view === "interview" && session && handsOn && <><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-sm text-[var(--ink-muted)]">Hands-on technical interview · React + TypeScript · {exercise?.durationMinutes} minutes</p><h1 className="mt-1 text-3xl font-semibold tracking-[-.04em]">Build, narrate, adapt.</h1></div><button onClick={finishInterview} disabled={busy || !session.checkpoints.length} className="rounded-full border border-[var(--line)] px-4 py-2 text-sm font-semibold disabled:opacity-40">Finish &amp; review</button></div><div className="mt-6 grid gap-5 xl:grid-cols-[.8fr_1.2fr]"><aside className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><p className="text-sm font-semibold text-[var(--ink-muted)]">Your brief</p><h2 className="mt-2 text-2xl font-semibold">{exercise?.title}</h2><p className="mt-4 leading-7 text-[var(--ink-muted)]">{exercise?.briefing}</p><h3 className="mt-6 text-sm font-semibold uppercase tracking-[.12em] text-[var(--ink-muted)]">Requirements</h3><ul className="mt-3 space-y-3 text-sm leading-6 text-[var(--ink-muted)]">{exercise?.requirements.map((requirement) => <li key={requirement} className="flex gap-2"><span className="text-[var(--pine)]">•</span>{requirement}</li>)}</ul><p className="mt-6 rounded-xl bg-[#eef3e7] p-3 text-sm leading-6 text-[#38502e]">Think aloud at each checkpoint. The interviewer can challenge your approach, but will not write the solution for you.</p></aside><div><label className="block text-sm font-semibold">Workspace<textarea aria-label="TypeScript code workspace" spellCheck={false} value={code} onChange={(event) => setCode(event.target.value)} disabled={busy} className="mt-2 min-h-[31rem] w-full resize-y rounded-2xl border border-[#1d332b] bg-[#13241e] p-5 font-mono text-sm leading-6 text-[#e7f2e6] outline-none focus:border-[var(--lime)]" /></label><form onSubmit={saveCheckpoint} className="mt-4 rounded-2xl border border-[var(--line)] bg-[var(--paper)] p-4"><label className="block text-sm font-semibold">What are you doing and why?<textarea value={checkpointNote} onChange={(event) => setCheckpointNote(event.target.value)} disabled={busy} placeholder="For example: I am cancelling in-flight searches and will add keyboard state next…" className="mt-2 min-h-24 w-full resize-none rounded-xl border border-[var(--line)] bg-white p-3 text-sm leading-6 outline-none focus:border-[var(--pine)]" /></label><div className="mt-3 flex items-center justify-between gap-3"><span className="text-xs text-[var(--ink-muted)]">{session.checkpoints.length} checkpoint{session.checkpoints.length === 1 ? "" : "s"} saved</span><button disabled={busy || !code.trim() || !checkpointNote.trim()} className="rounded-full bg-[var(--pine)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{busy ? "Interviewer is reviewing…" : "Save checkpoint"}</button></div></form></div></div><div className="mt-6 space-y-3">{session.messages.map((message) => <article key={message.id} className={`max-w-3xl rounded-2xl p-4 text-sm leading-6 ${message.role === "interviewer" ? "border border-[var(--line)] bg-[var(--paper)]" : "bg-[#dff0d4]"}`}><p className="mb-1 text-xs font-semibold uppercase tracking-[.14em] text-[var(--ink-muted)]">{message.role === "interviewer" ? "Interviewer" : "Your checkpoint"}</p>{message.content}</article>)}</div></>}
-      {view === "results" && session && <><p className="text-sm text-[var(--ink-muted)]">{handsOn ? "Hands-on interview complete" : "Interview complete"}</p><h1 className="mt-1 text-4xl font-semibold tracking-[-.04em]">{handsOn ? "A realistic technical signal." : "A useful baseline."}</h1><article className="mt-7 rounded-3xl bg-[var(--pine)] p-7 text-white"><p className="text-sm text-[#c8d7cf]">Overall coaching signal</p><strong className="mt-2 block text-6xl tracking-[-.06em]">{session.overallScore}<span className="ml-2 text-2xl text-[#c8d7cf]">/ 10</span></strong><p className="mt-5 max-w-2xl leading-7 text-[#dbe7df]">{sessionSummary}</p></article><div className="mt-6 grid gap-4 md:grid-cols-2">{session.evaluations.map((evaluation) => <article key={`${evaluation.competencyId}-${evaluation.competency}`} className="rounded-2xl border border-[var(--line)] bg-[var(--paper)] p-5"><div className="flex justify-between gap-3"><h2 className="font-semibold">{evaluation.competency}</h2><span className="font-semibold text-[var(--pine)]">{evaluation.score}/10</span></div><p className="mt-4 text-sm font-semibold text-[#416151]">Good</p><p className="text-sm leading-6 text-[var(--ink-muted)]">{evaluation.strengths[0]}</p><p className="mt-4 text-sm font-semibold text-[#8e5e20]">Try next</p><p className="text-sm leading-6 text-[var(--ink-muted)]">{evaluation.needsWork[0]}</p></article>)}</div><button onClick={() => startInterview(handsOn ? "hands-on" : "conversation")} disabled={busy} className="mt-7 rounded-full bg-[var(--pine)] px-5 py-3 text-sm font-semibold text-white">Start another {handsOn ? "hands-on interview" : "interview"}</button></>}
-      {view === "progress" && <><p className="text-sm text-[var(--ink-muted)]">Progress</p><h1 className="mt-1 text-4xl font-semibold tracking-[-.04em]">Practice with a memory.</h1>{hasEvidence && readiness !== null ? <div className="mt-7 grid gap-6 lg:grid-cols-[.7fr_1.3fr]"><article className="rounded-3xl bg-[#e7efd9] p-6"><p className="text-sm text-[#537053]">Interview readiness</p><strong className="mt-2 block text-6xl tracking-[-.06em]">{readiness}</strong><p className="mt-4 text-sm leading-6 text-[#537053]">A personal coaching signal. Each completed session gently updates it.</p></article><article className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><h2 className="font-semibold">Competencies</h2><div className="mt-5 space-y-4">{profile.competencies.map((item) => <div key={item.id}><div className="mb-2 flex justify-between text-sm"><span>{item.name}</span><span className="text-[var(--ink-muted)]">{item.averageScore === null ? "Not assessed" : `${item.averageScore}/10`}</span></div>{item.averageScore !== null && <div className="h-2 overflow-hidden rounded-full bg-[#e6e9e1]"><div className="h-full rounded-full bg-[var(--pine)]" style={{ width: `${item.averageScore * 10}%` }} /></div>}</div>)}</div></article></div> : <article className="mt-7 rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><h2 className="text-2xl font-semibold">Not enough data yet</h2><p className="mt-3 max-w-xl leading-6 text-[var(--ink-muted)]">Finish your first mixed interview to establish a baseline before Relay shows readiness or competency scores.</p></article>}<p className="mt-7 text-sm text-[var(--ink-muted)]">{sessions.filter((item) => item.status === "complete").length} completed interviews saved to your account, including {sessions.filter((item) => item.status === "complete" && item.kind === "hands-on").length} hands-on sessions.</p></>}
+      {view === "results" && session && <><p className="text-sm text-[var(--ink-muted)]">{handsOn ? "Hands-on interview complete" : "Interview complete"}</p><h1 className="mt-1 text-4xl font-semibold tracking-[-.04em]">{handsOn ? "A realistic technical signal." : "A useful baseline."}</h1><article className="mt-7 rounded-3xl bg-[var(--pine)] p-7 text-white"><p className="text-sm text-[#c8d7cf]">Overall coaching signal</p><strong className="mt-2 block text-6xl tracking-[-.06em]">{session.overallScore}<span className="ml-2 text-2xl text-[#c8d7cf]">/ 10</span></strong><p className="mt-5 max-w-2xl leading-7 text-[#dbe7df]">{sessionSummary}</p></article><ResultsFeedbackCards session={session} /><button onClick={() => startInterview(handsOn ? "hands-on" : "conversation")} disabled={busy} className="mt-7 rounded-full bg-[var(--pine)] px-5 py-3 text-sm font-semibold text-white">Start another {handsOn ? "hands-on interview" : "interview"}</button></>}
+      {view === "progress" && <><p className="text-sm text-[var(--ink-muted)]">Progress</p><h1 className="mt-1 text-4xl font-semibold tracking-[-.04em]">Practice with a memory.</h1>{hasEvidence && readiness !== null ? <div className="mt-7 grid gap-6 xl:grid-cols-[.8fr_1.2fr]"><div className="space-y-6"><article className="rounded-3xl bg-[#e7efd9] p-6"><p className="text-sm text-[#537053]">Interview readiness</p><strong className="mt-2 block text-6xl tracking-[-.06em]">{readiness}<span className="ml-2 text-2xl text-[#537053]">/ 100</span></strong><p className="mt-4 text-sm leading-6 text-[#537053]">A coaching signal based on your completed practice, not a hiring prediction.</p></article><article className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><p className="text-sm font-semibold text-[var(--ink-muted)]">{progressHasBaseline ? "Baseline" : "Recent signal"}</p><h2 className="mt-2 text-2xl font-semibold">{progressTrendName ?? "Recent sessions"}</h2><p className="mt-3 text-sm text-[var(--ink-muted)]">{progressTrendDescription(progressTrend)}</p><div className="mt-5 grid gap-4 sm:grid-cols-2"><div className="rounded-2xl bg-[#f3f5ef] p-4"><p className="text-xs font-semibold uppercase tracking-[.12em] text-[var(--ink-muted)]">Latest score</p><p className="mt-2 text-3xl font-semibold">{latestScore === null ? "Not available yet" : `${latestScore}/10`}</p></div><div className="rounded-2xl bg-[#f3f5ef] p-4"><p className="text-xs font-semibold uppercase tracking-[.12em] text-[var(--ink-muted)]">Trend</p><p className="mt-2 text-3xl font-semibold">{progressTrendName ?? "Building"}</p></div></div></article></div><div className="space-y-6"><div className="grid gap-6 lg:grid-cols-2"><article className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><p className="text-sm font-semibold text-[var(--ink-muted)]">Strongest competency</p><h2 className="mt-2 text-2xl font-semibold">{strongest?.name ?? "Still emerging"}</h2><p className="mt-3 leading-6 text-[var(--ink-muted)]">{strongest?.strengths[0] ?? "Complete more sessions to identify your steadiest interview strength."}</p></article><article className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><p className="text-sm font-semibold text-[var(--ink-muted)]">Recommended focus</p><h2 className="mt-2 text-2xl font-semibold">{weakest?.name ?? "Choose a fresh practice area"}</h2><p className="mt-3 leading-6 text-[var(--ink-muted)]">{weakest?.weaknesses[0] ?? "Relay will surface the next coaching target once enough evidence accumulates."}</p></article></div><article className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-sm font-semibold text-[var(--ink-muted)]">Recurring weaknesses</p><h2 className="mt-2 text-2xl font-semibold">{progressHasRecurringWeaknesses ? "Patterns worth practicing" : "No repeated pattern yet"}</h2></div>{progress?.recentScores.length ? <p className="rounded-full bg-[#eef3e7] px-3 py-1 text-xs font-semibold text-[#38502e]">{progress.recentScores.length} scored session{progress.recentScores.length === 1 ? "" : "s"}</p> : null}</div>{progressHasRecurringWeaknesses ? <ul className="mt-4 space-y-3 text-sm leading-6 text-[var(--ink-muted)]">{recurringWeaknesses.map((weakness) => <li key={weakness} className="rounded-2xl bg-[#f3f5ef] px-4 py-3">{weakness}</li>)}</ul> : <p className="mt-4 leading-6 text-[var(--ink-muted)]">Keep practicing across a few sessions and Relay will highlight the coaching themes that repeat.</p>}</article><article className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><h2 className="font-semibold">Competencies</h2><div className="mt-5 space-y-4">{profile.competencies.map((item) => <div key={item.id}><div className="mb-2 flex justify-between text-sm"><span>{item.name}</span><span className="text-[var(--ink-muted)]">{item.averageScore === null ? "Not assessed" : `${item.averageScore}/10`}</span></div>{item.averageScore !== null && <div className="h-2 overflow-hidden rounded-full bg-[#e6e9e1]"><div className="h-full rounded-full bg-[var(--pine)]" style={{ width: `${item.averageScore * 10}%` }} /></div>}</div>)}</div></article></div></div> : <article className="mt-7 rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><h2 className="text-2xl font-semibold">Not enough data yet</h2><p className="mt-3 max-w-xl leading-6 text-[var(--ink-muted)]">Finish your first mixed interview to establish a baseline before Relay shows readiness or competency scores.</p></article>}<p className="mt-7 text-sm text-[var(--ink-muted)]">{sessions.filter((item) => item.status === "complete").length} completed interviews saved to your account, including {sessions.filter((item) => item.status === "complete" && item.kind === "hands-on").length} hands-on sessions.</p></>}
       {view === "profile" && <><p className="text-sm text-[var(--ink-muted)]">Professional profile</p><h1 className="mt-1 text-4xl font-semibold tracking-[-.04em]">{profile.role}</h1><p className="mt-2 text-lg text-[var(--ink-muted)]">{profile.seniority} · personal coaching profile</p><article className="mt-7 rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><h2 className="font-semibold">Professional narrative</h2><p className="mt-3 max-w-2xl leading-7 text-[var(--ink-muted)]">{profile.narrative}</p><h2 className="mt-7 font-semibold">Primary expertise</h2><div className="mt-3 flex flex-wrap gap-2">{profile.expertise.map((item) => <span key={item} className="rounded-full bg-[#edf0e8] px-3 py-1.5 text-sm">{item}</span>)}</div><button onClick={() => beginProfileReview(profile)} className="mt-8 rounded-full border border-[var(--pine)] px-4 py-2 text-sm font-semibold text-[var(--pine)]">Review and edit profile</button><button onClick={() => { setCvText(profile.source.cvText); setCoverLetter(profile.source.coverLetter); navigate("onboarding"); }} className="mt-3 block text-sm font-semibold text-[var(--ink-muted)]">Replace source information</button></article></>}
       {view === "practice" && <><p className="text-sm text-[var(--ink-muted)]">Practice</p><h1 className="mt-1 text-4xl font-semibold tracking-[-.04em]">Choose deliberate practice.</h1><div className="mt-7 grid gap-5 md:grid-cols-2"><article className="rounded-3xl bg-[var(--pine)] p-6 text-white"><p className="text-sm text-[#c8d7cf]">Recommended</p><h2 className="mt-2 text-2xl font-semibold">Mixed senior interview</h2><p className="mt-3 leading-6 text-[#dbe7df]">Experience, technical decisions, system design, and communication.</p><button onClick={() => startInterview()} disabled={busy} className="mt-6 rounded-full bg-[var(--lime)] px-4 py-2 text-sm font-semibold text-[#18281f]">Start now</button></article><article className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><p className="text-sm text-[var(--ink-muted)]">60-minute simulation</p><h2 className="mt-2 text-2xl font-semibold">Hands-on interview</h2><p className="mt-3 leading-6 text-[var(--ink-muted)]">An accessible React + TypeScript product search. Save checkpoints, explain decisions, then receive interviewer-style feedback.</p><button onClick={() => startInterview("hands-on")} disabled={busy} className="mt-6 rounded-full border border-[var(--pine)] px-4 py-2 text-sm font-semibold text-[var(--pine)]">Start hands-on</button></article></div></>}
     </section></div>}

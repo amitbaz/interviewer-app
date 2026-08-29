@@ -10,6 +10,7 @@ A personal, authenticated interview-practice POC for experienced frontend engine
 - Conversational interview sessions with saved messages, feedback, and follow-ups
 - Hands-on React + TypeScript interview with persisted code checkpoints, interviewer prompts, and technical feedback
 - Gradual competency updates after completed conversational and hands-on sessions
+- Progress insights that separate no-evidence, first-session baseline, and multi-session trend states with recurring coaching themes
 - Browser voice recording → Gemini transcription → editable interview answer
 - Deterministic demo coach when no API key is configured
 - Gemini API provider when `GEMINI_API_KEY` is configured
@@ -37,7 +38,7 @@ Create the key in Google AI Studio. Gemini's free tier is rate-limited and Googl
 
 The hosted POC uses Supabase Postgres, Auth, and private Storage. For a local or Vercel deployment:
 
-1. Create a free Supabase project. Install and authenticate the Supabase CLI, link the repository to the project, and run `supabase db push`. If the CLI is unavailable, paste and run every file in `supabase/migrations/` in filename order in the Supabase SQL Editor. Existing projects must also run `202608290002_complete_adaptive_interview_loop.sql` after pulling this update.
+1. Create a free Supabase project. Install and authenticate the Supabase CLI, link the repository to the project, and run `supabase db push`. If the CLI is unavailable, paste and run every file in `supabase/migrations/` in filename order in the Supabase SQL Editor. Existing projects must also run `202608290002_complete_adaptive_interview_loop.sql` and `202608290003_richer_feedback.sql` after pulling this update.
 2. Copy the Supabase project URL and publishable key from Project Settings → API into `.env.local`:
 
    ```bash

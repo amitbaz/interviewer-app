@@ -45,11 +45,15 @@ function mapQuestion(row: Row, competencyNames: Map<string, string>): PlannedQue
 function mapEvaluation(row: Row, question: PlannedQuestion): Evaluation {
   return {
     score: Number(row.overall_score ?? 0),
+    questionId: stringValue(row.question_id) || null,
     competencyId: question.competencyId,
     competency: question.competencyName ?? "Communication",
     dimensions: jsonRecord(row.dimensions) as Evaluation["dimensions"],
     strengths: stringArray(row.strengths),
     needsWork: stringArray(row.weaknesses),
+    missingPoints: stringArray(row.missing_points),
+    betterStructure: stringArray(row.better_structure),
+    improvedAnswer: stringValue(row.improved_answer),
   };
 }
 
@@ -57,6 +61,7 @@ function mapSessionEvaluation(row: Row, competencyNames: Map<string, string>): E
   const competencyId = typeof row.competency_id === "string" ? row.competency_id : null;
   return {
     score: Number(row.overall_score ?? 0),
+    questionId: null,
     competencyId,
     competency: competencyId
       ? competencyNames.get(competencyId) ?? stringValue(row.competency_name)
@@ -64,6 +69,9 @@ function mapSessionEvaluation(row: Row, competencyNames: Map<string, string>): E
     dimensions: jsonRecord(row.dimensions) as Evaluation["dimensions"],
     strengths: stringArray(row.strengths),
     needsWork: stringArray(row.weaknesses),
+    missingPoints: stringArray(row.missing_points),
+    betterStructure: stringArray(row.better_structure),
+    improvedAnswer: stringValue(row.improved_answer),
   };
 }
 
@@ -139,13 +147,20 @@ export function mapSession(
     typeof question.answered_at === "string" ? question.answered_at : stringValue(question.created_at),
   ]));
   const questionsById = new Map(questions.map((question) => [question.id, question]));
-  const questionEvaluations = evaluationRows.map((evaluation) => {
+  const questionEvaluations = [...evaluationRows]
+    .sort((left, right) => {
+      const leftQuestion = questionsById.get(stringValue(left.question_id));
+      const rightQuestion = questionsById.get(stringValue(right.question_id));
+      return (leftQuestion?.sequence ?? Number.MAX_SAFE_INTEGER)
+        - (rightQuestion?.sequence ?? Number.MAX_SAFE_INTEGER);
+    })
+    .map((evaluation) => {
     const question = questionsById.get(stringValue(evaluation.question_id));
     return mapEvaluation(evaluation, question ?? {
       id: "", sequence: 0, category: "communication", competencyId: null, competencyName: null,
       difficulty: "foundational", isFollowUp: false, prompt: "", answer: null, createdAt: "",
     });
-  });
+    });
   const checkpoints = [...checkpointRows]
     .sort((left, right) => stringValue(left.created_at).localeCompare(stringValue(right.created_at)))
     .map(mapCheckpoint);
@@ -306,6 +321,9 @@ export async function recordAnswerAndEvaluation(
     p_dimensions: evaluation.dimensions,
     p_strengths: evaluation.strengths,
     p_needs_work: evaluation.needsWork,
+    p_missing_points: evaluation.missingPoints,
+    p_better_structure: evaluation.betterStructure,
+    p_improved_answer: evaluation.improvedAnswer,
   });
   if (error || !data) throw new RepositoryError("Could not record your interview answer.", error?.code ?? "NO_OWNED_ROW");
   const result = Array.isArray(data) ? data[0] as Row | undefined : data as Row;
@@ -338,6 +356,9 @@ export async function recordConversationTurn(
     p_dimensions: evaluation.dimensions,
     p_strengths: evaluation.strengths,
     p_needs_work: evaluation.needsWork,
+    p_missing_points: evaluation.missingPoints,
+    p_better_structure: evaluation.betterStructure,
+    p_improved_answer: evaluation.improvedAnswer,
     p_next_question_id: next.nextQuestionId,
     p_next_prompt: next.nextPrompt,
     p_follow_up: next.followUp,
@@ -394,6 +415,9 @@ export async function completeHandsOnSession(
       dimensions: evaluation.dimensions,
       strengths: evaluation.strengths,
       needs_work: evaluation.needsWork,
+      missing_points: evaluation.missingPoints,
+      better_structure: evaluation.betterStructure,
+      improved_answer: evaluation.improvedAnswer,
     })),
   });
   if (error || !data) throw new RepositoryError("Could not complete the hands-on interview.", error?.code ?? "NO_OWNED_ROW");

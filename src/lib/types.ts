@@ -46,6 +46,7 @@ export type FollowUpDraft = Pick<
 
 export type Evaluation = {
   score: number;
+  questionId?: string | null;
   competencyId: string | null;
   competency: string;
   dimensions: Partial<Record<
@@ -62,6 +63,12 @@ export type Evaluation = {
   >>;
   strengths: string[];
   needsWork: string[];
+  /** Specific content the candidate omitted and should add next time. */
+  missingPoints: string[];
+  /** Recommended sequencing changes that make the answer easier to follow. */
+  betterStructure: string[];
+  /** A concise example of how the answer could be improved without inventing facts. */
+  improvedAnswer: string;
 };
 
 export type CompetencyScope = {
@@ -140,4 +147,15 @@ export type InterviewSession = {
   messages: Message[];
   createdAt: string;
   updatedAt: string;
+};
+
+/** Deterministic progress signals derived from completed coaching evidence. */
+export type ProgressSnapshot = {
+  readiness: number | null;
+  latestScore: number | null;
+  trend: "improving" | "stable" | "declining" | "baseline" | null;
+  recentScores: number[];
+  strongest: Competency | null;
+  weakest: Competency | null;
+  recurringWeaknesses: string[];
 };
