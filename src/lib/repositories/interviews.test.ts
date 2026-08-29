@@ -7,6 +7,7 @@ import {
   completeHandsOnSession,
   createSessionWithPlan,
   mapSession,
+  recordAnswerAndEvaluation,
   recordConversationTurn,
 } from "@/lib/repositories/interviews";
 
@@ -34,6 +35,11 @@ describe("mapSession", () => {
       { id: "question-1:answer", role: "candidate", content: "I owned it.", createdAt: "2026-08-29T10:02:00.000Z" },
     ]);
     expect(session.evaluations).toMatchObject([{ competency: "React architecture", score: 8, dimensions: { depth: 8 } }]);
+    expect(session.evaluations).toMatchObject([{
+      missingPoints: [],
+      betterStructure: [],
+      improvedAnswer: "",
+    }]);
   });
 
   it("rejects a plan that is not the exact five-question backbone before persistence", () => {
@@ -106,6 +112,9 @@ describe("mapSession", () => {
       competencyId: "architecture-id",
       competency: "React architecture",
       score: 7,
+      missingPoints: [],
+      betterStructure: [],
+      improvedAnswer: "",
     })]);
     expect(mapped.messages.map((message) => message.content)).toEqual([
       "Clarify the brief first.",
@@ -123,7 +132,17 @@ describe("mapSession", () => {
       "user-1",
       "question-1",
       "I compared the trade-offs.",
-      { score: 7, competencyId: "react-id", competency: "React", dimensions: {}, strengths: ["Specific"], needsWork: ["Quantify"] },
+      {
+        score: 7,
+        competencyId: "react-id",
+        competency: "React",
+        dimensions: {},
+        strengths: ["Specific"],
+        needsWork: ["Quantify"],
+        missingPoints: ["Name the fallback path."],
+        betterStructure: ["Lead with the requirement, then the trade-off."],
+        improvedAnswer: "I would start with the requirement, compare the trade-offs, and justify the fallback path.",
+      },
       { nextQuestionId: "question-2", nextPrompt: "How would you design the system?", followUp: null },
     );
 
@@ -134,6 +153,42 @@ describe("mapSession", () => {
         p_next_question_id: "question-2",
         p_next_prompt: "How would you design the system?",
         p_follow_up: null,
+        p_missing_points: ["Name the fallback path."],
+        p_better_structure: ["Lead with the requirement, then the trade-off."],
+        p_improved_answer: "I would start with the requirement, compare the trade-offs, and justify the fallback path.",
+      }),
+    }]);
+  });
+
+  it("records richer evaluation coaching through the question-evidence RPC", async () => {
+    const calls: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const supabase = rpcHydrationClient(calls, "conversation");
+
+    await recordAnswerAndEvaluation(
+      supabase as never,
+      "user-1",
+      "question-1",
+      "I compared the trade-offs.",
+      {
+        score: 7,
+        competencyId: "react-id",
+        competency: "React",
+        dimensions: {},
+        strengths: ["Specific"],
+        needsWork: ["Quantify"],
+        missingPoints: ["Name the fallback path."],
+        betterStructure: ["Lead with the requirement, then the trade-off."],
+        improvedAnswer: "I would start with the requirement, compare the trade-offs, and justify the fallback path.",
+      },
+    );
+
+    expect(calls).toEqual([{
+      name: "record_interview_evidence",
+      payload: expect.objectContaining({
+        p_question_id: "question-1",
+        p_missing_points: ["Name the fallback path."],
+        p_better_structure: ["Lead with the requirement, then the trade-off."],
+        p_improved_answer: "I would start with the requirement, compare the trade-offs, and justify the fallback path.",
       }),
     }]);
   });
@@ -156,6 +211,9 @@ describe("mapSession", () => {
           dimensions: { structure: 8 },
           strengths: ["Clear ownership"],
           needsWork: ["Add cancellation"],
+          missingPoints: ["Call out keyboard focus recovery."],
+          betterStructure: ["Start with interaction states, then discuss implementation."],
+          improvedAnswer: "I would begin with the interaction states, then explain how the implementation preserves keyboard focus.",
         }],
       },
     );
@@ -165,7 +223,13 @@ describe("mapSession", () => {
       payload: expect.objectContaining({
         p_session_id: "session-1",
         p_overall_score: 7,
-        p_evaluations: [expect.objectContaining({ competency: "React architecture", score: 7 })],
+        p_evaluations: [expect.objectContaining({
+          competency: "React architecture",
+          score: 7,
+          missing_points: ["Call out keyboard focus recovery."],
+          better_structure: ["Start with interaction states, then discuss implementation."],
+          improved_answer: "I would begin with the interaction states, then explain how the implementation preserves keyboard focus.",
+        })],
       }),
     }]);
   });

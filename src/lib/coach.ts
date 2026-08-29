@@ -16,6 +16,9 @@ const evaluationSchema = z.object({
   score: z.number().min(0).max(10), competency: z.string().optional(),
   dimensions: z.object(Object.fromEntries(dimensions.map((dimension) => [dimension, z.number().min(0).max(10).optional()]))).optional(),
   strengths: z.array(z.string()), needsWork: z.array(z.string()),
+  missingPoints: z.array(z.string()).min(1),
+  betterStructure: z.array(z.string()).min(1),
+  improvedAnswer: z.string().min(1),
 });
 const turnSchema = z.object({
   question: z.string().min(1),
@@ -132,11 +135,48 @@ function promptForPlan(planned: PlannedQuestion, source: ProfileSource): string 
 function evaluationFor(planned: PlannedQuestion, answer: string): Evaluation {
   const lower = answer.toLowerCase();
   const score = Math.min(9, Math.max(5.5, 5.8 + (lower.includes("trade-off") ? 1 : 0) + (lower.includes("measure") ? 0.7 : 0) + (answer.length > 280 ? 0.6 : 0)));
-  return { score: Number(score.toFixed(1)), competencyId: planned.competencyId, competency: planned.competencyName ?? "Communication", dimensions: { clarity: Number(Math.min(10, 5 + answer.length / 150).toFixed(1)), tradeOffAwareness: lower.includes("trade-off") ? 7 : 5 }, strengths: ["Grounded the answer in practical experience.", "Communicated a clear point of view."], needsWork: ["Make the trade-off explicit before describing implementation details."] };
+  return {
+    score: Number(score.toFixed(1)),
+    competencyId: planned.competencyId,
+    competency: planned.competencyName ?? "Communication",
+    dimensions: {
+      clarity: Number(Math.min(10, 5 + answer.length / 150).toFixed(1)),
+      tradeOffAwareness: lower.includes("trade-off") ? 7 : 5,
+    },
+    strengths: [
+      "Grounded the answer in practical experience.",
+      "Communicated a clear point of view.",
+    ],
+    needsWork: [
+      "Make the trade-off explicit before describing implementation details.",
+    ],
+    missingPoints: [
+      lower.includes("measure")
+        ? "State the baseline or success metric before describing the outcome."
+        : "Name the measurable outcome or signal you used to judge the decision.",
+    ],
+    betterStructure: [
+      "Open with the requirement or problem statement before describing the implementation.",
+      "Close with the trade-off you accepted and the result you measured.",
+    ],
+    improvedAnswer: lower.includes("trade-off")
+      ? "I would start with the requirement, explain the trade-off I chose, and close with the metric that confirmed the decision worked."
+      : "I would start with the requirement, compare the options, explain the trade-off I chose, and close with the metric that confirmed the decision worked.",
+  };
 }
 
 function normalizedEvaluation(planned: PlannedQuestion, value: z.infer<typeof evaluationSchema>): Evaluation {
-  return { score: value.score, competencyId: planned.competencyId, competency: planned.competencyName ?? value.competency ?? "Communication", dimensions: value.dimensions ?? {}, strengths: value.strengths, needsWork: value.needsWork };
+  return {
+    score: value.score,
+    competencyId: planned.competencyId,
+    competency: planned.competencyName ?? value.competency ?? "Communication",
+    dimensions: value.dimensions ?? {},
+    strengths: value.strengths,
+    needsWork: value.needsWork,
+    missingPoints: value.missingPoints,
+    betterStructure: value.betterStructure,
+    improvedAnswer: value.improvedAnswer,
+  };
 }
 
 export function initialQuestion(profile: Pick<ProfileDraft, "role">, planned: PlannedQuestion, source: ProfileSource): string {
@@ -239,7 +279,17 @@ export function evaluateHandsOn(session: InterviewSession) {
   const accessibility = scoreCode(code, [/aria-/, /role=/, /onKeyDown/, /aria-activedescendant|aria-selected/], 4.0);
   const testing = scoreCode(code, [/describe\(|it\(|test\(|expect\(/, /userEvent|fireEvent/, /msw|mock/], 3.8);
   const communication = Number(Math.min(9, 5 + Math.min(3, (checkpoint?.note.trim().length ?? 0) / 100) + Math.min(1, session.checkpoints.length * 0.25)).toFixed(1));
-  const makeEvaluation = (competency: string, score: number, strength: string, needsWork: string): Evaluation => ({ competencyId: null, competency, score, dimensions: {}, strengths: [strength], needsWork: [needsWork] });
+  const makeEvaluation = (competency: string, score: number, strength: string, needsWork: string): Evaluation => ({
+    competencyId: null,
+    competency,
+    score,
+    dimensions: {},
+    strengths: [strength],
+    needsWork: [needsWork],
+    missingPoints: [`Add one concrete example that shows ${competency.toLowerCase()} in action.`],
+    betterStructure: ["Lead with the requirement, then explain the implementation choice and result."],
+    improvedAnswer: `I would begin with the requirement, describe the implementation choice for ${competency.toLowerCase()}, and close with the result or trade-off.`,
+  });
   const evaluations = [
     makeEvaluation("React architecture", architecture, architecture >= 6 ? "The component structure and types show a deliberate separation of concerns." : "You established a workable component starting point.", "Name state ownership and extraction boundaries explicitly as the feature grows."),
     makeEvaluation("TypeScript", architecture, "The solution keeps the domain model visible in the implementation.", "Use types to make loading, error, and selection states impossible to confuse."),

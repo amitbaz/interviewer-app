@@ -50,6 +50,9 @@ function mapEvaluation(row: Row, question: PlannedQuestion): Evaluation {
     dimensions: jsonRecord(row.dimensions) as Evaluation["dimensions"],
     strengths: stringArray(row.strengths),
     needsWork: stringArray(row.weaknesses),
+    missingPoints: stringArray(row.missing_points),
+    betterStructure: stringArray(row.better_structure),
+    improvedAnswer: stringValue(row.improved_answer),
   };
 }
 
@@ -64,6 +67,9 @@ function mapSessionEvaluation(row: Row, competencyNames: Map<string, string>): E
     dimensions: jsonRecord(row.dimensions) as Evaluation["dimensions"],
     strengths: stringArray(row.strengths),
     needsWork: stringArray(row.weaknesses),
+    missingPoints: stringArray(row.missing_points),
+    betterStructure: stringArray(row.better_structure),
+    improvedAnswer: stringValue(row.improved_answer),
   };
 }
 
@@ -306,6 +312,9 @@ export async function recordAnswerAndEvaluation(
     p_dimensions: evaluation.dimensions,
     p_strengths: evaluation.strengths,
     p_needs_work: evaluation.needsWork,
+    p_missing_points: evaluation.missingPoints,
+    p_better_structure: evaluation.betterStructure,
+    p_improved_answer: evaluation.improvedAnswer,
   });
   if (error || !data) throw new RepositoryError("Could not record your interview answer.", error?.code ?? "NO_OWNED_ROW");
   const result = Array.isArray(data) ? data[0] as Row | undefined : data as Row;
@@ -338,6 +347,9 @@ export async function recordConversationTurn(
     p_dimensions: evaluation.dimensions,
     p_strengths: evaluation.strengths,
     p_needs_work: evaluation.needsWork,
+    p_missing_points: evaluation.missingPoints,
+    p_better_structure: evaluation.betterStructure,
+    p_improved_answer: evaluation.improvedAnswer,
     p_next_question_id: next.nextQuestionId,
     p_next_prompt: next.nextPrompt,
     p_follow_up: next.followUp,
@@ -394,6 +406,9 @@ export async function completeHandsOnSession(
       dimensions: evaluation.dimensions,
       strengths: evaluation.strengths,
       needs_work: evaluation.needsWork,
+      missing_points: evaluation.missingPoints,
+      better_structure: evaluation.betterStructure,
+      improved_answer: evaluation.improvedAnswer,
     })),
   });
   if (error || !data) throw new RepositoryError("Could not complete the hands-on interview.", error?.code ?? "NO_OWNED_ROW");

@@ -24,6 +24,9 @@ const evaluation = (score: number, strengths: string[] = [], needsWork: string[]
   dimensions: {},
   strengths,
   needsWork,
+  missingPoints: [],
+  betterStructure: [],
+  improvedAnswer: "",
 });
 
 describe("applyEvaluation", () => {

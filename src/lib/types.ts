@@ -62,6 +62,12 @@ export type Evaluation = {
   >>;
   strengths: string[];
   needsWork: string[];
+  /** Specific content the candidate omitted and should add next time. */
+  missingPoints: string[];
+  /** Recommended sequencing changes that make the answer easier to follow. */
+  betterStructure: string[];
+  /** A concise example of how the answer could be improved without inventing facts. */
+  improvedAnswer: string;
 };
 
 export type CompetencyScope = {
