@@ -191,7 +191,7 @@ begin
     select count(*), count(*) filter (where is_follow_up)
     into v_total, v_follow_ups
     from public.interview_questions
-    where session_id = v_question.session_id
+    where public.interview_questions.session_id = v_question.session_id
       and user_id = v_user_id;
 
     if v_total >= 8 or v_follow_ups >= 3 or v_question.is_follow_up then
@@ -204,7 +204,7 @@ begin
     for v_shift in
       select *
       from public.interview_questions
-      where session_id = v_question.session_id
+      where public.interview_questions.session_id = v_question.session_id
         and user_id = v_user_id
         and sequence > v_question.sequence
       order by sequence desc
