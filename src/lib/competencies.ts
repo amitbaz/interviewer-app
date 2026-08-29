@@ -1,5 +1,15 @@
 import type { Competency, Difficulty, Evaluation } from "@/lib/types";
 
+const clampScore = (score: number): number => {
+  if (!Number.isFinite(score)) return 0;
+  return Math.min(10, Math.max(0, score));
+};
+
+const safeQuestionCount = (questionCount: number): number => {
+  if (!Number.isFinite(questionCount) || questionCount < 0) return 0;
+  return Math.floor(questionCount);
+};
+
 const estimatedLevelFor = (averageScore: number): Difficulty => {
   if (averageScore < 5.5) return "intermediate";
   if (averageScore < 7.5) return "senior";
@@ -25,9 +35,12 @@ export function applyEvaluation(
   evaluation: Evaluation,
   practicedAt: string,
 ): Competency {
-  const questionCount = competency.questionCount + 1;
-  const previousTotal = (competency.averageScore ?? 0) * competency.questionCount;
-  const averageScore = (previousTotal + evaluation.score) / questionCount;
+  const previousQuestionCount = safeQuestionCount(competency.questionCount);
+  const questionCount = previousQuestionCount + 1;
+  const previousAverage = clampScore(competency.averageScore ?? 0);
+  const score = clampScore(evaluation.score);
+  const previousTotal = previousAverage * previousQuestionCount;
+  const averageScore = clampScore((previousTotal + score) / questionCount);
 
   return {
     ...competency,
@@ -36,7 +49,7 @@ export function applyEvaluation(
     lastPracticedAt: practicedAt,
     questionCount,
     averageScore,
-    recentScore: evaluation.score,
+    recentScore: score,
     strengths: mergeRecent(competency.strengths, evaluation.strengths),
     weaknesses: mergeRecent(competency.weaknesses, evaluation.needsWork),
   };

@@ -43,7 +43,42 @@ describe("applyEvaluation", () => {
     );
 
     expect(afterThree.recentScore).toBe(8);
+    expect(afterThree.averageScore).toBe(7);
     expect(afterThree.confidence).toBe("medium");
+  });
+
+  it("keeps scores and averages within the valid 0-to-10 range", () => {
+    const low = applyEvaluation(unassessedReact, evaluation(-1), "now");
+    const high = applyEvaluation(unassessedReact, evaluation(11), "now");
+    const invalid = applyEvaluation(unassessedReact, evaluation(Number.NaN), "now");
+    const repaired = applyEvaluation({ ...unassessedReact, questionCount: 1, averageScore: Number.NaN }, evaluation(8), "now");
+
+    expect(low.recentScore).toBe(0);
+    expect(low.averageScore).toBe(0);
+    expect(high.recentScore).toBe(10);
+    expect(high.averageScore).toBe(10);
+    expect(invalid.recentScore).toBe(0);
+    expect(invalid.averageScore).toBe(0);
+    expect(repaired.averageScore).toBe(4);
+  });
+
+  it("uses the specified confidence boundaries", () => {
+    const afterTwo = [1, 2].reduce(
+      (competency, score) => applyEvaluation(competency, evaluation(score), "now"),
+      unassessedReact,
+    );
+    const afterFive = [1, 2, 3, 4, 5].reduce(
+      (competency, score) => applyEvaluation(competency, evaluation(score), "now"),
+      unassessedReact,
+    );
+    const afterSix = [1, 2, 3, 4, 5, 6].reduce(
+      (competency, score) => applyEvaluation(competency, evaluation(score), "now"),
+      unassessedReact,
+    );
+
+    expect(afterTwo.confidence).toBe("low");
+    expect(afterFive.confidence).toBe("medium");
+    expect(afterSix.confidence).toBe("high");
   });
 
   it("merges non-empty evidence uniquely and retains only the most recent five entries", () => {
