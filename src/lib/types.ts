@@ -25,6 +25,25 @@ export type Competency = {
   weaknesses: string[];
 };
 
+export type EvidenceItem = {
+  id: string;
+  sourceKind: "cv" | "cover_letter" | "summary" | null;
+  sourceExcerpt: string;
+  projectOrEmployer: string | null;
+  ownership: string | null;
+  technologies: string[];
+  decision: string | null;
+  constraint: string | null;
+  outcome: string | null;
+  recency: string | null;
+  confidence: number;
+};
+
+export type ProfileReadiness = {
+  ready: boolean;
+  missing: string[];
+};
+
 export type PlannedQuestion = {
   id: string;
   sequence: number;
@@ -102,6 +121,8 @@ export type Profile = {
   expertise: string[];
   characteristics: string[];
   competencies: Competency[];
+  evidence?: EvidenceItem[];
+  readiness?: ProfileReadiness;
   source: ProfileSource;
   createdAt: string;
   updatedAt: string;

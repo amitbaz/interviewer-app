@@ -1,12 +1,15 @@
 import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { assessProfileReadiness } from "@/lib/coach";
 import type {
   Competency,
   CompetencyScope,
   Difficulty,
+  EvidenceItem,
   Profile,
   ProfileDraft,
+  ProfileReadiness,
   ProfileSource,
 } from "@/lib/types";
 
@@ -78,7 +81,32 @@ function mapSource(rows: Row[]): ProfileSource {
   };
 }
 
-function mapProfile(row: Row, competencies: Competency[], source: ProfileSource): Profile {
+function mapEvidence(row: Row): EvidenceItem {
+  return {
+    id: stringValue(row.id),
+    sourceKind: row.source_kind === "cv" || row.source_kind === "cover_letter" || row.source_kind === "summary"
+      ? row.source_kind
+      : null,
+    sourceExcerpt: stringValue(row.source_excerpt),
+    projectOrEmployer: typeof row.project_or_employer === "string" ? row.project_or_employer : null,
+    ownership: typeof row.ownership === "string" ? row.ownership : null,
+    technologies: stringArray(row.technologies),
+    decision: typeof row.decision === "string" ? row.decision : null,
+    constraint: typeof row.constraint_text === "string" ? row.constraint_text : null,
+    outcome: typeof row.outcome === "string" ? row.outcome : null,
+    recency: typeof row.recency === "string" ? row.recency : null,
+    confidence: Number(row.confidence ?? 0),
+  };
+}
+
+function readinessFromRow(row: Row, evidence: EvidenceItem[]): ProfileReadiness {
+  const fallback = assessProfileReadiness(evidence);
+  const ready = typeof row.profile_ready === "boolean" ? row.profile_ready : fallback.ready;
+  const missing = Array.isArray(row.profile_missing) ? stringArray(row.profile_missing) : fallback.missing;
+  return { ready, missing };
+}
+
+function mapProfile(row: Row, competencies: Competency[], source: ProfileSource, evidence: EvidenceItem[]): Profile {
   return {
     userId: stringValue(row.user_id),
     role: typeof row.role === "string" ? row.role : null,
@@ -88,6 +116,8 @@ function mapProfile(row: Row, competencies: Competency[], source: ProfileSource)
     expertise: stringArray(row.expertise),
     characteristics: stringArray(row.characteristics),
     competencies,
+    evidence,
+    readiness: readinessFromRow(row, evidence),
     source,
     createdAt: stringValue(row.created_at),
     updatedAt: stringValue(row.updated_at),
@@ -132,17 +162,23 @@ export async function getProfile(supabase: SupabaseClient, userId: string): Prom
   if (error) throw new RepositoryError("Could not load your profile.", error.code);
   if (!profile) return null;
 
-  const [documentsResult, competenciesResult] = await Promise.all([
+  const [documentsResult, competenciesResult, evidenceResult] = await Promise.all([
     supabase.from("source_documents").select("*").eq("user_id", userId),
     supabase.from("competencies").select("*").eq("user_id", userId).eq("is_active", true).order("name"),
+    supabase.from("profile_evidence").select("*").eq("user_id", userId).order("created_at"),
   ]);
   if (documentsResult.error) throw new RepositoryError("Could not load your source documents.", documentsResult.error.code);
   if (competenciesResult.error) throw new RepositoryError("Could not load your competencies.", competenciesResult.error.code);
+  if (evidenceResult.error && evidenceResult.error.code !== "42P01") {
+    throw new RepositoryError("Could not load your evidence.", evidenceResult.error.code);
+  }
 
+  const evidence = ((evidenceResult.data ?? []) as Row[]).map(mapEvidence);
   return mapProfile(
     profile as Row,
     ((competenciesResult.data ?? []) as Row[]).map(mapCompetency),
     mapSource((documentsResult.data ?? []) as Row[]),
+    evidence,
   );
 }
 
@@ -152,6 +188,8 @@ export async function saveProfile(
   userId: string,
   profile: ProfileDraft,
   source: ProfileSource,
+  evidence: EvidenceItem[] = [],
+  readiness: ProfileReadiness = assessProfileReadiness(evidence),
 ): Promise<Profile> {
   const { error } = await supabase.rpc("save_profile_bundle", {
     p_role: profile.role,
@@ -164,6 +202,21 @@ export async function saveProfile(
     p_cv_file_name: source.cvFileName ?? null,
     p_cover_letter_text: source.coverLetter,
     p_cover_letter_file_name: source.coverLetterFileName ?? null,
+    p_evidence: evidence.map((item, index) => ({
+      id: item.id || `evidence-${index + 1}`,
+      source_kind: item.sourceKind,
+      source_excerpt: item.sourceExcerpt,
+      project_or_employer: item.projectOrEmployer,
+      ownership: item.ownership,
+      technologies: item.technologies,
+      decision: item.decision,
+      constraint: item.constraint,
+      outcome: item.outcome,
+      recency: item.recency,
+      confidence: item.confidence,
+    })),
+    p_profile_ready: readiness.ready,
+    p_profile_missing: readiness.missing,
     p_scope: profileScopeRows(userId, profile).map((row) => ({
       name: row.name,
       relevance: row.relevance,

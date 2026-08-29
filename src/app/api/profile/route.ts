@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { analyzeProfile, extractPdfText } from "@/lib/coach";
+import { analyzeProfile, assessProfileReadiness, extractEngineeringEvidence, extractPdfText } from "@/lib/coach";
 import { getProfile, saveProfile } from "@/lib/repositories/profile";
 import { requireUser } from "@/lib/supabase/server";
 import type { ProfileDraft, ProfileSource } from "@/lib/types";
@@ -43,18 +43,30 @@ export async function POST(request: Request) {
   } catch (caught) {
     return NextResponse.json({ error: caught instanceof Error ? caught.message : "Could not read that CV." }, { status: 400 });
   }
-  if (typeof cvText !== "string" || cvText.trim().length < 80) {
+  if (typeof cvText !== "string" || cvText.trim().length === 0) {
     return NextResponse.json({ error: "Paste at least a short CV or professional summary." }, { status: 400 });
   }
   try {
-    const profile = await analyzeProfile(cvText.trim(), String(coverLetter));
+    const cv = cvText.trim();
+    const narrative = String(coverLetter);
+    const [profile, evidence] = await Promise.all([
+      analyzeProfile(cv, narrative),
+      extractEngineeringEvidence(cv, narrative),
+    ]);
+    const readiness = assessProfileReadiness(evidence);
+    if (!readiness.ready) {
+      return NextResponse.json({
+        error: `Add ${readiness.missing.join(", ")} before starting a personalized interview.`,
+        readiness,
+      }, { status: 400 });
+    }
     const source: ProfileSource = {
-      cvText: cvText.trim(),
-      coverLetter: String(coverLetter),
+      cvText: cv,
+      coverLetter: narrative,
       cvFileName,
     };
     return NextResponse.json({
-      profile: await saveProfile(supabase, user.id, profile, source),
+      profile: await saveProfile(supabase, user.id, profile, source, evidence, readiness),
       demoMode: !process.env.GEMINI_API_KEY,
     });
   } catch (error) {
@@ -100,7 +112,14 @@ export async function PUT(request: Request) {
       competencies: existing.competencies.map((competency) => ({ name: competency.name, relevance: competency.relevance })),
     };
     return NextResponse.json({
-      profile: await saveProfile(supabase, user.id, updated, existing.source),
+      profile: await saveProfile(
+        supabase,
+        user.id,
+        updated,
+        existing.source,
+        existing.evidence ?? [],
+        existing.readiness ?? assessProfileReadiness(existing.evidence ?? []),
+      ),
       demoMode: !process.env.GEMINI_API_KEY,
     });
   } catch (error) {

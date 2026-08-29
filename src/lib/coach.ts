@@ -4,7 +4,18 @@ import { z } from "zod";
 import { applyEvaluation } from "@/lib/competencies";
 import { geminiModel, geminiRequestError } from "@/lib/gemini";
 import { MAX_CV_PDF_BYTES } from "@/lib/upload-limits";
-import type { Evaluation, FollowUpDraft, HandsOnExercise, InterviewSession, PlannedQuestion, Profile, ProfileDraft, ProfileSource } from "@/lib/types";
+import type {
+  EvidenceItem,
+  Evaluation,
+  FollowUpDraft,
+  HandsOnExercise,
+  InterviewSession,
+  PlannedQuestion,
+  Profile,
+  ProfileDraft,
+  ProfileReadiness,
+  ProfileSource,
+} from "@/lib/types";
 
 const dimensions = ["correctness", "depth", "clarity", "structure", "practicalExperience", "tradeOffAwareness", "communication", "confidence", "relevance"] as const;
 const profileSchema = z.object({
@@ -25,6 +36,20 @@ const turnSchema = z.object({
   shouldFollowUp: z.boolean(),
   evaluation: evaluationSchema,
 });
+const evidenceSchema = z.object({
+  id: z.string().min(1).optional(),
+  sourceKind: z.enum(["cv", "cover_letter", "summary"]).nullable().optional(),
+  sourceExcerpt: z.string().min(1),
+  projectOrEmployer: z.string().nullable().optional(),
+  ownership: z.string().nullable().optional(),
+  technologies: z.array(z.string().min(1)).default([]),
+  decision: z.string().nullable().optional(),
+  constraint: z.string().nullable().optional(),
+  outcome: z.string().nullable().optional(),
+  recency: z.string().nullable().optional(),
+  confidence: z.number().min(0).max(1),
+});
+const evidenceListSchema = z.union([z.array(evidenceSchema), z.object({ evidence: z.array(evidenceSchema) })]);
 
 const handsOnStarter = `import { useEffect, useRef, useState } from "react";
 
@@ -69,6 +94,102 @@ async function modelJson<T>(prompt: string, schema: z.ZodType<T>): Promise<T | n
     const output = body.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("");
     return output ? schema.parse(JSON.parse(output)) : null;
   } catch { return null; }
+}
+
+function normalizeText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : null;
+}
+
+function normalizeEvidenceItem(value: z.infer<typeof evidenceSchema>, index: number): EvidenceItem {
+  return {
+    id: normalizeText(value.id) ?? `evidence-${index + 1}`,
+    sourceKind: value.sourceKind ?? null,
+    sourceExcerpt: value.sourceExcerpt.trim(),
+    projectOrEmployer: normalizeText(value.projectOrEmployer),
+    ownership: normalizeText(value.ownership),
+    technologies: [...new Set(value.technologies.map((technology) => technology.trim()).filter(Boolean))],
+    decision: normalizeText(value.decision),
+    constraint: normalizeText(value.constraint),
+    outcome: normalizeText(value.outcome),
+    recency: normalizeText(value.recency),
+    confidence: value.confidence,
+  };
+}
+
+function techMatches(text: string): string[] {
+  const technologies = [
+    "React",
+    "TypeScript",
+    "JavaScript",
+    "Next.js",
+    "Postgres",
+    "Node.js",
+    "GraphQL",
+    "Redux",
+    "Supabase",
+    "Vercel",
+    "AWS",
+    "Testing",
+    "Accessibility",
+  ];
+  const lower = text.toLowerCase();
+  return technologies.filter((technology) => lower.includes(technology.toLowerCase()));
+}
+
+function fallbackEngineeringEvidence(cvText: string, coverLetter: string): EvidenceItem[] {
+  const text = `${cvText} ${coverLetter}`.replace(/\s+/g, " ").trim();
+  if (!text) return [];
+  const sentences = text.split(/(?<=[.!?])\s+/).map((sentence) => sentence.trim()).filter(Boolean);
+  const verbs = /\b(led|built|shipped|migrated|designed|owned|improved|implemented|launched|reduced|scaled)\b/i;
+  const items: EvidenceItem[] = [];
+  for (const [index, sentence] of sentences.entries()) {
+    if (!verbs.test(sentence)) continue;
+    const technologies = techMatches(sentence);
+    if (!technologies.length && !/\b(frontend|backend|platform|product|checkout|dashboard|search|api|workflow)\b/i.test(sentence)) continue;
+    items.push({
+      id: `evidence-${index + 1}`,
+      sourceKind: null,
+      sourceExcerpt: sentence.slice(0, 320),
+      projectOrEmployer: null,
+      ownership: /\b(i|we|owned|led|built|shipped|designed|implemented|migrated)\b/i.test(sentence) ? sentence.slice(0, 240) : null,
+      technologies,
+      decision: null,
+      constraint: null,
+      outcome: null,
+      recency: null,
+      confidence: technologies.length ? 0.4 : 0.25,
+    });
+    if (items.length === 2) break;
+  }
+  return items;
+}
+
+export async function extractEngineeringEvidence(cvText: string, coverLetter: string): Promise<EvidenceItem[]> {
+  const result = await modelJson(
+    `You are extracting engineering evidence for an interview coach. Return only valid JSON. Produce an array of evidence objects. Never invent facts. Preserve null for unknown optional fields. Each item must include a sourceExcerpt and may include sourceKind, projectOrEmployer, ownership, technologies, decision, constraint, outcome, recency, confidence, and a stable id if available. Use only facts explicitly supported by the supplied text.\nCV:\n${cvText}\nCover letter:\n${coverLetter}`,
+    evidenceListSchema,
+  );
+  if (!result) return fallbackEngineeringEvidence(cvText, coverLetter);
+  const list = Array.isArray(result) ? result : result.evidence;
+  return list.map((item, index) => normalizeEvidenceItem(item, index));
+}
+
+function concreteEvidenceCount(evidence: EvidenceItem[]): number {
+  return evidence.filter((item) => {
+    const hasProject = Boolean(item.projectOrEmployer?.trim()) || Boolean(item.sourceExcerpt.trim());
+    const hasSpecifics = item.technologies.length > 0 || Boolean(item.ownership?.trim()) || Boolean(item.outcome?.trim()) || Boolean(item.decision?.trim());
+    return hasProject && hasSpecifics;
+  }).length;
+}
+
+export function assessProfileReadiness(evidence: EvidenceItem[]): ProfileReadiness {
+  const missing = new Set<string>();
+  if (concreteEvidenceCount(evidence) < 2) missing.add("two concrete engineering projects or work examples");
+  if (!evidence.some((item) => item.technologies.length > 0)) missing.add("identifiable technologies");
+  if (!evidence.some((item) => Boolean(item.ownership?.trim()) || Boolean(item.outcome?.trim()))) missing.add("responsibilities or outcomes");
+  return { ready: missing.size === 0, missing: [...missing] };
 }
 
 /** Extracts factual CV text with Gemini, enforcing hosted upload limits and actionable failures. */

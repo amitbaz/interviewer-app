@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
-import { extractPdfText, initialQuestion, nextTurn } from "@/lib/coach";
+import {
+  assessProfileReadiness,
+  extractEngineeringEvidence,
+  extractPdfText,
+  initialQuestion,
+  nextTurn,
+} from "@/lib/coach";
 import type { InterviewSession, PlannedQuestion } from "@/lib/types";
 
 const planned = (overrides: Partial<PlannedQuestion>): PlannedQuestion => ({
@@ -304,5 +310,111 @@ describe("initialQuestion", () => {
 
     await expect(extractPdfText(oversizedPdf)).rejects.toThrow("under 4 MB");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("extractEngineeringEvidence", () => {
+  it("preserves null fields when parsing Gemini evidence output", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{
+        content: {
+          parts: [{
+            text: JSON.stringify([
+              {
+                id: "evidence-1",
+                sourceKind: "cv",
+                sourceExcerpt: "Led a React migration for the checkout flow.",
+                projectOrEmployer: "Checkout Platform",
+                ownership: "Owned the frontend migration end to end.",
+                technologies: ["React", "TypeScript"],
+                decision: null,
+                constraint: null,
+                outcome: "Cut bundle size by 28%.",
+                recency: "2025-02",
+                confidence: 0.94,
+              },
+            ]),
+          }],
+        },
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    await expect(extractEngineeringEvidence(
+      "I led a React migration for checkout.",
+      "",
+    )).resolves.toEqual([expect.objectContaining({
+      id: "evidence-1",
+      sourceKind: "cv",
+      sourceExcerpt: "Led a React migration for the checkout flow.",
+      projectOrEmployer: "Checkout Platform",
+      ownership: "Owned the frontend migration end to end.",
+      technologies: ["React", "TypeScript"],
+      decision: null,
+      constraint: null,
+      outcome: "Cut bundle size by 28%.",
+      recency: "2025-02",
+      confidence: 0.94,
+    })]);
+  });
+});
+
+describe("assessProfileReadiness", () => {
+  it("rejects a generic profile with only one vague work example", () => {
+    expect(assessProfileReadiness([{
+      id: "evidence-1",
+      sourceKind: null,
+      sourceExcerpt: "Worked on a project.",
+      projectOrEmployer: null,
+      ownership: null,
+      technologies: [],
+      decision: null,
+      constraint: null,
+      outcome: null,
+      recency: null,
+      confidence: 0.2,
+    }])).toEqual({
+      ready: false,
+      missing: expect.arrayContaining([
+        "two concrete engineering projects or work examples",
+        "identifiable technologies",
+        "responsibilities or outcomes",
+      ]),
+    });
+  });
+
+  it("accepts two concrete engineering projects with technologies and outcomes", () => {
+    expect(assessProfileReadiness([
+      {
+        id: "evidence-1",
+        sourceKind: "cv",
+        sourceExcerpt: "Led a React migration for checkout.",
+        projectOrEmployer: "Checkout Platform",
+        ownership: "Owned the frontend migration end to end.",
+        technologies: ["React", "TypeScript"],
+        decision: "Split a large route into smaller bundles.",
+        constraint: "Tight launch window.",
+        outcome: "Cut bundle size by 28%.",
+        recency: "2025-02",
+        confidence: 0.94,
+      },
+      {
+        id: "evidence-2",
+        sourceKind: "cv",
+        sourceExcerpt: "Built observability for API regressions.",
+        projectOrEmployer: "Reliability Tooling",
+        ownership: "Designed the dashboard and alerting flow.",
+        technologies: ["Next.js", "Postgres"],
+        decision: "Added release health dashboards.",
+        constraint: "Small team with limited bandwidth.",
+        outcome: "Reduced incident triage time by 35%.",
+        recency: "2024-11",
+        confidence: 0.91,
+      },
+    ])).toEqual({
+      ready: true,
+      missing: [],
+    });
   });
 });
