@@ -1,0 +1,37 @@
+import { NextResponse } from "next/server";
+
+export const runtime = "nodejs";
+
+export async function POST(request: Request) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return NextResponse.json({ error: "Add GEMINI_API_KEY to enable voice transcription." }, { status: 503 });
+
+  const formData = await request.formData();
+  const audio = formData.get("audio");
+  if (!(audio instanceof File) || !audio.size) return NextResponse.json({ error: "Record an answer before transcribing." }, { status: 400 });
+  if (audio.size > 10 * 1024 * 1024) return NextResponse.json({ error: "Keep recordings under 10 MB for transcription." }, { status: 413 });
+
+  try {
+    const model = process.env.GEMINI_MODEL ?? "gemini-3.6-flash";
+    const data = Buffer.from(await audio.arrayBuffer()).toString("base64");
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify({
+        contents: [{ parts: [
+          { text: "Transcribe this interview answer accurately. Return only the spoken words, preserving the speaker's meaning. Do not add a heading, notes, or commentary." },
+          { inlineData: { mimeType: audio.type || "audio/webm", data } },
+        ] }],
+        generationConfig: { temperature: 0 },
+      }),
+      signal: AbortSignal.timeout(45_000),
+    });
+    if (!response.ok) return NextResponse.json({ error: "Gemini could not transcribe this recording. Please try again or type your answer." }, { status: 502 });
+    const body = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+    const transcript = body.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("").trim();
+    if (!transcript) return NextResponse.json({ error: "No speech was detected. You can type your answer instead." }, { status: 422 });
+    return NextResponse.json({ transcript });
+  } catch {
+    return NextResponse.json({ error: "Transcription is unavailable right now. You can type your answer instead." }, { status: 502 });
+  }
+}
