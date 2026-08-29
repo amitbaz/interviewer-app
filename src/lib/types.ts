@@ -58,6 +58,28 @@ export type Evaluation = {
   needsWork: string[];
 };
 
+export type CompetencyScope = {
+  name: string;
+  relevance: number;
+};
+
+export type ProfileDraft = {
+  role: string | null;
+  seniority: string | null;
+  summary: string | null;
+  narrative: string | null;
+  expertise: string[];
+  characteristics: string[];
+  competencies: CompetencyScope[];
+};
+
+export type ProfileSource = {
+  cvText: string;
+  coverLetter: string;
+  cvFileName?: string | null;
+  coverLetterFileName?: string | null;
+};
+
 export type Profile = {
   userId: string;
   role: string | null;
@@ -66,6 +88,8 @@ export type Profile = {
   narrative: string | null;
   expertise: string[];
   characteristics: string[];
+  competencies: Competency[];
+  source: ProfileSource;
   createdAt: string;
   updatedAt: string;
 };
@@ -74,6 +98,21 @@ export type Message = {
   id: string;
   role: "interviewer" | "candidate";
   content: string;
+  createdAt: string;
+};
+
+export type HandsOnExercise = {
+  title: string;
+  durationMinutes: number;
+  briefing: string;
+  requirements: string[];
+  starterCode: string;
+};
+
+export type HandsOnCheckpoint = {
+  id: string;
+  code: string;
+  note: string;
   createdAt: string;
 };
 
@@ -87,6 +126,10 @@ export type InterviewSession = {
   exercise: Record<string, unknown>;
   resultSummary: Record<string, unknown>;
   overallScore: number | null;
+  questions: PlannedQuestion[];
+  checkpoints: HandsOnCheckpoint[];
+  evaluations: Evaluation[];
+  messages: Message[];
   createdAt: string;
   updatedAt: string;
 };
