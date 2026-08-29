@@ -1,22 +1,39 @@
 import { NextResponse } from "next/server";
 import { analyzeProfile, extractPdfText } from "@/lib/coach";
-import { getProfile, saveProfile } from "@/lib/db";
+import { getProfile, saveProfile } from "@/lib/repositories/profile";
+import { requireUser } from "@/lib/supabase/server";
+import type { ProfileDraft, ProfileSource } from "@/lib/types";
 
 export const runtime = "nodejs";
 
 export async function GET() {
-  return NextResponse.json({ profile: getProfile(), demoMode: !process.env.GEMINI_API_KEY });
+  try {
+    const { supabase, user } = await requireUser();
+    return NextResponse.json({ profile: await getProfile(supabase, user.id), demoMode: !process.env.GEMINI_API_KEY });
+  } catch (error) {
+    return errorResponse(error);
+  }
 }
 
 export async function POST(request: Request) {
+  let supabase;
+  let user;
+  try {
+    ({ supabase, user } = await requireUser());
+  } catch (error) {
+    return errorResponse(error);
+  }
+
   let cvText: unknown;
   let coverLetter: unknown = "";
+  let cvFileName: string | null = null;
   try {
     if (request.headers.get("content-type")?.includes("multipart/form-data")) {
       const formData = await request.formData();
       const cv = formData.get("cv");
       coverLetter = formData.get("coverLetter") ?? "";
       if (!(cv instanceof File) || cv.type !== "application/pdf") return NextResponse.json({ error: "Upload a PDF CV or paste a professional summary." }, { status: 400 });
+      cvFileName = cv.name;
       cvText = await extractPdfText(cv);
     } else {
       const body = await request.json();
@@ -29,23 +46,71 @@ export async function POST(request: Request) {
   if (typeof cvText !== "string" || cvText.trim().length < 80) {
     return NextResponse.json({ error: "Paste at least a short CV or professional summary." }, { status: 400 });
   }
-  const profile = await analyzeProfile(cvText.trim(), String(coverLetter));
-  return NextResponse.json({ profile: saveProfile(profile), demoMode: !process.env.GEMINI_API_KEY });
+  try {
+    const profile = await analyzeProfile(cvText.trim(), String(coverLetter));
+    const source: ProfileSource = {
+      cvText: cvText.trim(),
+      coverLetter: String(coverLetter),
+      cvFileName,
+    };
+    return NextResponse.json({
+      profile: await saveProfile(supabase, user.id, profile, source),
+      demoMode: !process.env.GEMINI_API_KEY,
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
 }
 
 export async function PUT(request: Request) {
-  const { profile } = await request.json();
+  let supabase;
+  let user;
+  try {
+    ({ supabase, user } = await requireUser());
+  } catch (error) {
+    return errorResponse(error);
+  }
+
+  let profile: unknown;
+  try {
+    ({ profile } = await request.json());
+  } catch {
+    return NextResponse.json({ error: "Profile data is required." }, { status: 400 });
+  }
   if (!profile || typeof profile !== "object") return NextResponse.json({ error: "Profile data is required." }, { status: 400 });
-  if (typeof profile.role !== "string" || !profile.role.trim() || typeof profile.seniority !== "string" || !profile.seniority.trim()) {
+  const editable = profile as Record<string, unknown>;
+  if (typeof editable.role !== "string" || !editable.role.trim() || typeof editable.seniority !== "string" || !editable.seniority.trim()) {
     return NextResponse.json({ error: "Add a role and seniority before confirming your profile." }, { status: 400 });
   }
-  if (typeof profile.narrative !== "string" || !profile.narrative.trim() || !Array.isArray(profile.expertise)) {
+  if (typeof editable.narrative !== "string" || !editable.narrative.trim() || !Array.isArray(editable.expertise)) {
     return NextResponse.json({ error: "Add a short narrative and at least one area of expertise." }, { status: 400 });
   }
-  const expertise = profile.expertise.filter((item: unknown) => typeof item === "string" && item.trim()).map((item: string) => item.trim()).slice(0, 10);
+  const expertise = editable.expertise.filter((item: unknown) => typeof item === "string" && item.trim()).map((item: string) => item.trim()).slice(0, 10);
   if (!expertise.length) return NextResponse.json({ error: "Add at least one area of expertise." }, { status: 400 });
-  const existing = getProfile();
-  if (!existing) return NextResponse.json({ error: "Create a profile first." }, { status: 400 });
-  const updated = { ...existing, role: profile.role.trim(), seniority: profile.seniority.trim(), narrative: profile.narrative.trim(), expertise };
-  return NextResponse.json({ profile: saveProfile(updated), demoMode: !process.env.GEMINI_API_KEY });
+  try {
+    const existing = await getProfile(supabase, user.id);
+    if (!existing) return NextResponse.json({ error: "Create a profile first." }, { status: 400 });
+    const updated: ProfileDraft = {
+      role: editable.role.trim(),
+      seniority: editable.seniority.trim(),
+      summary: existing.summary,
+      narrative: editable.narrative.trim(),
+      expertise,
+      characteristics: existing.characteristics,
+      competencies: existing.competencies.map((competency) => ({ name: competency.name, relevance: competency.relevance })),
+    };
+    return NextResponse.json({
+      profile: await saveProfile(supabase, user.id, updated, existing.source),
+      demoMode: !process.env.GEMINI_API_KEY,
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+function errorResponse(error: unknown) {
+  if (error instanceof Error && error.message === "UNAUTHENTICATED") {
+    return NextResponse.json({ error: "Sign in to continue." }, { status: 401 });
+  }
+  return NextResponse.json({ error: "Could not complete your profile request." }, { status: 500 });
 }

@@ -1,8 +1,18 @@
 import { NextResponse } from "next/server";
+import { requireUser } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
+  try {
+    await requireUser();
+  } catch (error) {
+    if (error instanceof Error && error.message === "UNAUTHENTICATED") {
+      return NextResponse.json({ error: "Sign in to continue." }, { status: 401 });
+    }
+    return NextResponse.json({ error: "Transcription is unavailable right now. You can type your answer instead." }, { status: 502 });
+  }
+
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return NextResponse.json({ error: "Add GEMINI_API_KEY to enable voice transcription." }, { status: 503 });
 

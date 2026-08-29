@@ -5,7 +5,7 @@ A personal, single-user interview-practice POC for experienced frontend engineer
 ## What works now
 
 - CV PDF upload or professional-summary paste → generated, editable professional profile
-- Local SQLite persistence (no account or login)
+- Supabase Postgres persistence with Google sign-in and user-scoped access
 - Responsive Home, Profile, Practice, Progress, Interview, and Results screens
 - Conversational interview sessions with saved messages, feedback, and follow-ups
 - Hands-on React + TypeScript interview with persisted code checkpoints, interviewer prompts, and technical feedback
@@ -31,7 +31,32 @@ GEMINI_API_KEY=your_key_here
 GEMINI_MODEL=gemini-3.6-flash
 ```
 
-Create the key in Google AI Studio. Gemini's free tier is rate-limited and Google states that free-tier content may be used to improve its products, so do not use it with sensitive career data. Keep `.env.local` private. Local profile and interview data is stored in `data/interview-coach.db`, which is ignored by Git.
+Create the key in Google AI Studio. Gemini's free tier is rate-limited and Google states that free-tier content may be used to improve its products, so do not use it with sensitive career data. Keep `.env.local` private. Supabase stores profile, interview, and source-document data with user-scoped access policies.
+
+## Supabase + Google setup
+
+The hosted POC uses Supabase Postgres, Auth, and private Storage. For a local or Vercel deployment:
+
+1. Create a free Supabase project. Install and authenticate the Supabase CLI, link the repository to the project, and run `supabase db push`. If the CLI is unavailable, paste `supabase/migrations/202608290001_adaptive_interview_foundation.sql` into the Supabase SQL Editor and run it.
+2. Copy the Supabase project URL and publishable key from Project Settings → API into `.env.local`:
+
+   ```bash
+   NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+   NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_your_key
+   ```
+
+3. In Google Cloud Console, create an OAuth client with application type **Web application**. Add `http://localhost:3000` and your Vercel production origin (for example, `https://your-app.vercel.app`) to **Authorized JavaScript origins**. In **Authorized redirect URIs**, add the Supabase Google provider callback URL shown in the Supabase Auth provider setup.
+4. In Supabase, open **Auth → Providers → Google**, enable Google, and add the Google OAuth client ID and client secret.
+5. In Supabase, open **Auth → URL Configuration**, set the **Site URL** to the deployment origin, and add these redirect URLs:
+
+   ```text
+   http://localhost:3000/auth/callback
+   https://<vercel-domain>/auth/callback
+   ```
+
+6. In Vercel, add `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `GEMINI_API_KEY`, and optional `GEMINI_MODEL` as project environment variables, then deploy from the connected repository.
+
+Supabase's free projects pause after one week of inactivity and do not include automatic backups. Resume inactive projects when needed and export/backup important data separately.
 
 ## Verify
 

@@ -4,28 +4,14 @@ This document records the gaps between the current implementation and the approv
 
 ## P0 gaps
 
-### Adaptive interview planning
+### Addressed: adaptive interview foundation
 
-The app does not yet choose questions using previous sessions, competency relevance, confidence, recency, weakness, or a difficulty fit. The deterministic fallback follows a fixed sequence, and the live-model prompt does not receive competency scores or prior-session history. This leaves the POC unable to demonstrate that a subsequent interview is materially better targeted.
+The first recommended implementation slice is now addressed. The app has a normalized competency knowledge graph with evidence-backed state, passes scoped career context into conversational interviewing, and plans subsequent conversational interviews using competency relevance, confidence, recency, weakness, and difficulty fit. The deterministic fallback uses the same persisted plan and context, and sessions enforce the five-question backbone, controlled follow-ups, and the eight-question limit.
 
-Relevant PRD: sections 20–21, 49, and 50.
-
-### Career-grounded interviewing
-
-The live interviewer receives the role, seniority, and expertise, but not the factual CV details, career narrative, cover-letter context, or reusable stories. It therefore cannot reliably probe the candidate's real projects and achievements.
-
-Relevant PRD: sections 7, 14, 16, and 17.
-
-### Competency knowledge graph
-
-Each competency currently has only a name, score, and focus. Missing fields include relevance, expected level, estimated level, confidence, last practiced, question count, average/recent score, strengths, and weaknesses.
-
-Relevant PRD: section 9.
+Relevant PRD: sections 7, 9, 14, 16–17, 20–21, 49, and 50.
 
 ### Conversational interview structure and feedback
 
-- No explicit 5–8-question plan, category mix, difficulty tracking, or natural session completion.
-- No robust mechanism to avoid repeating mastered areas.
 - Results do not offer expandable per-question feedback with the question, answer, missing points, better structure, and a tailored improved answer.
 - Individual evaluations do not capture the full set of relevant dimensions: correctness, depth, clarity, structure, practical experience, trade-offs, communication, confidence, and relevance.
 
@@ -33,7 +19,7 @@ Relevant PRD: sections 13–15 and 22–24.
 
 ### Readiness and progress insights
 
-Readiness is currently a simple average of seeded competency scores, so it is non-zero before the user has completed an interview. It does not weight competency relevance or confidence. The Progress screen also lacks recent-improvement trends and recurring-weakness coaching.
+The Progress screen lacks fuller readiness scoring, recent-improvement trends, and recurring-weakness coaching. The new-user Home state correctly avoids presenting a readiness score before evidence exists.
 
 Relevant PRD: sections 26–27 and 50.
 
@@ -86,11 +72,10 @@ Relevant PRD: sections 16–17, 28–34, and 30.7, 30.13–30.16.
 
 ## Recommended implementation order
 
-1. Build the competency and interview-planning model, then pass career context and prior performance into the interviewer.
-2. Add per-question feedback, meaningful readiness, and progress trends.
-3. Improve hands-on execution and evaluation, then make exercises adapt to performance.
-4. Add document deletion/reset and complete the Profile settings.
-5. Add research/market intelligence, story coaching, focused practice, and interviewer hints.
+1. Add per-question feedback, fuller readiness, and progress trends.
+2. Improve hands-on execution and evaluation, then make exercises adapt to performance.
+3. Add document deletion/reset and complete the Profile settings.
+4. Add research/market intelligence, story coaching, focused practice, and interviewer hints.
 
 ## Out of scope for the POC
 

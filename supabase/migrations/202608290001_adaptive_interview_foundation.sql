@@ -25,6 +25,7 @@ create table public.competencies (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
   name text not null,
+  normalized_name text generated always as (lower(name)) stored,
   relevance numeric not null default 0 check (relevance between 0 and 1),
   expected_level text not null check (expected_level in ('foundational', 'intermediate', 'senior', 'advanced')),
   estimated_level text check (estimated_level in ('foundational', 'intermediate', 'senior', 'advanced')),
@@ -37,7 +38,8 @@ create table public.competencies (
   weaknesses jsonb not null default '[]'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  unique (id, user_id)
+  unique (id, user_id),
+  unique (user_id, normalized_name)
 );
 
 create table public.interview_sessions (
@@ -99,7 +101,6 @@ create table public.hands_on_checkpoints (
   foreign key (session_id, user_id) references public.interview_sessions (id, user_id) on delete cascade
 );
 
-create unique index competencies_user_name_key on public.competencies (user_id, lower(name));
 create index interview_sessions_user_created_idx on public.interview_sessions (user_id, created_at desc);
 create unique index interview_questions_session_sequence_key on public.interview_questions (session_id, sequence);
 create unique index question_evaluations_question_key on public.question_evaluations (question_id);
@@ -263,3 +264,71 @@ end;
 $$;
 
 grant execute on function public.record_interview_evidence(uuid, text, numeric, jsonb, jsonb, jsonb) to authenticated;
+
+create or replace function public.create_conversation_session_with_plan(p_plan jsonb)
+returns table(session_id uuid)
+language plpgsql
+security invoker
+set search_path = public
+as $$
+declare
+  v_user_id uuid := auth.uid();
+  v_session_id uuid;
+  v_count integer;
+  v_min_sequence integer;
+  v_max_sequence integer;
+  v_distinct_sequences integer;
+  v_categories text[];
+  v_has_follow_up boolean;
+begin
+  if v_user_id is null then
+    raise exception 'Authentication is required' using errcode = '42501';
+  end if;
+  if jsonb_typeof(p_plan) <> 'array' or jsonb_array_length(p_plan) <> 5 then
+    raise exception 'Conversation plan must contain the five-question backbone' using errcode = '22023';
+  end if;
+
+  select count(*), min(sequence), max(sequence), count(distinct sequence),
+    array_agg(category order by sequence), bool_or(is_follow_up)
+  into v_count, v_min_sequence, v_max_sequence, v_distinct_sequences, v_categories, v_has_follow_up
+  from jsonb_to_recordset(p_plan) as plan(
+    sequence integer,
+    category text,
+    competency_id uuid,
+    difficulty text,
+    is_follow_up boolean,
+    prompt text
+  );
+
+  if v_count <> 5
+    or v_min_sequence <> 1
+    or v_max_sequence <> 5
+    or v_distinct_sequences <> 5
+    or v_has_follow_up
+    or v_categories <> array['introduction', 'experience', 'technical', 'architecture', 'behavioral']::text[] then
+    raise exception 'Conversation plan must contain the exact five-question backbone' using errcode = '22023';
+  end if;
+
+  insert into public.interview_sessions (user_id, kind, status)
+  values (v_user_id, 'conversation', 'active')
+  returning id into v_session_id;
+
+  insert into public.interview_questions (
+    user_id, session_id, sequence, category, competency_id, difficulty, is_follow_up, prompt, asked_at
+  )
+  select v_user_id, v_session_id, plan.sequence, plan.category, plan.competency_id,
+    plan.difficulty, plan.is_follow_up, plan.prompt, now()
+  from jsonb_to_recordset(p_plan) as plan(
+    sequence integer,
+    category text,
+    competency_id uuid,
+    difficulty text,
+    is_follow_up boolean,
+    prompt text
+  );
+
+  return query select v_session_id;
+end;
+$$;
+
+grant execute on function public.create_conversation_session_with_plan(jsonb) to authenticated;

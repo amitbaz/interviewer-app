@@ -98,7 +98,8 @@ function relatedExpertise(name: string, expertise: string[]): boolean {
   const values = expertise.map((item) => item.toLowerCase());
   if (name === "React architecture") return values.some((item) => /react|frontend|front-end|ui/.test(item));
   if (name === "TypeScript") return values.some((item) => /typescript|\bts\b/.test(item));
-  return values.some((item) => /system|architecture|distributed|backend|platform/.test(item));
+  if (name === "System design") return values.some((item) => /system|architecture|distributed|backend|platform/.test(item));
+  return false;
 }
 
 /** Creates scope only; it deliberately never creates an assessment score. */
@@ -114,6 +115,16 @@ export function competencyScopeFor(expertise: string[]): CompetencyScope[] {
     }
   }
   return [...scopes.values()];
+}
+
+export function profileScopeRows(userId: string, profile: ProfileDraft) {
+  return competencyScopeFor(profile.expertise).map((competency) => ({
+    user_id: userId,
+    name: competency.name,
+    relevance: competency.relevance,
+    expected_level: expectedLevel(profile.seniority),
+    updated_at: new Date().toISOString(),
+  }));
 }
 
 export async function getProfile(supabase: SupabaseClient, userId: string): Promise<Profile | null> {
@@ -170,18 +181,11 @@ export async function saveProfile(
     if (sourceError) throw new RepositoryError("Could not save your source documents.", sourceError.code);
   }
 
-  const scope = profile.competencies.length ? profile.competencies : competencyScopeFor(profile.expertise);
-  const competencyRows = scope.map((competency) => ({
-    user_id: userId,
-    name: competency.name,
-    relevance: competency.relevance,
-    expected_level: expectedLevel(profile.seniority),
-    updated_at: new Date().toISOString(),
-  }));
+  const competencyRows = profileScopeRows(userId, profile);
   if (competencyRows.length) {
     const { error: competencyError } = await supabase
       .from("competencies")
-      .upsert(competencyRows, { onConflict: "user_id,lower(name)" });
+      .upsert(competencyRows, { onConflict: "user_id,normalized_name" });
     if (competencyError) throw new RepositoryError("Could not save your competency scope.", competencyError.code);
   }
 

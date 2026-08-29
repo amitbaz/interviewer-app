@@ -13,6 +13,10 @@ import { RepositoryError } from "@/lib/repositories/profile";
 
 type Row = Record<string, unknown>;
 
+const backboneCategories: PlannedQuestion["category"][] = [
+  "introduction", "experience", "technical", "architecture", "behavioral",
+];
+
 const stringValue = (value: unknown): string => typeof value === "string" ? value : "";
 const stringArray = (value: unknown): string[] => Array.isArray(value)
   ? value.filter((item): item is string => typeof item === "string")
@@ -129,19 +133,28 @@ async function competencyNamesFor(supabase: SupabaseClient, userId: string, ques
 }
 
 async function hydrateSession(supabase: SupabaseClient, userId: string, row: Row): Promise<InterviewSession> {
-  const [{ data: questions, error: questionsError }, { data: evaluations, error: evaluationsError }, { data: checkpoints, error: checkpointsError }] = await Promise.all([
+  const [{ data: questions, error: questionsError }, { data: checkpoints, error: checkpointsError }] = await Promise.all([
     supabase.from("interview_questions").select("*").eq("user_id", userId).eq("session_id", row.id).order("sequence"),
-    supabase.from("question_evaluations").select("*").eq("user_id", userId),
     supabase.from("hands_on_checkpoints").select("*").eq("user_id", userId).eq("session_id", row.id).order("created_at"),
   ]);
-  if (questionsError || evaluationsError || checkpointsError) {
-    throw new RepositoryError("Could not load the interview session.", questionsError?.code ?? evaluationsError?.code ?? checkpointsError?.code);
+  if (questionsError || checkpointsError) {
+    throw new RepositoryError("Could not load the interview session.", questionsError?.code ?? checkpointsError?.code);
   }
   const questionRows = (questions ?? []) as Row[];
-  const questionIds = new Set(questionRows.map((question) => stringValue(question.id)));
-  const relevantEvaluations = ((evaluations ?? []) as Row[])
-    .filter((evaluation) => questionIds.has(stringValue(evaluation.question_id)));
-  return mapSession(row, questionRows, relevantEvaluations, (checkpoints ?? []) as Row[], await competencyNamesFor(supabase, userId, questionRows));
+  const questionIds = questionRows.map((question) => stringValue(question.id)).filter(Boolean);
+  const { data: evaluations, error: evaluationsError } = questionIds.length
+    ? await supabase.from("question_evaluations").select("*").eq("user_id", userId).in("question_id", questionIds)
+    : { data: [], error: null };
+  if (evaluationsError) throw new RepositoryError("Could not load the interview session.", evaluationsError.code);
+  return mapSession(row, questionRows, (evaluations ?? []) as Row[], (checkpoints ?? []) as Row[], await competencyNamesFor(supabase, userId, questionRows));
+}
+
+export function assertConversationPlan(plan: PlannedQuestion[]): void {
+  const isBackbone = plan.length === backboneCategories.length
+    && plan.every((question, index) => question.sequence === index + 1
+      && question.category === backboneCategories[index]
+      && !question.isFollowUp);
+  if (!isBackbone) throw new RepositoryError("A conversation must use the exact five-question backbone.", "INVALID_PLAN");
 }
 
 export async function getSession(supabase: SupabaseClient, userId: string, sessionId: string): Promise<InterviewSession | null> {
@@ -171,27 +184,24 @@ export async function createSessionWithPlan(
   userId: string,
   plan: PlannedQuestion[],
 ): Promise<InterviewSession> {
-  const { data: session, error: sessionError } = await supabase
-    .from("interview_sessions")
-    .insert({ user_id: userId, kind: "conversation", status: "active" })
-    .select("*")
-    .single();
-  if (sessionError || !session) throw new RepositoryError("Could not start the interview.", sessionError?.code);
-
-  const rows = plan.map((question) => ({
-    user_id: userId,
-    session_id: (session as Row).id,
-    sequence: question.sequence,
-    category: question.category,
-    competency_id: question.competencyId,
-    difficulty: question.difficulty,
-    is_follow_up: question.isFollowUp,
-    prompt: question.prompt,
-    asked_at: new Date().toISOString(),
-  }));
-  const { error: questionError } = await supabase.from("interview_questions").insert(rows);
-  if (questionError) throw new RepositoryError("Could not save the interview plan.", questionError.code);
-  return hydrateSession(supabase, userId, session as Row);
+  assertConversationPlan(plan);
+  const { data, error } = await supabase.rpc("create_conversation_session_with_plan", {
+    p_plan: plan.map((question) => ({
+      sequence: question.sequence,
+      category: question.category,
+      competency_id: question.competencyId,
+      difficulty: question.difficulty,
+      is_follow_up: question.isFollowUp,
+      prompt: question.prompt,
+    })),
+  });
+  if (error || !data) throw new RepositoryError("Could not start the interview.", error?.code ?? "NO_OWNED_ROW");
+  const result = Array.isArray(data) ? data[0] as Row | undefined : data as Row;
+  const sessionId = result && stringValue(result.session_id);
+  if (!sessionId) throw new RepositoryError("Could not find the created interview session.", "NO_OWNED_ROW");
+  const session = await getSession(supabase, userId, sessionId);
+  if (!session) throw new RepositoryError("Could not reload the created interview session.", "NO_OWNED_ROW");
+  return session;
 }
 
 export async function createHandsOnSession(
