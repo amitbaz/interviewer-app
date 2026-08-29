@@ -110,6 +110,134 @@ function categoryMissingSignalPrompts(category: QuestionCategory, subject: strin
   return ["Who did you need alignment from and how did you get it?"];
 }
 
+function fallbackCandidateCompetencies(
+  category: QuestionCategory,
+  competencies: Competency[],
+): Competency[] {
+  if (category === "introduction") return [];
+  if (category === "experience" || category === "technical") {
+    return competencies.filter((competency) => !/architecture|system\s*design|communication|behavior/i.test(competency.name));
+  }
+  if (category === "architecture") {
+    return competencies.filter((competency) => /architecture|system\s*design/i.test(competency.name));
+  }
+  if (category === "behavioral") {
+    const behavioral = competencies.filter((competency) => /communication|collaboration|leadership|behavior/i.test(competency.name));
+    if (behavioral.length) return behavioral;
+    const architecture = competencies.filter((competency) => /architecture|system\s*design/i.test(competency.name));
+    if (architecture.length) return architecture;
+  }
+  return competencies;
+}
+
+function normalizeTokens(value: string): string[] {
+  return value
+    .toLowerCase()
+    .split(/[^a-z0-9+.#-]+/)
+    .map((token) => token.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, ""))
+    .filter((token) => token.length > 2);
+}
+
+function evidenceSignals(item: EvidenceItem): string {
+  return [
+    item.sourceExcerpt,
+    item.projectOrEmployer ?? "",
+    item.ownership ?? "",
+    item.decision ?? "",
+    item.constraint ?? "",
+    item.outcome ?? "",
+    item.technologies.join(" "),
+  ].join(" ").toLowerCase();
+}
+
+function categoryEvidenceKeywords(category: QuestionCategory): string[] {
+  if (category === "introduction") return [];
+  if (category === "experience") return ["project", "migration", "ownership", "impact", "launch", "delivery", "checkout"];
+  if (category === "technical") return ["technical", "implementation", "trade", "performance", "bundle", "api", "route", "state", "react"];
+  if (category === "architecture" || category === "system-design") return ["architecture", "system", "design", "scalability", "reliability", "observability", "dashboard", "release", "incident"];
+  return ["collaboration", "alignment", "stakeholder", "team", "decision", "conflict", "impact"];
+}
+
+function scoreEvidenceForQuestion(question: PlannedQuestion, item: EvidenceItem): number {
+  if (question.category === "introduction") return 0;
+  const signals = evidenceSignals(item);
+  const competencyName = question.competencyName?.toLowerCase() ?? "";
+  const questionTokens = normalizeTokens([
+    question.competencyName ?? "",
+    question.prompt,
+    question.category,
+  ].join(" "));
+  const competencyTokens = normalizeTokens(question.competencyName ?? "");
+  const categoryKeywords = categoryEvidenceKeywords(question.category);
+
+  let score = 0;
+  for (const token of competencyTokens) {
+    if (signals.includes(token)) score += 4;
+  }
+  for (const token of questionTokens) {
+    if (signals.includes(token)) score += 2;
+  }
+  for (const token of categoryKeywords) {
+    if (signals.includes(token)) score += 1;
+  }
+  if (competencyName && item.technologies.some((technology) => competencyName.includes(technology.toLowerCase()) || technology.toLowerCase().includes(competencyName))) {
+    score += 3;
+  }
+  if (item.projectOrEmployer?.trim()) score += 1;
+  if (item.ownership?.trim() || item.decision?.trim() || item.constraint?.trim() || item.outcome?.trim()) score += 1;
+  return score;
+}
+
+function scoreCompetencyForCategory(
+  category: QuestionCategory,
+  competency: Competency,
+  evidence: EvidenceItem[],
+): number {
+  const question: PlannedQuestion = {
+    id: `fallback-${category}-${competency.id}`,
+    sequence: 0,
+    category,
+    competencyId: competency.id,
+    competencyName: competency.name,
+    difficulty: chooseDifficulty(competency, competency.expectedLevel),
+    isFollowUp: false,
+    prompt: promptFor(category, competency),
+    answer: null,
+    createdAt: plannerTimestamp,
+  };
+  const evidenceScore = evidence.reduce((best, item) => Math.max(best, scoreEvidenceForQuestion(question, item)), 0);
+  return evidenceScore + competency.relevance;
+}
+
+function fallbackQuestionPlan(
+  category: QuestionCategory,
+  sequence: number,
+  competencies: Competency[],
+  seniority: string,
+  evidence: EvidenceItem[],
+): PlannedQuestion {
+  const candidates = fallbackCandidateCompetencies(category, competencies);
+  const selected = [...candidates].sort((left, right) => {
+    const scoreDelta = scoreCompetencyForCategory(category, right, evidence)
+      - scoreCompetencyForCategory(category, left, evidence);
+    if (scoreDelta !== 0) return scoreDelta;
+    return left.id.localeCompare(right.id);
+  })[0] ?? null;
+
+  return {
+    id: `planned-${sequence}-${selected?.id ?? category}`,
+    sequence,
+    category,
+    competencyId: selected?.id ?? null,
+    competencyName: selected?.name ?? null,
+    difficulty: selected ? chooseDifficulty(selected, seniority) : normalizedSeniority(seniority),
+    isFollowUp: false,
+    prompt: promptFor(category, selected),
+    answer: null,
+    createdAt: plannerTimestamp,
+  };
+}
+
 function blueprintObjective(category: QuestionCategory, competencyName: string | null, item: EvidenceItem | null): string {
   const subject = item?.projectOrEmployer ?? competencyName ?? "recent engineering work";
   if (category === "introduction") return "Establish recent engineering ownership.";
@@ -137,10 +265,18 @@ function blueprintPrompt(question: PlannedQuestion, item: EvidenceItem | null): 
   return `How did you align the team around ${subject}? What disagreement or delivery challenge did you handle?`;
 }
 
-function evidenceForCategory(category: QuestionCategory, evidence: EvidenceItem[]): EvidenceItem | null {
-  if (!evidence.length || category === "introduction") return null;
-  if (category === "experience" || category === "technical") return evidence[0] ?? null;
-  return evidence[1] ?? evidence[0] ?? null;
+function evidenceForQuestion(question: PlannedQuestion, evidence: EvidenceItem[]): EvidenceItem | null {
+  if (!evidence.length || question.category === "introduction") return null;
+  let bestEvidence: EvidenceItem | null = null;
+  let bestScore = 0;
+  for (const item of evidence) {
+    const score = scoreEvidenceForQuestion(question, item);
+    if (score > bestScore) {
+      bestScore = score;
+      bestEvidence = item;
+    }
+  }
+  return bestScore > 0 ? bestEvidence : null;
 }
 
 function normalizeFollowUpLimit(value: number): number {
@@ -262,14 +398,21 @@ export function buildFallbackInterviewBlueprint(
   now: Date = new Date(),
   fallbackReason = "Gemini returned invalid blueprint JSON after one repair attempt.",
 ): InterviewBlueprint {
-  const plan = buildInterviewPlan(competencies, profile.seniority ?? "Intermediate", now);
+  const seniority = profile.seniority ?? "Intermediate";
+  const plan = categories.map((category, index) => fallbackQuestionPlan(
+    category,
+    index + 1,
+    competencies,
+    seniority,
+    evidence,
+  ));
   return {
     status: "limited-grounding",
     fallbackReason,
     maxFollowUps: defaultMaxFollowUps,
     maxQuestions: defaultMaxQuestions,
     createdAt: now.toISOString(),
-    questions: plan.map((question) => defaultBlueprintQuestion(question, evidenceForCategory(question.category, evidence))),
+    questions: plan.map((question) => defaultBlueprintQuestion(question, evidenceForQuestion(question, evidence))),
   };
 }
 

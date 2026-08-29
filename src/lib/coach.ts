@@ -58,6 +58,7 @@ const workExampleVerbPattern = /\b(led|built|shipped|migrated|designed|owned|imp
 const blueprintQuestionDraftSchema = z.object({
   sequence: z.number().int().min(1).max(5),
   category: z.enum(["introduction", "experience", "technical", "architecture", "behavioral"]),
+  competencyId: z.string().nullable().optional(),
   competencyName: z.string().nullable().optional(),
   difficulty: z.enum(["foundational", "intermediate", "senior", "advanced"]),
   objective: z.string().min(1),
@@ -199,7 +200,7 @@ function normalizeBlueprintQuestion(
     id: `blueprint-question-${value.sequence}`,
     sequence: value.sequence,
     category: value.category,
-    competencyId: null,
+    competencyId: normalizeText(value.competencyId),
     competencyName: normalizeText(value.competencyName),
     difficulty: value.difficulty,
     isFollowUp: false,
@@ -292,7 +293,7 @@ export async function generateInterviewBlueprint(
     "You are planning a software-engineering interview blueprint.",
     "Return only valid JSON.",
     "Use the exact five-question backbone in this order: introduction, experience, technical, architecture, behavioral.",
-    "Every question must include objective, evidenceIds, expectedSignals, missingSignalPrompts, followUpLimit, prompt, difficulty, and optional competencyName/sourceConfidence.",
+    "Every question must include objective, evidenceIds, expectedSignals, missingSignalPrompts, followUpLimit, prompt, difficulty, and optional competencyId/competencyName/sourceConfidence.",
     "Only reference evidence ids that appear below.",
     "Do not invent projects, technologies, or outcomes.",
     repair ? "The previous response failed validation. Repair it and satisfy every schema field exactly." : "",
@@ -328,16 +329,17 @@ export async function generateInterviewBlueprint(
 }
 
 function hasConcreteWorkAnchor(item: EvidenceItem): boolean {
-  if (item.projectOrEmployer?.trim()) return true;
-  const supportingText = [
-    item.sourceExcerpt,
-    item.ownership,
-    item.decision,
-    item.constraint,
-    item.outcome,
-  ].filter((value): value is string => typeof value === "string" && value.trim().length > 0).join(" ");
-  return workExampleVerbPattern.test(supportingText)
-    && Boolean(item.ownership?.trim() || item.decision?.trim() || item.outcome?.trim() || item.constraint?.trim());
+  const sourceExcerpt = item.sourceExcerpt.trim();
+  const projectOrEmployer = item.projectOrEmployer?.trim() ?? null;
+  const ownership = item.ownership?.trim() ?? null;
+  const decision = item.decision?.trim() ?? null;
+  const constraint = item.constraint?.trim() ?? null;
+  const outcome = item.outcome?.trim() ?? null;
+  const hasWorkDetails = item.technologies.length > 0 || Boolean(ownership || decision || constraint || outcome);
+  if (!sourceExcerpt || !hasWorkDetails) return false;
+  if (projectOrEmployer && (ownership || decision || outcome)) return true;
+  const supportingText = [sourceExcerpt, ownership, decision, constraint, outcome].filter((value): value is string => typeof value === "string" && value.length > 0).join(" ");
+  return workExampleVerbPattern.test(supportingText) || Boolean(ownership || decision || constraint || outcome);
 }
 
 function concreteEvidenceCount(evidence: EvidenceItem[]): number {

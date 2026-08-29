@@ -386,4 +386,25 @@ describe("adaptive interview planning", () => {
     });
     expect(validateInterviewBlueprint(blueprint, evidence)).toEqual(blueprint);
   });
+
+  it("matches fallback evidence to the selected competency instead of the evidence array position", () => {
+    const reversedEvidence = [...evidence].reverse();
+    const blueprint = buildFallbackInterviewBlueprint(
+      profile,
+      [strongReact, weakSystemDesign],
+      reversedEvidence,
+      new Date("2026-08-29T00:00:00.000Z"),
+    );
+
+    expect(blueprint.questions[1]).toMatchObject({
+      category: "experience",
+      competencyName: "React",
+      evidenceIds: ["evidence-1"],
+    });
+    expect(blueprint.questions[3]).toMatchObject({
+      category: "architecture",
+      competencyName: "System design",
+      evidenceIds: ["evidence-2"],
+    });
+  });
 });

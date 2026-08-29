@@ -90,6 +90,7 @@ describe("mapSession", () => {
         id: "session-1", user_id: "user-1", kind: "conversation", status: "active",
         started_at: "2026-08-29T10:00:00.000Z", completed_at: null, exercise: {}, result_summary: {},
         overall_score: null, blueprint_status: "limited-grounding", blueprint_fallback_reason: "Gemini returned invalid blueprint JSON.",
+        blueprint_max_follow_ups: 2, blueprint_max_questions: 7,
         created_at: "2026-08-29T10:00:00.000Z", updated_at: "2026-08-29T10:00:00.000Z",
       },
       [{
@@ -117,8 +118,11 @@ describe("mapSession", () => {
     expect(mapped.blueprint).toMatchObject({
       status: "limited-grounding",
       fallbackReason: "Gemini returned invalid blueprint JSON.",
+      maxFollowUps: 2,
+      maxQuestions: 7,
       questions: [expect.objectContaining({
         id: "question-1",
+        competencyId: "competency-1",
         objective: "Probe the migration ownership and impact.",
         evidenceIds: ["evidence-1"],
         expectedSignals: ["role", "impact"],
@@ -304,6 +308,8 @@ describe("mapSession", () => {
       payload: expect.objectContaining({
         p_blueprint: expect.objectContaining({
           status: "grounded",
+          max_follow_ups: 3,
+          max_questions: 8,
           questions: expect.arrayContaining([
             expect.objectContaining({
               sequence: 2,

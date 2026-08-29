@@ -191,6 +191,12 @@ export function mapSession(
     ...sessionEvaluationRows.map((evaluation) => mapSessionEvaluation(evaluation, competencyNames)),
   ];
   const kind = row.kind === "hands-on" ? "hands-on" : "conversation";
+  const blueprintMaxFollowUps = row.blueprint_max_follow_ups === null || row.blueprint_max_follow_ups === undefined
+    ? 3
+    : Number(row.blueprint_max_follow_ups);
+  const blueprintMaxQuestions = row.blueprint_max_questions === null || row.blueprint_max_questions === undefined
+    ? 8
+    : Number(row.blueprint_max_questions);
   const blueprint = kind === "conversation" && (
     typeof row.blueprint_status === "string"
     || typeof row.blueprint_fallback_reason === "string"
@@ -199,8 +205,8 @@ export function mapSession(
     ? {
       status: row.blueprint_status === "limited-grounding" ? "limited-grounding" : "grounded",
       fallbackReason: typeof row.blueprint_fallback_reason === "string" ? row.blueprint_fallback_reason : null,
-      maxFollowUps: 3,
-      maxQuestions: 8,
+      maxFollowUps: Number.isFinite(blueprintMaxFollowUps) ? blueprintMaxFollowUps : 3,
+      maxQuestions: Number.isFinite(blueprintMaxQuestions) ? blueprintMaxQuestions : 8,
       createdAt: stringValue(row.created_at),
       questions: blueprintQuestions,
     } satisfies InterviewBlueprint

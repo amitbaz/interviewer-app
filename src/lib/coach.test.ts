@@ -433,6 +433,7 @@ describe("generateInterviewBlueprint", () => {
                 {
                   sequence: 2,
                   category: "experience",
+                  competencyId: "react",
                   competencyName: "React architecture",
                   difficulty: "senior",
                   objective: "Probe the checkout migration ownership and impact.",
@@ -494,6 +495,7 @@ describe("generateInterviewBlueprint", () => {
       questions: expect.arrayContaining([
         expect.objectContaining({
           sequence: 2,
+          competencyId: "react",
           evidenceIds: ["evidence-1"],
           objective: "Probe the checkout migration ownership and impact.",
         }),
@@ -694,6 +696,77 @@ describe("assessProfileReadiness", () => {
       missing: expect.arrayContaining([
         "two concrete engineering projects or work examples",
         "identifiable technologies",
+        "responsibilities or outcomes",
+      ]),
+    });
+  });
+
+  it("accepts concise evidence with an excerpt, technologies, and ownership without a duplicated project label", () => {
+    expect(assessProfileReadiness([
+      {
+        id: "evidence-1",
+        sourceKind: "cv",
+        sourceExcerpt: "React checkout flow with route-splitting.",
+        projectOrEmployer: null,
+        ownership: "Owned the frontend migration end to end.",
+        technologies: ["React", "TypeScript"],
+        decision: null,
+        constraint: null,
+        outcome: "Cut bundle size by 28%.",
+        recency: "2025-02",
+        confidence: 0.94,
+      },
+      {
+        id: "evidence-2",
+        sourceKind: "cv",
+        sourceExcerpt: "Observability flow for API regressions.",
+        projectOrEmployer: null,
+        ownership: "Designed the dashboard and alerting flow.",
+        technologies: ["Next.js", "Postgres"],
+        decision: null,
+        constraint: null,
+        outcome: "Reduced incident triage time by 35%.",
+        recency: "2024-11",
+        confidence: 0.91,
+      },
+    ])).toEqual({
+      ready: true,
+      missing: [],
+    });
+  });
+
+  it("rejects employer-label-only evidence even when technologies are listed", () => {
+    expect(assessProfileReadiness([
+      {
+        id: "evidence-1",
+        sourceKind: "cv",
+        sourceExcerpt: "Checkout Platform",
+        projectOrEmployer: "Checkout Platform",
+        ownership: null,
+        technologies: ["React", "TypeScript"],
+        decision: null,
+        constraint: null,
+        outcome: null,
+        recency: null,
+        confidence: 0.3,
+      },
+      {
+        id: "evidence-2",
+        sourceKind: "cv",
+        sourceExcerpt: "Reliability Tooling",
+        projectOrEmployer: "Reliability Tooling",
+        ownership: null,
+        technologies: ["Next.js"],
+        decision: null,
+        constraint: null,
+        outcome: null,
+        recency: null,
+        confidence: 0.35,
+      },
+    ])).toEqual({
+      ready: false,
+      missing: expect.arrayContaining([
+        "two concrete engineering projects or work examples",
         "responsibilities or outcomes",
       ]),
     });

@@ -1,7 +1,11 @@
 alter table public.interview_sessions
   add column blueprint_status text not null default 'grounded'
     check (blueprint_status in ('grounded', 'limited-grounding')),
-  add column blueprint_fallback_reason text;
+  add column blueprint_fallback_reason text,
+  add column blueprint_max_follow_ups integer not null default 3
+    check (blueprint_max_follow_ups between 0 and 3),
+  add column blueprint_max_questions integer not null default 8
+    check (blueprint_max_questions between 5 and 8);
 
 alter table public.interview_questions
   add column objective text,
@@ -29,6 +33,8 @@ declare
   v_categories text[];
   v_status text;
   v_reason text;
+  v_max_follow_ups integer;
+  v_max_questions integer;
 begin
   if v_user_id is null then
     raise exception 'Authentication is required' using errcode = '42501';
@@ -69,9 +75,19 @@ begin
     raise exception 'Interview blueprint status is invalid' using errcode = '22023';
   end if;
   v_reason := nullif(trim(coalesce(p_blueprint ->> 'fallback_reason', '')), '');
+  v_max_follow_ups := greatest(0, least(3, coalesce((p_blueprint ->> 'max_follow_ups')::integer, 3)));
+  v_max_questions := greatest(5, least(8, coalesce((p_blueprint ->> 'max_questions')::integer, 8)));
 
-  insert into public.interview_sessions (user_id, kind, status, blueprint_status, blueprint_fallback_reason)
-  values (v_user_id, 'conversation', 'active', v_status, v_reason)
+  insert into public.interview_sessions (
+    user_id,
+    kind,
+    status,
+    blueprint_status,
+    blueprint_fallback_reason,
+    blueprint_max_follow_ups,
+    blueprint_max_questions
+  )
+  values (v_user_id, 'conversation', 'active', v_status, v_reason, v_max_follow_ups, v_max_questions)
   returning id into v_session_id;
 
   insert into public.interview_questions (
