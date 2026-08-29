@@ -129,6 +129,23 @@ describe("POST /api/interview", () => {
     expect(json).not.toHaveBeenCalled();
   });
 
+  it("logs the underlying failure while keeping the public error generic", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mocks.getSession.mockRejectedValue(new Error("database function is unavailable"));
+
+    const response = await POST(new Request("http://localhost/api/interview", {
+      method: "POST",
+      body: JSON.stringify({ action: "respond", sessionId: "session-1", answer: "An answer." }),
+    }));
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "Could not complete your interview request." });
+    expect(consoleError).toHaveBeenCalledWith("[api/interview] request failed", expect.objectContaining({
+      message: "database function is unavailable",
+    }));
+    consoleError.mockRestore();
+  });
+
   it("keeps the session active when the fifth backbone answer creates a persisted follow-up", async () => {
     const current = session([1, 2, 3, 4, 5].map((sequence) => question(sequence, sequence < 5 ? "answered" : null)));
     const followUp = question(6, null);
