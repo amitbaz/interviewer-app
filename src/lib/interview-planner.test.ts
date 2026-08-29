@@ -51,9 +51,14 @@ describe("adaptive interview planning", () => {
     const plan = buildInterviewPlan([strongReact, weakSystemDesign], "Senior");
 
     expect(plan).toHaveLength(5);
-    expect(plan.map((question) => question.category)).toEqual(expect.arrayContaining([
-      "introduction", "technical", "architecture", "behavioral",
-    ]));
+    expect(plan.map((question) => question.category)).toEqual([
+      "introduction", "experience", "technical", "architecture", "behavioral",
+    ]);
+    for (let index = 1; index < plan.length; index += 1) {
+      const previous = plan[index - 1].competencyId;
+      const current = plan[index].competencyId;
+      if (previous !== null && current !== null) expect(current).not.toBe(previous);
+    }
     expect(plan.find((question) => question.category === "architecture")?.competencyName).toBe("System design");
   });
 
