@@ -4,21 +4,21 @@ This document records the gaps between the current implementation and the approv
 
 ## P0 gaps
 
-### Addressed: adaptive interview foundation
+### Addressed: software-engineering profile grounding
 
-The first recommended implementation slice is now addressed. The app has a normalized competency knowledge graph with evidence-backed state, passes bounded career context into conversational interviewing, and plans subsequent conversational interviews using competency relevance, confidence, current recency, weakness, and difficulty fit. Generated questions and conditional follow-ups are persisted, sessions enforce the five-question backbone and eight-question limit, and both conversational and hands-on evaluations update durable competency evidence.
+The first accuracy-focused implementation slice is now addressed for software-engineering candidates. The app extracts source-backed engineering evidence, enforces a deterministic meaningful-profile gate, persists a five-question conversational blueprint plus bounded follow-ups, and evaluates each answer against the exact stored question objective instead of a generic score template.
 
 Relevant PRD: sections 7, 9, 14, 16–17, 20–21, 49, and 50.
 
 ### Addressed: conversational interview structure and feedback
 
-Results now offer expandable per-question feedback with the question, answer, strengths, missing points, better structure guidance, and a tailored improved answer. Individual evaluations also persist the PRD-aligned coaching dimensions needed to explain the signal behind each answer.
+Results now offer expandable per-question feedback with the question, answer, source grounding, relevance, supported claims, missing points, unsupported claims, dimension reasons, and a tailored improved answer. Individual evaluations persist the PRD-aligned coaching dimensions needed to explain the signal behind each answer without inventing unsupported details.
 
 Relevant PRD: sections 13–15 and 22–24.
 
 ### Addressed: readiness and progress insights
 
-The Progress screen now distinguishes between no evidence, first-session baseline, and multi-session evidence states. It renders readiness, latest score, score trend, strongest competency, weakest competency, and recurring weakness coaching while the new-user Home state still avoids presenting readiness before evidence exists.
+The Progress screen now distinguishes between no evidence, first-session baseline, and multi-session evidence states. It renders readiness, latest score, score trend, strongest competency, weakest competency, and recurring weakness coaching while preserving explicit profile-readiness states when the source evidence gate still fails.
 
 Relevant PRD: sections 26–27 and 50.
 

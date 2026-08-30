@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { InterviewSession } from "@/lib/types";
+import type { EvidenceItem, InterviewSession } from "@/lib/types";
 
 const evaluationDimensionLabels = [
   ["correctness", "Correctness"],
@@ -34,6 +34,20 @@ function evaluationKey(session: InterviewSession, index: number): string {
   return `${scope}-${index}`;
 }
 
+function joinOrFallback(values: string[], fallback: string): string {
+  return values.length > 0 ? values.join(" · ") : fallback;
+}
+
+function evidenceLabel(item: EvidenceItem): string {
+  const summary = [
+    item.projectOrEmployer?.trim(),
+    item.ownership?.trim(),
+    item.outcome?.trim(),
+  ].filter((value): value is string => Boolean(value));
+
+  return summary.length > 0 ? summary.join(" · ") : item.sourceExcerpt.trim();
+}
+
 function startViewTransition(update: () => void) {
   const documentWithTransition = document as Document & { startViewTransition?: (callback: () => void) => void };
   if (documentWithTransition.startViewTransition) {
@@ -47,9 +61,16 @@ function startViewTransition(update: () => void) {
  * Renders per-evaluation interview coaching with accessible disclosure controls and
  * question-linked details when question evidence exists for that evaluation.
  */
-export function ResultsFeedbackCards({ session }: { session: InterviewSession }) {
+export function ResultsFeedbackCards({
+  session,
+  evidence = [],
+}: {
+  session: InterviewSession;
+  evidence?: EvidenceItem[];
+}) {
   const answeredQuestions = session.questions.filter((question) => Boolean(question.answer));
   const answeredQuestionsById = new Map(answeredQuestions.map((question) => [question.id, question]));
+  const evidenceById = new Map(evidence.map((item) => [item.id, item]));
   const [expandedEvaluationKey, setExpandedEvaluationKey] = useState<string | null>(null);
 
   return (
@@ -66,6 +87,10 @@ export function ResultsFeedbackCards({ session }: { session: InterviewSession })
           const value = evaluation.dimensions[key as EvaluationDimensionKey];
           return typeof value === "number" && Number.isFinite(value);
         });
+        const evidenceTargets = (session.blueprint?.questions.find((question) => question.id === evaluation.questionId)?.evidenceIds ?? [])
+          .map((id) => evidenceById.get(id))
+          .filter((item): item is EvidenceItem => Boolean(item))
+          .map(evidenceLabel);
 
         return (
           <article
@@ -120,6 +145,79 @@ export function ResultsFeedbackCards({ session }: { session: InterviewSession })
                       <p className="font-semibold text-[var(--ink-muted)]">Your answer</p>
                       <p className="mt-1 leading-6">{answeredQuestion.answer}</p>
                     </div>
+                  </div>
+                )}
+                {session.blueprint?.status === "limited-grounding" && (
+                  <div className="rounded-2xl border border-[#e4c9a0] bg-[#fff6eb] px-4 py-3 text-[#8e5e20]">
+                    <p className="text-xs font-semibold uppercase tracking-[.12em]">Limited grounding</p>
+                    <p className="mt-1 leading-6">
+                      {session.blueprint.fallbackReason ?? "This session used a constrained fallback blueprint, so the feedback may be broader than a fully grounded session."}
+                    </p>
+                  </div>
+                )}
+                {evaluation.questionId && (
+                  <div className="space-y-3 rounded-2xl border border-[var(--line)] bg-[#f8f7f2] px-4 py-4">
+                    <div>
+                      <p className="font-semibold text-[var(--ink-muted)]">Question objective</p>
+                      <p className="mt-1 leading-6">{session.blueprint?.questions.find((question) => question.id === evaluation.questionId)?.objective ?? "Ground the answer in the exact question that was asked."}</p>
+                    </div>
+                    <div>
+                      <p className="font-semibold text-[var(--ink-muted)]">Evidence target</p>
+                      {evidenceTargets.length > 0 ? (
+                        <ul className="mt-3 space-y-2 leading-6 text-[var(--ink-muted)]">
+                          {evidenceTargets.map((target) => <li key={target} className="rounded-2xl bg-white px-3 py-3">{target}</li>)}
+                        </ul>
+                      ) : (
+                        <p className="mt-1 leading-6">{joinOrFallback([], "No explicit evidence target recorded.")}</p>
+                      )}
+                    </div>
+                    <div>
+                      <p className="font-semibold text-[var(--ink-muted)]">Expected signals</p>
+                      <p className="mt-1 leading-6">
+                        {joinOrFallback(
+                          session.blueprint?.questions.find((question) => question.id === evaluation.questionId)?.expectedSignals ?? [],
+                          "No expected signals recorded.",
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                )}
+                {"relevance" in evaluation && typeof evaluation.relevance === "number" && (
+                  <div className="rounded-2xl border border-[var(--line)] bg-white px-4 py-4">
+                    <p className="font-semibold text-[var(--ink-muted)]">Relevance</p>
+                    <p className="mt-1 text-lg font-semibold text-[var(--pine)]">{evaluation.relevance.toFixed(1)}/10</p>
+                  </div>
+                )}
+                {"supportedClaims" in evaluation && (evaluation.supportedClaims?.length ?? 0) > 0 && (
+                  <div>
+                    <p className="font-semibold text-[var(--ink-muted)]">Supported claims</p>
+                    <ul className="mt-3 space-y-2 leading-6 text-[var(--ink-muted)]">
+                      {evaluation.supportedClaims?.map((claim) => <li key={claim} className="rounded-2xl bg-[#eef3e7] px-3 py-3 text-[#38502e]">{claim}</li>)}
+                    </ul>
+                  </div>
+                )}
+                {"expectedSignalsPresent" in evaluation && (evaluation.expectedSignalsPresent?.length ?? 0) > 0 && (
+                  <div>
+                    <p className="font-semibold text-[var(--ink-muted)]">Expected signals present</p>
+                    <ul className="mt-3 space-y-2 leading-6 text-[var(--ink-muted)]">
+                      {evaluation.expectedSignalsPresent?.map((signal) => <li key={signal} className="rounded-2xl bg-[#eef3e7] px-3 py-3 text-[#38502e]">{signal}</li>)}
+                    </ul>
+                  </div>
+                )}
+                {"unsupportedClaims" in evaluation && (evaluation.unsupportedClaims?.length ?? 0) > 0 && (
+                  <div>
+                    <p className="font-semibold text-[var(--ink-muted)]">Unsupported claims</p>
+                    <ul className="mt-3 space-y-2 leading-6 text-[var(--ink-muted)]">
+                      {evaluation.unsupportedClaims?.map((claim) => <li key={claim} className="rounded-2xl bg-[#fff6eb] px-3 py-3 text-[#8e5e20]">{claim}</li>)}
+                    </ul>
+                  </div>
+                )}
+                {"dimensionReasons" in evaluation && evaluation.dimensionReasons && (
+                  <div>
+                    <p className="font-semibold text-[var(--ink-muted)]">Dimension reasons</p>
+                    <ul className="mt-3 space-y-2 leading-6 text-[var(--ink-muted)]">
+                      {Object.entries(evaluation.dimensionReasons).map(([dimension, reason]) => <li key={dimension} className="rounded-2xl bg-[#f4f1eb] px-3 py-3">{reason}</li>)}
+                    </ul>
                   </div>
                 )}
                 {dimensions.length > 0 && (

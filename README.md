@@ -1,13 +1,14 @@
 # Relay — AI Interview Coach
 
-A personal, authenticated interview-practice POC for experienced frontend engineers.
+A personal, authenticated interview-practice POC for software-engineering candidates.
 
 ## What works now
 
 - CV PDF upload or professional-summary paste → generated, editable professional profile
+- Source-backed engineering evidence extraction with a meaningful-profile gate before grounded conversational interviews
 - Supabase Postgres persistence with Google sign-in and user-scoped access
 - Responsive Home, Profile, Practice, Progress, Interview, and Results screens
-- Conversational interview sessions with saved messages, feedback, and follow-ups
+- Conversational interview sessions with a persisted five-question blueprint, saved messages, evidence-backed prompts, feedback, and follow-ups
 - Hands-on React + TypeScript interview with persisted code checkpoints, interviewer prompts, and technical feedback
 - Gradual competency updates after completed conversational and hands-on sessions
 - Progress insights that separate no-evidence, first-session baseline, and multi-session trend states with recurring coaching themes
@@ -23,6 +24,8 @@ npm run dev
 ```
 
 Open <http://localhost:3000>.
+
+Current product boundary: the grounded conversational interview flow is implemented for software-engineering profiles only. Relay does not yet do live web research, market-intelligence caching, executable code evaluation, or a cloud IDE.
 
 To use live Gemini responses, create `.env.local`:
 
@@ -72,4 +75,5 @@ The Webpack verification build is used because Turbopack's CSS worker cannot bin
 
 ## Next slices
 
-- Executable preview and automated test runner for the hands-on workspace
+- Live web research and a cached market-intelligence layer for current software-engineering interview expectations
+- Executable candidate-code evaluation with preview, tests, console, and cloud-IDE-style workspace feedback
