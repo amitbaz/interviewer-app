@@ -562,31 +562,20 @@ function groundedEvaluationFor(
   };
 }
 
-function calibrateGroundedEvaluation(
+function groundedModelEvaluation(
   question: BlueprintQuestion,
-  base: GroundedEvaluation,
-  model: Pick<GroundedEvaluation, "supportedClaims" | "expectedSignalsPresent" | "unsupportedClaims"> | null,
   answer: string,
+  value: z.infer<typeof groundedEvaluationSchema>,
 ): GroundedEvaluation {
-  const verifiedClaims = model
-    ? normalizeStrings(model.supportedClaims).filter((claim) => claimMatchesAnswer(claim, splitSentences(answer.trim().length ? answer.trim() : answer), question))
-    : [];
-  const verifiedSignals = model
-    ? normalizeStrings(model.expectedSignalsPresent).filter((signal) => base.expectedSignalsPresent.includes(signal))
-    : [];
-  const supportedClaims = [...new Set([...base.supportedClaims, ...verifiedClaims])].slice(0, 3);
-  const expectedSignalsPresent = [...new Set([...base.expectedSignalsPresent, ...verifiedSignals])].slice(0, question.expectedSignals.length);
-  const unsupportedClaims = base.unsupportedClaims.slice(0, 3);
-  const score = clampScore(base.score + Math.min(1.2, supportedClaims.length * 0.25 + expectedSignalsPresent.length * 0.15 - unsupportedClaims.length * 0.2));
+  const normalized = normalizeGroundedEvaluation(question, value);
+  const answerSentences = splitSentences(answer.trim().length ? answer.trim() : answer);
   return {
-    ...base,
-    score,
-    relevance: base.relevance,
-    supportedClaims,
-    expectedSignalsPresent,
-    unsupportedClaims,
-    improvedAnswer: base.improvedAnswer,
-    dimensionReasons: base.dimensionReasons,
+    ...normalized,
+    supportedClaims: normalized.supportedClaims
+      .filter((claim) => claimMatchesAnswer(claim, answerSentences, question))
+      .slice(0, 3),
+    expectedSignalsPresent: normalized.expectedSignalsPresent.slice(0, question.expectedSignals.length),
+    unsupportedClaims: normalized.unsupportedClaims.slice(0, 3),
   };
 }
 
@@ -606,32 +595,15 @@ function validateGroundedModelEvaluation(
   answer: string,
   value: z.infer<typeof groundedEvaluationSchema>,
 ): { evaluation: GroundedEvaluation; trusted: boolean } {
-  const normalized = normalizeGroundedEvaluation(question, value);
+  const normalized = groundedModelEvaluation(question, answer, value);
   const fallback = groundedEvaluationFor(question, answer);
-  const answerSentences = splitSentences(answer.trim().length ? answer.trim() : answer);
-  const groundedSignals = normalized.expectedSignalsPresent
-    .filter((signal) => fallback.expectedSignalsPresent.includes(signal));
-  const groundedSupportedClaims = normalized.supportedClaims
-    .filter((claim) => claimMatchesAnswer(claim, answerSentences, question));
-  const groundedUnsupportedClaims = normalized.unsupportedClaims
-    .filter((claim) => claimMatchesAnswer(claim, answerSentences, question));
-  const repaired: GroundedEvaluation = calibrateGroundedEvaluation(question, fallback, {
-    supportedClaims: groundedSupportedClaims,
-    expectedSignalsPresent: groundedSignals,
-    unsupportedClaims: groundedUnsupportedClaims,
-  }, answer);
-
-  const materiallyUngrounded = (fallback.supportedClaims.length === 0 && groundedSupportedClaims.length > 0)
-    || (fallback.unsupportedClaims.length > 0 && groundedUnsupportedClaims.length === 0 && fallback.relevance < 5.5)
-    || (fallback.expectedSignalsPresent.length === 0 && normalized.expectedSignalsPresent.length > 0)
-    || (fallback.relevance < 5.5
-      && normalized.relevance >= 7
-      && fallback.supportedClaims.length === 0
-      && fallback.expectedSignalsPresent.length === 0);
+  const answerSignals = question.expectedSignals.filter((signal) => signalMatches(answer, signal));
+  const materiallyUngrounded = normalized.supportedClaims.length === 0
+    && answerSignals.length === 0;
 
   return materiallyUngrounded
     ? { evaluation: fallback, trusted: false }
-    : { evaluation: repaired, trusted: true };
+    : { evaluation: normalized, trusted: true };
 }
 
 async function modelJson<T>(prompt: string, schema: z.ZodType<T>): Promise<T | null> {
@@ -836,7 +808,7 @@ export async function generateInterviewBlueprint(
     "You are planning a software-engineering interview blueprint.",
     "Return only valid JSON.",
     "Use the exact five-question backbone in this order: introduction, experience, technical, architecture, behavioral.",
-    "Every question must include objective, evidenceIds, expectedSignals, missingSignalPrompts, followUpLimit, prompt, difficulty, and optional competencyId/competencyName/sourceConfidence.",
+    "Every question must include objective, evidenceIds, expectedSignals, missingSignalPrompts, rubricCriteria, followUpLimit, prompt, difficulty, and optional competencyId/competencyName/sourceConfidence.",
     "Only reference evidence ids that appear below.",
     "Do not invent projects, technologies, or outcomes.",
     repair ? "The previous response failed validation. Repair it and satisfy every schema field exactly." : "",

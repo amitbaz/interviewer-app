@@ -260,6 +260,7 @@ describe("initialQuestion", () => {
     const requestBody = JSON.parse(String(fetchSpy.mock.calls[0][1]?.body));
     expect(requestBody.contents[0].parts[0].text).toContain("software-engineering interviewer");
     expect(requestBody.contents[0].parts[0].text).not.toContain("senior-frontend interviewer");
+    expect(requestBody.contents[0].parts[0].text).toContain("rubricCriteria");
   });
 
   it("returns a generated prompt for the next planned question when no follow-up is warranted", async () => {
@@ -557,7 +558,7 @@ describe("initialQuestion", () => {
                 missingPoints: ["Explain the rollback trigger."],
                 betterStructure: ["Start with constraints, then explain the migration phases."],
                 improvedAnswer: "I would start with the constraints, phase the migration, and define the rollback trigger before rollout.",
-                supportedClaims: ["phase the rollout carefully"],
+                supportedClaims: ["I phased the rollout carefully."],
                 expectedSignalsPresent: ["trade-off", "impact"],
                 unsupportedClaims: ["We shipped it perfectly."],
                 dimensionReasons: {
@@ -601,16 +602,15 @@ describe("initialQuestion", () => {
     expect(turn.nextQuestion).toBe("How would you phase the migration?");
     expect(turn.evaluation.competencyId).toBe("react-id");
     expect(turn.evaluation.competency).toBe("React architecture");
-    expect(turn.evaluation.score).not.toBe(8.4);
-    expect(turn.evaluation.relevance).not.toBe(8.7);
-    expect(turn.evaluation.supportedClaims).not.toContain("We shipped it perfectly.");
-    expect(turn.evaluation.unsupportedClaims).not.toContain("We shipped it perfectly.");
-    expect(turn.evaluation.improvedAnswer).toEqual(expect.any(String));
+    expect(turn.evaluation.score).toBe(8.4);
+    expect(turn.evaluation.relevance).toBe(8.7);
+    expect(turn.evaluation.supportedClaims).toEqual(["I phased the rollout carefully."]);
+    expect(turn.evaluation.expectedSignalsPresent).toEqual(["trade-off", "impact"]);
+    expect(turn.evaluation.unsupportedClaims).toEqual(["We shipped it perfectly."]);
+    expect(turn.evaluation.improvedAnswer).toContain("rollback trigger");
     expect(turn.evaluation.dimensionReasons).toBeDefined();
-    if (turn.evaluation.dimensionReasons) {
-      expect(turn.evaluation.dimensionReasons.correctness).toEqual(expect.any(String));
-      expect(turn.evaluation.dimensionReasons.relevance).toEqual(expect.any(String));
-    }
+    expect(turn.evaluation.dimensionReasons?.correctness).toContain("migration question");
+    expect(turn.evaluation.dimensionReasons?.relevance).toContain("checkout migration question");
   });
 
   it("requests a bounded follow-up when a weak answer needs clarification", async () => {
@@ -750,8 +750,10 @@ describe("initialQuestion", () => {
       "interviewer: Tell me about the checkout migration.",
     );
 
-    expect(evaluation.score).toBeLessThan(9.9);
-    expect(evaluation.score).toBeGreaterThan(6.5);
+    expect(evaluation.score).toBe(9.9);
+    expect(evaluation.relevance).toBe(9.9);
+    expect(evaluation.supportedClaims).toEqual(["I led the checkout migration and measured the rollout."]);
+    expect(evaluation.expectedSignalsPresent).toEqual(["ownership", "trade-off", "impact"]);
     expect(evaluation.improvedAnswer).toContain("checkout migration");
     expect(evaluation.dimensionReasons.relevance).toContain("checkout migration");
   });
