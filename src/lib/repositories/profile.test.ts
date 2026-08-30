@@ -2,7 +2,46 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
-import { competencyScopeFor, getProfile, profileScopeRows, saveProfile } from "@/lib/repositories/profile";
+import { competencyScopeFor, evidenceKeyFor, getProfile, profileScopeRows, saveProfile } from "@/lib/repositories/profile";
+import type { EvidenceItem } from "@/lib/types";
+
+/** Builds a chainable Supabase query spy: `.eq(...)` repeats, `.order(...)` terminates with `data`. */
+function makeEvidenceQuery(data: unknown[] = []) {
+  const query: { eq: ReturnType<typeof vi.fn>; order: ReturnType<typeof vi.fn> } = {
+    eq: vi.fn(),
+    order: vi.fn(async () => ({ data, error: null })),
+  };
+  query.eq.mockImplementation(() => query);
+  return query;
+}
+
+describe("evidenceKeyFor", () => {
+  it("creates a stable evidence key that ignores confidence and temporary ids", () => {
+    const base: EvidenceItem = {
+      id: "temporary-1",
+      sourceKind: "cv",
+      sourceExcerpt: "Led a React migration for checkout.",
+      projectOrEmployer: "Checkout Platform",
+      ownership: "Owned the frontend migration end to end.",
+      technologies: ["React", "TypeScript"],
+      decision: "Split a large route into smaller bundles.",
+      constraint: "Tight launch window.",
+      outcome: "Cut bundle size by 28%.",
+      recency: "2025-02",
+      confidence: 0.94,
+    };
+
+    expect(evidenceKeyFor(base)).toBe(evidenceKeyFor({
+      ...base,
+      id: "temporary-99",
+      confidence: 0.61,
+    }));
+    expect(evidenceKeyFor(base)).not.toBe(evidenceKeyFor({
+      ...base,
+      outcome: "Cut bundle size by 35%.",
+    }));
+  });
+});
 
 describe("competencyScopeFor", () => {
   it("keeps expertise at full relevance and adds generic engineering scope without evidence", () => {
@@ -49,6 +88,7 @@ describe("competencyScopeFor", () => {
       user_id: "user-1", role: "Frontend Engineer", seniority: "Senior", summary: "", narrative: "",
       expertise: ["React"], characteristics: [], created_at: "created", updated_at: "updated",
     };
+    const evidenceQuery = makeEvidenceQuery([]);
     const supabase = {
       rpc: async (name: string, payload: Record<string, unknown>) => {
         calls.push({ name, payload });
@@ -62,7 +102,7 @@ describe("competencyScopeFor", () => {
           select: () => ({ eq: async () => ({ data: [], error: null }) }),
         };
         if (table === "profile_evidence") return {
-          select: () => ({ eq: () => ({ order: async () => ({ data: [], error: null }) }) }),
+          select: () => evidenceQuery,
         };
         return {
           select: () => ({ eq: () => ({ eq: () => ({ order: async () => ({ data: [], error: null }) }) }) }),
@@ -101,6 +141,7 @@ describe("competencyScopeFor", () => {
     ]));
     expect(calls[0].payload.p_evidence).toHaveLength(1);
     expect((calls[0].payload.p_evidence as Array<Record<string, unknown>>)[0]).toMatchObject({
+      evidence_key: expect.stringMatching(/^[0-9a-f]{64}$/),
       id: "evidence-1",
       source_excerpt: "Led a React migration for checkout.",
       project_or_employer: "Checkout Platform",
@@ -110,14 +151,33 @@ describe("competencyScopeFor", () => {
     expect((calls[0].payload.p_scope as Array<Record<string, unknown>>)).not.toContainEqual(
       expect.objectContaining({ name: "Model supplied but ignored" }),
     );
+    expect(evidenceQuery.eq).toHaveBeenCalledWith("user_id", "user-1");
+    expect(evidenceQuery.eq).toHaveBeenCalledWith("is_active", true);
   });
 
-  it("hydrates evidence and readiness from the owned profile bundle", async () => {
+  it("hydrates evidence and readiness from the owned profile bundle, excluding retired rows", async () => {
     const profileRow = {
       user_id: "user-1", role: "Frontend Engineer", seniority: "Senior", summary: "", narrative: "",
       expertise: ["React"], characteristics: [], profile_ready: true, profile_missing: ["technologies"],
       created_at: "created", updated_at: "updated",
     };
+    // The mock only ever returns the active row: getProfile's own `is_active` filter is
+    // asserted below via the spy, since a real backend performs the exclusion server-side.
+    const evidenceQuery = makeEvidenceQuery([{
+      id: "evidence-1",
+      user_id: "user-1",
+      source_kind: "cv",
+      source_excerpt: "Led a React migration for checkout.",
+      project_or_employer: "Checkout Platform",
+      ownership: "Owned the frontend migration end to end.",
+      technologies: ["React", "TypeScript"],
+      decision: "Split a large route into smaller bundles.",
+      constraint_text: "Tight launch window.",
+      outcome: "Cut bundle size by 28%.",
+      recency: "2025-02",
+      confidence: 0.94,
+      is_active: true,
+    }]);
     const supabase = {
       from: (table: string) => {
         if (table === "profiles") return {
@@ -127,24 +187,7 @@ describe("competencyScopeFor", () => {
           select: () => ({ eq: async () => ({ data: [], error: null }) }),
         };
         if (table === "profile_evidence") return {
-          select: () => ({
-            eq: () => ({
-              order: async () => ({ data: [{
-                id: "evidence-1",
-                user_id: "user-1",
-                source_kind: "cv",
-                source_excerpt: "Led a React migration for checkout.",
-                project_or_employer: "Checkout Platform",
-                ownership: "Owned the frontend migration end to end.",
-                technologies: ["React", "TypeScript"],
-                decision: "Split a large route into smaller bundles.",
-                constraint_text: "Tight launch window.",
-                outcome: "Cut bundle size by 28%.",
-                recency: "2025-02",
-                confidence: 0.94,
-              }], error: null }),
-            }),
-          }),
+          select: () => evidenceQuery,
         };
         return {
           select: () => ({ eq: () => ({ eq: () => ({ order: async () => ({ data: [], error: null }) }) }) }),
@@ -152,7 +195,9 @@ describe("competencyScopeFor", () => {
       },
     };
 
-    await expect(getProfile(supabase as never, "user-1")).resolves.toEqual(expect.objectContaining({
+    const profile = await getProfile(supabase as never, "user-1");
+
+    expect(profile).toEqual(expect.objectContaining({
       userId: "user-1",
       readiness: {
         ready: true,
@@ -163,5 +208,8 @@ describe("competencyScopeFor", () => {
         sourceExcerpt: "Led a React migration for checkout.",
       })],
     }));
+    expect(profile?.evidence).toHaveLength(1);
+    expect(evidenceQuery.eq).toHaveBeenCalledWith("user_id", "user-1");
+    expect(evidenceQuery.eq).toHaveBeenCalledWith("is_active", true);
   });
 });
