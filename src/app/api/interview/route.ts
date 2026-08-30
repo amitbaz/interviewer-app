@@ -69,15 +69,15 @@ export async function POST(request: Request) {
       }
       const blueprint = await generateInterviewBlueprint(profile, profile.evidence ?? []);
       const session = await createSessionWithBlueprint(supabase, user.id, blueprint);
-      session.blueprint = blueprint;
       if (session.questions[0]) {
-        const openingPrompt = initialQuestion(profile, session.questions[0], profile.source);
+        const firstQuestion = hydratePlannedQuestion(session, session.questions[0]);
+        const openingPrompt = initialQuestion(profile, firstQuestion, profile.source);
         session.questions[0] = openingPrompt
           ? {
-            ...session.questions[0],
+            ...firstQuestion,
             prompt: openingPrompt,
           }
-          : session.questions[0];
+          : firstQuestion;
       }
       return NextResponse.json({ session: visibleConversation(session) });
     }
@@ -96,10 +96,12 @@ export async function POST(request: Request) {
 
       const questionIndex = session.questions.findIndex((item) => item.id === question.id);
       const nextPlannedQuestion = session.questions.slice(questionIndex + 1).find((item) => !item.answer) ?? null;
+      const hydratedQuestion = hydratePlannedQuestion(session, question);
+      const hydratedNextQuestion = nextPlannedQuestion ? hydratePlannedQuestion(session, nextPlannedQuestion) : null;
       const turn = await nextTurn(
         profile,
-        question,
-        nextPlannedQuestion,
+        hydratedQuestion,
+        hydratedNextQuestion,
         profile.source,
         visibleConversation(session),
         answer,
@@ -173,6 +175,13 @@ function visibleConversation(session: InterviewSession): InterviewSession {
     ...session,
     messages: session.messages.filter((message) => visibleQuestionIds.has(message.id.split(":")[0])),
   };
+}
+
+function hydratePlannedQuestion(
+  session: InterviewSession,
+  question: InterviewSession["questions"][number],
+): InterviewSession["questions"][number] {
+  return session.blueprint?.questions.find((item) => item.id === question.id) ?? question;
 }
 
 function errorResponse(error: unknown) {

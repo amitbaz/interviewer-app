@@ -283,6 +283,7 @@ describe("mapSession", () => {
         rubric_criteria: ["Name the project.", "Describe the trade-off.", "State the outcome."],
         follow_up_limit: 1,
         source_confidence: 0.94,
+        parent_question_id: null,
         created_at: "2026-08-29T10:01:00.000Z",
       }],
       [],
@@ -303,7 +304,18 @@ describe("mapSession", () => {
         expectedSignals: ["role", "impact"],
         followUpLimit: 1,
         rubricCriteria: ["Name the project.", "Describe the trade-off.", "State the outcome."],
+        parentQuestionId: null,
       })],
+    });
+    expect(mapped.questions[0]).toMatchObject({
+      objective: "Probe the migration ownership and impact.",
+      evidenceIds: ["evidence-1"],
+      expectedSignals: ["role", "impact"],
+      missingSignalPrompts: ["Name the trade-off."],
+      rubricCriteria: ["Name the project.", "Describe the trade-off.", "State the outcome."],
+      followUpLimit: 1,
+      sourceConfidence: 0.94,
+      parentQuestionId: null,
     });
   });
 

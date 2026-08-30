@@ -411,7 +411,108 @@ describe("initialQuestion", () => {
     );
 
     expect(turn.followUp).toBeNull();
-    expect(turn.nextQuestion).toBe("How would you shape the observability design for that rollout?");
+    expect(turn.nextQuestion).toBe("Design an approach involving System design. Start with the requirements you would clarify.");
+  });
+
+  it("respects the per-question follow-up cap when the same question already has a follow-up", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{
+        content: {
+          parts: [{
+            text: JSON.stringify({
+              question: "How would you shape the observability design for that rollout?",
+              shouldFollowUp: true,
+              evaluation: {
+                score: 7.7,
+                competency: "Ignored by normalization",
+                relevance: 8.1,
+                dimensions: {
+                  correctness: 8,
+                  depth: 7,
+                  clarity: 8,
+                  structure: 8,
+                  practicalExperience: 7,
+                  tradeOffAwareness: 8,
+                  communication: 8,
+                  confidence: 7,
+                  relevance: 8,
+                },
+                strengths: ["Specific collaboration example"],
+                needsWork: ["Name the trade-off earlier"],
+                missingPoints: ["Add the launch constraint."],
+                betterStructure: ["Start with the disagreement, then show the outcome."],
+                improvedAnswer: "I aligned engineering and product on the rollout, named the trade-off, and measured the outcome.",
+                supportedClaims: ["I aligned engineering and product on the rollout."],
+                expectedSignalsPresent: ["ownership", "impact"],
+                unsupportedClaims: [],
+                dimensionReasons: {
+                  correctness: "The answer addresses the rollout question.",
+                  depth: "It includes a concrete coordination example.",
+                  clarity: "It is concise and direct.",
+                  structure: "It follows a clear sequence.",
+                  practicalExperience: "It refers to shipped work.",
+                  tradeOffAwareness: "It names the rollout trade-off.",
+                  communication: "It is easy to follow.",
+                  confidence: "It states the ownership directly.",
+                  relevance: "It answers the rollout prompt.",
+                },
+              },
+            }),
+          }],
+        },
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    const answeredQuestion = groundedBlueprint(planned({
+      id: "question-1",
+      sequence: 1,
+      category: "experience",
+      prompt: "Tell me about the checkout migration.",
+    })).questions[0];
+    const nextQuestion = planned({
+      id: "question-2",
+      sequence: 2,
+      category: "architecture",
+      competencyId: "system-design-id",
+      competencyName: "System design",
+      prompt: "Generic architecture prompt",
+    });
+    const priorFollowUp = {
+      id: "question-1a",
+      sequence: 2,
+      category: "experience" as const,
+      competencyId: answeredQuestion.competencyId,
+      competencyName: answeredQuestion.competencyName,
+      difficulty: answeredQuestion.difficulty,
+      isFollowUp: true,
+      prompt: "Tell me more about the migration trade-off.",
+      answer: "I kept the release staged.",
+      createdAt: "2026-08-29T10:00:00.000Z",
+      parentQuestionId: answeredQuestion.id,
+      objective: answeredQuestion.objective,
+      evidenceIds: answeredQuestion.evidenceIds,
+      expectedSignals: answeredQuestion.expectedSignals,
+      missingSignalPrompts: answeredQuestion.missingSignalPrompts,
+      rubricCriteria: answeredQuestion.rubricCriteria,
+      followUpLimit: answeredQuestion.followUpLimit,
+      sourceConfidence: answeredQuestion.sourceConfidence,
+    } satisfies PlannedQuestion;
+    const blueprint = groundedBlueprint(answeredQuestion);
+
+    const turn = await nextTurn(
+      { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "Owns frontend platforms." },
+      answeredQuestion,
+      nextQuestion,
+      { cvText: "At Acme I led a React migration and measured checkout performance.", coverLetter: "" },
+      session([answeredQuestion, priorFollowUp, nextQuestion]),
+      "I aligned engineering and product on the rollout, accepted extra QA during rollout, and measured the impact after launch.",
+      blueprint,
+    );
+
+    expect(turn.followUp).toBeNull();
+    expect(turn.nextQuestion).toBe("Design an approach involving System design. Start with the requirements you would clarify.");
   });
 
   it("does not request a follow-up solely because a relevant answer is concise", async () => {
@@ -456,7 +557,7 @@ describe("initialQuestion", () => {
         content: {
           parts: [{
             text: JSON.stringify({
-              question: "How would you phase the migration?",
+              question: "What is your favorite CSS property?",
               shouldFollowUp: false,
               evaluation: {
                 score: 9.1,
@@ -599,7 +700,7 @@ describe("initialQuestion", () => {
     );
 
     expect(turn.followUp).toBeNull();
-    expect(turn.nextQuestion).toBe("How would you phase the migration?");
+    expect(turn.nextQuestion).toBe("Design an approach involving System design. Start with the requirements you would clarify.");
     expect(turn.evaluation.competencyId).toBe("react-id");
     expect(turn.evaluation.competency).toBe("React architecture");
     expect(turn.evaluation.score).toBe(8.4);
@@ -832,6 +933,27 @@ describe("initialQuestion", () => {
     await expect(extractPdfText(
       new File(["%PDF-1.7 test"], "cv.pdf", { type: "application/pdf" }),
     )).rejects.toThrow("Gemini rejected the PDF (400): Unknown name temperature. key=[redacted]");
+  });
+
+  it("logs a safe operation label when PDF extraction is rate limited", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      error: { code: 429, message: "Too many requests key=private-test-key" },
+    }), { status: 429, headers: { "Content-Type": "application/json" } }));
+
+    await expect(extractPdfText(
+      new File(["%PDF-1.7 test"], "cv.pdf", { type: "application/pdf" }),
+    )).rejects.toThrow("Gemini rate limit reached for the PDF (429)");
+    expect(consoleWarn).toHaveBeenCalledWith("[gemini] request failed", expect.objectContaining({
+      operation: "the PDF",
+      state: "rate-limited",
+      status: 429,
+      model: "gemini-3.6-flash",
+    }));
+    expect(JSON.stringify(consoleWarn.mock.calls)).not.toContain("private-test-key");
+    consoleWarn.mockRestore();
   });
 
   it("rejects PDFs above the safe Vercel request limit before calling Gemini", async () => {

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { analyzeProfile, assessProfileReadiness, extractEngineeringEvidence, extractPdfText } from "@/lib/coach";
+import { GeminiRequestError } from "@/lib/gemini";
 import { getProfile, saveProfile } from "@/lib/repositories/profile";
 import { requireUser } from "@/lib/supabase/server";
 import type { ProfileDraft, ProfileSource } from "@/lib/types";
@@ -47,6 +48,9 @@ export async function POST(request: Request) {
       coverLetter = body.coverLetter ?? "";
     }
   } catch (caught) {
+    if (caught instanceof GeminiRequestError) {
+      return NextResponse.json({ error: caught.message }, { status: profileUploadStatus(caught.state) });
+    }
     return NextResponse.json({ error: caught instanceof Error ? caught.message : "Could not read that CV." }, { status: 400 });
   }
   if (typeof cvText !== "string" || cvText.trim().length === 0) {
@@ -139,4 +143,8 @@ function errorResponse(error: unknown) {
     return NextResponse.json({ error: "Sign in to continue." }, { status: 401 });
   }
   return NextResponse.json({ error: "Could not complete your profile request." }, { status: 500 });
+}
+
+function profileUploadStatus(state: GeminiRequestError["state"]): number {
+  return state === "temporary" || state === "rate-limited" ? 503 : 502;
 }

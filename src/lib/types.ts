@@ -59,6 +59,14 @@ export type PlannedQuestion = {
   prompt: string;
   answer: string | null;
   createdAt: string;
+  objective?: string;
+  evidenceIds?: string[];
+  expectedSignals?: string[];
+  missingSignalPrompts?: string[];
+  rubricCriteria?: string[];
+  followUpLimit?: number;
+  sourceConfidence?: number | null;
+  parentQuestionId?: string | null;
 };
 
 /**
@@ -103,6 +111,7 @@ export type FollowUpDraft = {
   rubricCriteria: string[];
   followUpLimit: number;
   sourceConfidence: number | null;
+  parentQuestionId?: string | null;
 };
 
 export type Evaluation = {

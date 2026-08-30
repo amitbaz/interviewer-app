@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { GeminiRequestError } from "@/lib/gemini";
 
 const mocks = vi.hoisted(() => ({
   requireUser: vi.fn(),
@@ -6,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   extractEngineeringEvidence: vi.fn(),
   assessProfileReadiness: vi.fn(),
   saveProfile: vi.fn(),
+  extractPdfText: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ requireUser: mocks.requireUser }));
@@ -13,7 +15,7 @@ vi.mock("@/lib/coach", () => ({
   analyzeProfile: mocks.analyzeProfile,
   extractEngineeringEvidence: mocks.extractEngineeringEvidence,
   assessProfileReadiness: mocks.assessProfileReadiness,
-  extractPdfText: vi.fn(),
+  extractPdfText: mocks.extractPdfText,
 }));
 vi.mock("@/lib/repositories/profile", () => ({ saveProfile: mocks.saveProfile, getProfile: vi.fn() }));
 
@@ -102,5 +104,33 @@ describe("POST /api/profile", () => {
       evidence,
       { ready: true, missing: [] },
     );
+  });
+
+  it("surfaces a provider-specific status when PDF extraction is rate limited", async () => {
+    mocks.extractPdfText.mockRejectedValue(new GeminiRequestError(
+      "the PDF",
+      429,
+      "rate-limited",
+      "Gemini rate limit reached for the PDF (429). Wait briefly and try again.",
+    ));
+
+    const formData = new FormData();
+    formData.append("cv", new File(["%PDF-1.7 test"], "cv.pdf", { type: "application/pdf" }));
+    formData.append("coverLetter", "");
+
+    const request = new Request("http://localhost/api/profile", {
+      method: "POST",
+      headers: { "content-type": "multipart/form-data; boundary=test" },
+    });
+    vi.spyOn(request, "formData").mockResolvedValue(formData);
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: "Gemini rate limit reached for the PDF (429). Wait briefly and try again.",
+    });
+    expect(mocks.analyzeProfile).not.toHaveBeenCalled();
+    expect(mocks.extractEngineeringEvidence).not.toHaveBeenCalled();
   });
 });

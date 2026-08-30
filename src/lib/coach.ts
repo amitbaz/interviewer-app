@@ -2,7 +2,7 @@ import "server-only";
 
 import { z } from "zod";
 import { applyEvaluation } from "@/lib/competencies";
-import { geminiModel, geminiRequestError } from "@/lib/gemini";
+import { geminiFailureState, geminiModel, geminiRequestError } from "@/lib/gemini";
 import { buildFallbackInterviewBlueprint, validateInterviewBlueprint } from "@/lib/interview-planner";
 import { MAX_CV_PDF_BYTES } from "@/lib/upload-limits";
 import type {
@@ -606,7 +606,7 @@ function validateGroundedModelEvaluation(
     : { evaluation: normalized, trusted: true };
 }
 
-async function modelJson<T>(prompt: string, schema: z.ZodType<T>): Promise<T | null> {
+async function modelJson<T>(operation: string, prompt: string, schema: z.ZodType<T>): Promise<T | null> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return null;
   try {
@@ -616,11 +616,36 @@ async function modelJson<T>(prompt: string, schema: z.ZodType<T>): Promise<T | n
       body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: `${prompt}\nReturn only valid JSON.` }] }], generationConfig: { responseMimeType: "application/json" } }),
       signal: AbortSignal.timeout(45_000),
     });
-    if (!response.ok) return null;
+    if (!response.ok) {
+      console.warn("[gemini] request failed", {
+        operation,
+        state: geminiFailureState(response.status),
+        status: response.status,
+        model,
+      });
+      return null;
+    }
     const body = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
     const output = body.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("");
-    return output ? schema.parse(JSON.parse(output)) : null;
-  } catch { return null; }
+    if (!output) {
+      console.warn("[gemini] empty model output", { operation, state: "unknown", status: response.status, model });
+      return null;
+    }
+    try {
+      return schema.parse(JSON.parse(output));
+    } catch {
+      console.warn("[gemini] invalid model output", { operation, state: "unknown", status: response.status, model });
+      return null;
+    }
+  } catch (error) {
+    console.warn("[gemini] request failed", {
+      operation,
+      state: "unknown",
+      model: process.env.GEMINI_MODEL?.trim() || "gemini-3.6-flash",
+      error: error instanceof Error ? error.name : "unknown",
+    });
+    return null;
+  }
 }
 
 function normalizeEvidenceItem(value: z.infer<typeof evidenceSchema>, index: number, sourceText: string): EvidenceItem {
@@ -782,6 +807,7 @@ function fallbackBlueprintCompetencies(
 export async function extractEngineeringEvidence(cvText: string, coverLetter: string): Promise<EvidenceItem[]> {
   const sourceText = `${cvText} ${coverLetter}`;
   const result = await modelJson(
+    "evidence extraction",
     `You are extracting engineering evidence for an interview coach. Return only valid JSON. Produce an array of evidence objects. Never invent facts. Preserve null for unknown optional fields. Each item must include a sourceExcerpt and may include sourceKind, projectOrEmployer, ownership, technologies, decision, constraint, outcome, recency, confidence, and a stable id if available. Use only facts explicitly supported by the supplied text.\nCV:\n${cvText}\nCover letter:\n${coverLetter}`,
     evidenceListSchema,
   );
@@ -818,7 +844,7 @@ export async function generateInterviewBlueprint(
   ].filter(Boolean).join("\n");
 
   for (const repair of [false, true]) {
-    const result = await modelJson(prompt(repair), blueprintDraftSchema);
+    const result = await modelJson("interview blueprint", prompt(repair), blueprintDraftSchema);
     if (!result) continue;
     try {
       return validateInterviewBlueprint(normalizeBlueprint(result, createdAt), evidence);
@@ -893,7 +919,16 @@ export async function extractPdfText(file: File): Promise<string> {
     }),
     signal: AbortSignal.timeout(60_000),
   });
-  if (!response.ok) throw await geminiRequestError(response, "the PDF", model);
+  if (!response.ok) {
+    const requestError = await geminiRequestError(response, "the PDF", model);
+    console.warn("[gemini] request failed", {
+      operation: "the PDF",
+      state: requestError.state,
+      status: requestError.status,
+      model,
+    });
+    throw requestError;
+  }
   const body = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
   const text = body.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("").trim();
   if (!text || text.length < 80) throw new Error("Not enough readable text was found in that PDF. Paste a summary instead.");
@@ -902,6 +937,7 @@ export async function extractPdfText(file: File): Promise<string> {
 
 export async function analyzeProfile(cvText: string, coverLetter: string): Promise<ProfileDraft> {
   const result = await modelJson(
+    "profile analysis",
     `You are a career-profile analyst. Extract a concise software-engineering profile from this CV and optional cover letter. Identify the most accurate engineering specialization when the evidence supports it, such as frontend, backend, mobile, infrastructure, security, data, or full-stack. Never invent facts. Return role, seniority, summary, narrative, expertise, characteristics, and competency names with professional relevance (0 to 1). Do not estimate ability, scores, confidence, or seniority beyond stated evidence.\nCV:\n${cvText}\nCover letter:\n${coverLetter}`,
     profileSchema,
   );
@@ -939,29 +975,41 @@ function promptForPlan(planned: PlannedQuestion, source: ProfileSource, role: st
 function groundedQuestion(question: PlannedQuestion, blueprint: InterviewBlueprint | null): BlueprintQuestion {
   const rubric = blueprint?.questions.find((item) => item.id === question.id);
   if (rubric) return rubric;
+  const objective = typeof question.objective === "string" && question.objective.trim().length > 0
+    ? question.objective.trim()
+    : question.competencyName
+      ? `Probe ${question.competencyName} with concrete evidence.`
+      : "Probe the candidate's recent engineering work.";
   return {
     ...question,
-    objective: question.competencyName
-      ? `Probe ${question.competencyName} with concrete evidence.`
-      : "Probe the candidate's recent engineering work.",
-    evidenceIds: [],
-    expectedSignals: question.competencyName ? [question.competencyName, "ownership", "impact"] : ["ownership", "impact"],
-    missingSignalPrompts: question.competencyName
-      ? [`Name one concrete example from ${question.competencyName}.`]
-      : ["Name one concrete example from the work you owned."],
-    rubricCriteria: question.competencyName
-      ? [
-        `Name one concrete example from ${question.competencyName}.`,
-        "Describe the ownership or decision involved.",
-        "Explain the outcome or trade-off.",
-      ]
+    objective,
+    evidenceIds: question.evidenceIds ?? [],
+    expectedSignals: question.expectedSignals?.length
+      ? question.expectedSignals
+      : question.competencyName
+        ? [question.competencyName, "ownership", "impact"]
+        : ["ownership", "impact"],
+    missingSignalPrompts: question.missingSignalPrompts?.length
+      ? question.missingSignalPrompts
+      : question.competencyName
+        ? [`Name one concrete example from ${question.competencyName}.`]
+        : ["Name one concrete example from the work you owned."],
+    rubricCriteria: question.rubricCriteria?.length
+      ? question.rubricCriteria
+      : question.competencyName
+        ? [
+          `Name one concrete example from ${question.competencyName}.`,
+          "Describe the ownership or decision involved.",
+          "Explain the outcome or trade-off.",
+        ]
       : [
         "Name one concrete example from the work you owned.",
         "Describe the ownership or decision involved.",
         "Explain the outcome or trade-off.",
       ],
-    followUpLimit: 1,
-    sourceConfidence: null,
+    followUpLimit: question.followUpLimit ?? 1,
+    sourceConfidence: question.sourceConfidence ?? null,
+    parentQuestionId: question.parentQuestionId ?? null,
   };
 }
 
@@ -1010,8 +1058,9 @@ function turnPrompt(
   source: ProfileSource | null,
   nextPlannedQuestion: PlannedQuestion | null,
   canFollowUp: boolean,
+  blueprint: InterviewBlueprint | null,
 ): string {
-  const nextRubric = nextPlannedQuestion ? groundedQuestion(nextPlannedQuestion, null) : null;
+  const nextRubric = nextPlannedQuestion ? groundedQuestion(nextPlannedQuestion, blueprint) : null;
   return [
     "You are an experienced senior software-engineering interviewer.",
     "Privately evaluate the latest answer against the exact question rubric.",
@@ -1047,14 +1096,17 @@ async function evaluateTurn(
   source: ProfileSource | null,
   nextPlannedQuestion: PlannedQuestion | null,
   followUpCount: number,
+  followUpCountForQuestion: number,
 ): Promise<{ evaluation: GroundedEvaluation; question: string | null; shouldFollowUp: boolean }> {
   const rubric = groundedQuestion(answeredQuestion, blueprint);
   const followUpLimit = resolveFollowUpLimit(rubric, blueprint);
   const canFollowUp = !answeredQuestion.isFollowUp
     && (blueprint?.maxQuestions ?? 8) > 0
-    && followUpCount < followUpLimit;
+    && followUpCount < (blueprint?.maxFollowUps ?? 3)
+    && followUpCountForQuestion < followUpLimit;
   const result = await modelJson(
-    turnPrompt(rubric, profile, answer, transcript, source, nextPlannedQuestion, canFollowUp),
+    "answer evaluation",
+    turnPrompt(rubric, profile, answer, transcript, source, nextPlannedQuestion, canFollowUp, blueprint),
     turnSchema,
   );
   const modelEvaluation = result
@@ -1065,9 +1117,9 @@ async function evaluateTurn(
     ? result?.shouldFollowUp ?? false
     : shouldAskFollowUp(rubric, evaluation));
   const question = shouldFollowUp
-    ? ((modelEvaluation?.trusted ? result?.question : null) ?? deterministicFollowUp(answeredQuestion))
+    ? deterministicFollowUp(answeredQuestion)
     : (nextPlannedQuestion
-    ? ((modelEvaluation?.trusted ? result?.question : null) ?? promptForPlan(nextPlannedQuestion, source ?? { cvText: "", coverLetter: "" }, profile.role))
+    ? promptForPlan(nextPlannedQuestion, source ?? { cvText: "", coverLetter: "" }, profile.role)
     : null);
   return { evaluation, question, shouldFollowUp };
 }
@@ -1080,7 +1132,7 @@ export async function evaluateAnswer(
   answer: string,
   transcript: string,
 ): Promise<GroundedEvaluation> {
-  const result = await evaluateTurn(profile, question, blueprint, answer, transcript, null, null, 0);
+  const result = await evaluateTurn(profile, question, blueprint, answer, transcript, null, null, 0, 0);
   return result.evaluation;
 }
 
@@ -1108,6 +1160,7 @@ function followUpDraft(planned: PlannedQuestion, prompt: string): FollowUpDraft 
     rubricCriteria: (planned as BlueprintQuestion).rubricCriteria ?? [],
     followUpLimit: (planned as BlueprintQuestion).followUpLimit ?? 0,
     sourceConfidence: (planned as BlueprintQuestion).sourceConfidence ?? null,
+    parentQuestionId: planned.id,
   };
 }
 
@@ -1123,6 +1176,7 @@ export async function nextTurn(
 ): Promise<{ evaluation: Evaluation; nextQuestion: string | null; followUp: FollowUpDraft | null }> {
   const transcript = session.messages.map((message) => `${message.role}: ${message.content}`).join("\n");
   const followUpCount = session.questions.filter((question) => question.isFollowUp).length;
+  const followUpCountForQuestion = session.questions.filter((question) => question.parentQuestionId === answeredQuestion.id).length;
   const { evaluation, question, shouldFollowUp } = await evaluateTurn(
     profile,
     answeredQuestion,
@@ -1132,6 +1186,7 @@ export async function nextTurn(
     source,
     nextPlannedQuestion,
     followUpCount,
+    followUpCountForQuestion,
   );
   if (shouldFollowUp) {
     return {
@@ -1157,7 +1212,7 @@ export function handsOnExercise(profile: Pick<Profile, "role">): HandsOnExercise
 export async function handsOnCheckpoint(profile: Pick<Profile, "role" | "seniority">, session: InterviewSession, code: string, note: string) {
   const count = session.checkpoints.length;
   const transcript = session.messages.slice(-6).map((message) => `${message.role}: ${message.content}`).join("\n");
-  const result = await modelJson(`You are a senior frontend interviewer observing a live coding exercise. Do not provide code or solve the exercise. Ask one short, probing interviewer question grounded in the candidate's latest code and note. ${count >= 1 ? "Introduce this new requirement once: the API may return 50,000 results, and keyboard navigation must remain smooth." : "Focus on their current reasoning."}\nProfile: ${JSON.stringify({ role: profile.role, seniority: profile.seniority })}\nRecent transcript:\n${transcript}\nCandidate note: ${note}\nLatest code:\n${code}`, z.object({ question: z.string() }));
+  const result = await modelJson("hands-on checkpoint", `You are a senior frontend interviewer observing a live coding exercise. Do not provide code or solve the exercise. Ask one short, probing interviewer question grounded in the candidate's latest code and note. ${count >= 1 ? "Introduce this new requirement once: the API may return 50,000 results, and keyboard navigation must remain smooth." : "Focus on their current reasoning."}\nProfile: ${JSON.stringify({ role: profile.role, seniority: profile.seniority })}\nRecent transcript:\n${transcript}\nCandidate note: ${note}\nLatest code:\n${code}`, z.object({ question: z.string() }));
   if (result) return result.question;
   if (count === 0) return "Talk me through the request lifecycle. What prevents a slow earlier response from overwriting the newest search?";
   if (count === 1) return "New constraint: results can reach 50,000 items. What would you change so keyboard navigation and rendering stay responsive?";

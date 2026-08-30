@@ -235,6 +235,11 @@ describe("POST /api/interview", () => {
           evidenceIds: ["evidence-1"],
           expectedSignals: ["ownership"],
           missingSignalPrompts: ["Name one concrete example."],
+          rubricCriteria: [
+            "Name the project or work example.",
+            "Describe the ownership or decision involved.",
+            "Explain the outcome or trade-off.",
+          ],
           followUpLimit: 1,
           sourceConfidence: 0.9,
         },
@@ -243,11 +248,14 @@ describe("POST /api/interview", () => {
     const persisted = session([
       {
         ...question(1, null),
-        id: "blueprint-question-1",
+        id: "database-question-1",
         prompt: "Tell me about the migration.",
       },
     ]);
-    persisted.blueprint = blueprint;
+    persisted.blueprint = {
+      ...blueprint,
+      questions: blueprint.questions.map((item) => ({ ...item, id: "database-question-1" })),
+    };
 
     mocks.generateInterviewBlueprint.mockResolvedValue(blueprint);
     mocks.createSessionWithBlueprint.mockResolvedValue(persisted);
@@ -263,6 +271,20 @@ describe("POST /api/interview", () => {
     expect(mocks.generateInterviewBlueprint).toHaveBeenCalledWith(profile, []);
     expect(mocks.createSessionWithBlueprint).toHaveBeenCalledWith(expect.anything(), "user-1", blueprint);
     expect(body.session.blueprint.questions[0].objective).toBe("Understand the candidate's recent work.");
+    expect(body.session.blueprint.questions[0].id).toBe("database-question-1");
+    expect(body.session.questions[0]).toMatchObject({
+      objective: "Understand the candidate's recent work.",
+      evidenceIds: ["evidence-1"],
+      expectedSignals: ["ownership"],
+      missingSignalPrompts: ["Name one concrete example."],
+      rubricCriteria: [
+        "Name the project or work example.",
+        "Describe the ownership or decision involved.",
+        "Explain the outcome or trade-off.",
+      ],
+      followUpLimit: 1,
+      sourceConfidence: 0.9,
+    });
     expect(body.session.questions[0].prompt).toBe("Tell me about the migration.");
   });
 
@@ -289,8 +311,36 @@ describe("POST /api/interview", () => {
           evidenceIds: ["evidence-1"],
           expectedSignals: ["ownership", "trade-off", "impact"],
           missingSignalPrompts: ["Name the trade-off you accepted."],
+          rubricCriteria: [
+            "Name the project or work example.",
+            "Describe the candidate's role and ownership.",
+            "Explain the decision, trade-off, and outcome.",
+          ],
           followUpLimit: 1,
           sourceConfidence: 0.94,
+        },
+        {
+          sequence: 2,
+          category: "architecture" as const,
+          competencyId: "system-design-id",
+          competencyName: "System design",
+          difficulty: "senior" as const,
+          objective: "Probe the system design decision.",
+          evidenceIds: ["evidence-2"],
+          expectedSignals: ["decision", "constraint"],
+          missingSignalPrompts: ["Name the design constraint."],
+          rubricCriteria: [
+            "Name the system design challenge.",
+            "Describe the constraint or alternative.",
+            "Explain the trade-off and result.",
+          ],
+          followUpLimit: 1,
+          sourceConfidence: 0.91,
+          prompt: "How would you shape observability?",
+          answer: null,
+          id: "question-2",
+          isFollowUp: false,
+          createdAt: "2026-08-29T10:00:00.000Z",
         },
       ],
     };
@@ -312,8 +362,36 @@ describe("POST /api/interview", () => {
     expect(response.status).toBe(200);
     expect(mocks.nextTurn).toHaveBeenCalledWith(
       profile,
-      expect.objectContaining({ id: "question-1", prompt: "Question 1" }),
-      expect.objectContaining({ id: "question-2" }),
+      expect.objectContaining({
+        id: "question-1",
+        objective: "Probe the migration ownership and impact.",
+        evidenceIds: ["evidence-1"],
+        expectedSignals: ["ownership", "trade-off", "impact"],
+        missingSignalPrompts: ["Name the trade-off you accepted."],
+        rubricCriteria: [
+          "Name the project or work example.",
+          "Describe the candidate's role and ownership.",
+          "Explain the decision, trade-off, and outcome.",
+        ],
+        followUpLimit: 1,
+        sourceConfidence: 0.94,
+        prompt: "Tell me about the checkout migration.",
+      }),
+      expect.objectContaining({
+        id: "question-2",
+        objective: "Probe the system design decision.",
+        evidenceIds: ["evidence-2"],
+        expectedSignals: ["decision", "constraint"],
+        missingSignalPrompts: ["Name the design constraint."],
+        rubricCriteria: [
+          "Name the system design challenge.",
+          "Describe the constraint or alternative.",
+          "Explain the trade-off and result.",
+        ],
+        followUpLimit: 1,
+        sourceConfidence: 0.91,
+        prompt: "How would you shape observability?",
+      }),
       profile.source,
       expect.anything(),
       "A complete answer.",

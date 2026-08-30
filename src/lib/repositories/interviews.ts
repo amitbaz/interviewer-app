@@ -77,6 +77,14 @@ function mapQuestion(row: Row, competencyNames: Map<string, string>): PlannedQue
     prompt: stringValue(row.prompt),
     answer: typeof row.answer === "string" ? row.answer : null,
     createdAt: stringValue(row.created_at),
+    objective: typeof row.objective === "string" && row.objective.trim() ? row.objective.trim() : undefined,
+    evidenceIds: stringArray(row.evidence_ids),
+    expectedSignals: stringArray(row.expected_signals),
+    missingSignalPrompts: stringArray(row.missing_signal_prompts),
+    rubricCriteria: stringArray(row.rubric_criteria),
+    followUpLimit: row.follow_up_limit === null || row.follow_up_limit === undefined ? undefined : Number(row.follow_up_limit),
+    sourceConfidence: row.source_confidence === null || row.source_confidence === undefined ? undefined : Number(row.source_confidence),
+    parentQuestionId: typeof row.parent_question_id === "string" ? row.parent_question_id : null,
   };
 }
 
@@ -86,13 +94,13 @@ function mapBlueprintQuestion(row: Row, competencyNames: Map<string, string>): B
   return {
     ...question,
     objective: row.objective.trim(),
-    evidenceIds: stringArray(row.evidence_ids),
-    expectedSignals: stringArray(row.expected_signals),
-    missingSignalPrompts: stringArray(row.missing_signal_prompts),
-    rubricCriteria: stringArray(row.rubric_criteria),
-    followUpLimit: Number(row.follow_up_limit ?? 0),
+    evidenceIds: question.evidenceIds ?? stringArray(row.evidence_ids),
+    expectedSignals: question.expectedSignals ?? stringArray(row.expected_signals),
+    missingSignalPrompts: question.missingSignalPrompts ?? stringArray(row.missing_signal_prompts),
+    rubricCriteria: question.rubricCriteria ?? stringArray(row.rubric_criteria),
+    followUpLimit: Number(row.follow_up_limit ?? question.followUpLimit ?? 0),
     sourceConfidence: row.source_confidence === null || row.source_confidence === undefined
-      ? null
+      ? question.sourceConfidence ?? null
       : Number(row.source_confidence),
   };
 }
