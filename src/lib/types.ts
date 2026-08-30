@@ -276,3 +276,111 @@ export type ProgressSnapshot = {
   weakest: Competency | null;
   recurringWeaknesses: string[];
 };
+
+/**
+ * The full job lifecycle, from a saved/shortlisted role through its outcome.
+ * `opportunities` is the single canonical record for both roles a user is
+ * only considering and roles they have actually applied to or interviewed
+ * for; there is no separate "applications" entity.
+ */
+export type OpportunityStatus =
+  | "considering"
+  | "applied"
+  | "interviewing"
+  | "offer"
+  | "rejected"
+  | "withdrawn"
+  | "closed";
+
+/** The kinds of facts recorded in an opportunity's append-only history. */
+export type OpportunityEventType =
+  | "created"
+  | "status_changed"
+  | "interview_scheduled"
+  | "interview_completed"
+  | "note"
+  | "source_updated";
+
+export type Opportunity = {
+  id: string;
+  userId: string;
+  company: string;
+  role: string;
+  status: OpportunityStatus;
+  location: string | null;
+  remote: boolean | null;
+  jobUrl: string | null;
+  jobDescription: string | null;
+  /** Human-readable source such as an employer or ATS name. */
+  sourceLabel: string | null;
+  /** Stable integration namespace, e.g. "manual", "job-hunter", "tracker-import". */
+  sourceSystem: string | null;
+  /** Stable source-owned identity used to prevent duplicate imports of the same listing. */
+  sourceExternalId: string | null;
+  /** 0-100 fit score when available. */
+  matchScore: number | null;
+  strengths: string[];
+  gaps: string[];
+  notes: string | null;
+  appliedAt: string | null;
+  nextInterviewAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** One append-only fact in an opportunity's lifecycle history. Never mutated after creation. */
+export type OpportunityEvent = {
+  id: string;
+  userId: string;
+  opportunityId: string;
+  eventType: OpportunityEventType;
+  fromStatus: OpportunityStatus | null;
+  toStatus: OpportunityStatus | null;
+  occurredAt: string;
+  note: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+};
+
+/**
+ * Every opportunity is created in `considering` status via `create_opportunity`;
+ * status is deliberately not settable here so the summary row and its history
+ * cannot disagree at birth. Use `transitionOpportunity` to move it onward.
+ */
+export type CreateOpportunityInput = {
+  company: string;
+  role: string;
+  location?: string | null;
+  remote?: boolean | null;
+  jobUrl?: string | null;
+  jobDescription?: string | null;
+  sourceLabel?: string | null;
+  sourceSystem?: string | null;
+  sourceExternalId?: string | null;
+  matchScore?: number | null;
+  strengths?: string[];
+  gaps?: string[];
+  notes?: string | null;
+};
+
+/**
+ * Ordinary descriptive-field updates. Deliberately excludes `status`,
+ * `appliedAt`, and `nextInterviewAt` — those lifecycle fields only change
+ * together with their history, through `transitionOpportunity` and
+ * `scheduleOpportunityInterview`.
+ */
+export type UpdateOpportunityDetailsInput = {
+  company?: string;
+  role?: string;
+  location?: string | null;
+  remote?: boolean | null;
+  jobUrl?: string | null;
+  jobDescription?: string | null;
+  sourceLabel?: string | null;
+  sourceSystem?: string | null;
+  sourceExternalId?: string | null;
+  matchScore?: number | null;
+  strengths?: string[];
+  gaps?: string[];
+  notes?: string | null;
+};
