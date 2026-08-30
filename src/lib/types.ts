@@ -63,13 +63,14 @@ export type PlannedQuestion = {
 
 /**
  * A persisted interview question contract whose objective, evidence targets,
- * and rubric hints must remain stable across the session.
+ * rubric criteria, and evidence targets must remain stable across the session.
  */
 export type BlueprintQuestion = PlannedQuestion & {
   objective: string;
   evidenceIds: string[];
   expectedSignals: string[];
   missingSignalPrompts: string[];
+  rubricCriteria?: string[];
   followUpLimit: number;
   sourceConfidence: number | null;
 };
@@ -84,11 +85,25 @@ export type InterviewBlueprint = {
   questions: BlueprintQuestion[];
 };
 
-/** Server-generated follow-up content; sequence and identifiers are assigned transactionally. */
-export type FollowUpDraft = Pick<
-  PlannedQuestion,
-  "category" | "competencyId" | "competencyName" | "difficulty" | "isFollowUp" | "prompt"
->;
+/**
+ * Server-generated follow-up content; the follow-up keeps the original rubric
+ * contract so later persistence and hydration can preserve the exact objective.
+ */
+export type FollowUpDraft = {
+  category: PlannedQuestion["category"];
+  competencyId: string | null;
+  competencyName: string | null;
+  difficulty: Difficulty;
+  isFollowUp: true;
+  prompt: string;
+  objective: string;
+  evidenceIds: string[];
+  expectedSignals: string[];
+  missingSignalPrompts: string[];
+  rubricCriteria: string[];
+  followUpLimit: number;
+  sourceConfidence: number | null;
+};
 
 export type Evaluation = {
   score: number;

@@ -280,6 +280,7 @@ describe("mapSession", () => {
         evidence_ids: ["evidence-1"],
         expected_signals: ["role", "impact"],
         missing_signal_prompts: ["Name the trade-off."],
+        rubric_criteria: ["Name the project.", "Describe the trade-off.", "State the outcome."],
         follow_up_limit: 1,
         source_confidence: 0.94,
         created_at: "2026-08-29T10:01:00.000Z",
@@ -301,6 +302,7 @@ describe("mapSession", () => {
         evidenceIds: ["evidence-1"],
         expectedSignals: ["role", "impact"],
         followUpLimit: 1,
+        rubricCriteria: ["Name the project.", "Describe the trade-off.", "State the outcome."],
       })],
     });
   });
@@ -742,6 +744,76 @@ describe("mapSession", () => {
         p_expected_signals_present: ["trade-off"],
         p_unsupported_claims: ["It was easy and perfect."],
         p_dimension_reasons: { relevance: "It answers the exact trade-off question." },
+      }),
+    }]);
+  });
+
+  it("records a follow-up draft with the full rubric contract", async () => {
+    const calls: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const supabase = rpcHydrationClient(calls, "conversation");
+
+    await recordConversationTurn(
+      supabase as never,
+      "user-1",
+      "question-1",
+      "I compared the trade-offs.",
+      {
+        score: 7,
+        competencyId: "react-id",
+        competency: "React",
+        relevance: 8.4,
+        dimensions: {},
+        strengths: ["Specific"],
+        needsWork: ["Quantify"],
+        missingPoints: ["Name the fallback path."],
+        betterStructure: ["Lead with the requirement, then the trade-off."],
+        improvedAnswer: "I would start with the requirement, compare the trade-offs, and justify the fallback path.",
+        supportedClaims: ["compared the trade-offs"],
+        expectedSignalsPresent: ["trade-off"],
+        unsupportedClaims: ["It was easy and perfect."],
+        dimensionReasons: { relevance: "It answers the exact trade-off question." },
+      },
+      {
+        nextQuestionId: null,
+        nextPrompt: null,
+        followUp: {
+          category: "technical",
+          competencyId: "react-id",
+          competencyName: "React",
+          difficulty: "senior",
+          isFollowUp: true,
+          prompt: "Make the migration decision more concrete.",
+          objective: "Probe the migration trade-off decision.",
+          evidenceIds: ["evidence-1"],
+          expectedSignals: ["decision", "trade-off", "impact"],
+          missingSignalPrompts: ["Name the constraint or rejected option."],
+          followUpLimit: 1,
+          sourceConfidence: 0.94,
+          rubricCriteria: [
+            "Name the decision being revisited.",
+            "Explain the constraint or rejected option.",
+            "Describe the trade-off and impact.",
+          ],
+        } as never,
+      },
+    );
+
+    expect(calls).toEqual([{
+      name: "record_conversation_turn",
+      payload: expect.objectContaining({
+        p_follow_up: expect.objectContaining({
+          objective: "Probe the migration trade-off decision.",
+          evidenceIds: ["evidence-1"],
+          expectedSignals: ["decision", "trade-off", "impact"],
+          missingSignalPrompts: ["Name the constraint or rejected option."],
+          followUpLimit: 1,
+          sourceConfidence: 0.94,
+          rubricCriteria: [
+            "Name the decision being revisited.",
+            "Explain the constraint or rejected option.",
+            "Describe the trade-off and impact.",
+          ],
+        }),
       }),
     }]);
   });

@@ -73,6 +73,7 @@ const blueprintQuestionDraftSchema = z.object({
   evidenceIds: z.array(z.string().min(1)).default([]),
   expectedSignals: z.array(z.string().min(1)).min(1),
   missingSignalPrompts: z.array(z.string().min(1)).min(1),
+  rubricCriteria: z.array(z.string().min(1)).default([]),
   followUpLimit: z.number().int().min(0).max(3),
   prompt: z.string().min(1),
   sourceConfidence: z.number().min(0).max(1).nullable().optional(),
@@ -379,6 +380,7 @@ function questionTokens(question: BlueprintQuestion): string[] {
     question.objective,
     question.competencyName ?? "",
     ...question.expectedSignals,
+    ...(question.rubricCriteria ?? []),
   ].join(" "));
 }
 
@@ -560,6 +562,34 @@ function groundedEvaluationFor(
   };
 }
 
+function calibrateGroundedEvaluation(
+  question: BlueprintQuestion,
+  base: GroundedEvaluation,
+  model: Pick<GroundedEvaluation, "supportedClaims" | "expectedSignalsPresent" | "unsupportedClaims"> | null,
+  answer: string,
+): GroundedEvaluation {
+  const verifiedClaims = model
+    ? normalizeStrings(model.supportedClaims).filter((claim) => claimMatchesAnswer(claim, splitSentences(answer.trim().length ? answer.trim() : answer), question))
+    : [];
+  const verifiedSignals = model
+    ? normalizeStrings(model.expectedSignalsPresent).filter((signal) => base.expectedSignalsPresent.includes(signal))
+    : [];
+  const supportedClaims = [...new Set([...base.supportedClaims, ...verifiedClaims])].slice(0, 3);
+  const expectedSignalsPresent = [...new Set([...base.expectedSignalsPresent, ...verifiedSignals])].slice(0, question.expectedSignals.length);
+  const unsupportedClaims = base.unsupportedClaims.slice(0, 3);
+  const score = clampScore(base.score + Math.min(1.2, supportedClaims.length * 0.25 + expectedSignalsPresent.length * 0.15 - unsupportedClaims.length * 0.2));
+  return {
+    ...base,
+    score,
+    relevance: base.relevance,
+    supportedClaims,
+    expectedSignalsPresent,
+    unsupportedClaims,
+    improvedAnswer: base.improvedAnswer,
+    dimensionReasons: base.dimensionReasons,
+  };
+}
+
 function claimMatchesAnswer(claim: string, answerSentences: string[], question: BlueprintQuestion): boolean {
   const normalizedClaim = claim.toLowerCase();
   return answerSentences.some((sentence) => {
@@ -585,13 +615,11 @@ function validateGroundedModelEvaluation(
     .filter((claim) => claimMatchesAnswer(claim, answerSentences, question));
   const groundedUnsupportedClaims = normalized.unsupportedClaims
     .filter((claim) => claimMatchesAnswer(claim, answerSentences, question));
-
-  const repaired: GroundedEvaluation = {
-    ...normalized,
+  const repaired: GroundedEvaluation = calibrateGroundedEvaluation(question, fallback, {
     supportedClaims: groundedSupportedClaims,
     expectedSignalsPresent: groundedSignals,
     unsupportedClaims: groundedUnsupportedClaims,
-  };
+  }, answer);
 
   const materiallyUngrounded = (fallback.supportedClaims.length === 0 && groundedSupportedClaims.length > 0)
     || (fallback.unsupportedClaims.length > 0 && groundedUnsupportedClaims.length === 0 && fallback.relevance < 5.5)
@@ -724,6 +752,7 @@ function normalizeBlueprintQuestion(
     evidenceIds: value.evidenceIds,
     expectedSignals: value.expectedSignals.map((signal) => signal.trim()),
     missingSignalPrompts: value.missingSignalPrompts.map((prompt) => prompt.trim()),
+    rubricCriteria: value.rubricCriteria.map((criteria) => criteria.trim()),
     followUpLimit: value.followUpLimit,
     sourceConfidence: value.sourceConfidence ?? null,
   };
@@ -948,6 +977,17 @@ function groundedQuestion(question: PlannedQuestion, blueprint: InterviewBluepri
     missingSignalPrompts: question.competencyName
       ? [`Name one concrete example from ${question.competencyName}.`]
       : ["Name one concrete example from the work you owned."],
+    rubricCriteria: question.competencyName
+      ? [
+        `Name one concrete example from ${question.competencyName}.`,
+        "Describe the ownership or decision involved.",
+        "Explain the outcome or trade-off.",
+      ]
+      : [
+        "Name one concrete example from the work you owned.",
+        "Describe the ownership or decision involved.",
+        "Explain the outcome or trade-off.",
+      ],
     followUpLimit: 1,
     sourceConfidence: null,
   };
@@ -1009,6 +1049,7 @@ function turnPrompt(
     "If shouldFollowUp is true, the question must probe the answered plan without changing its objective.",
     "If shouldFollowUp is false, the question should ask the supplied next plan without changing its objective or evidence target.",
     `Question: ${JSON.stringify(question)}`,
+    `Rubric criteria: ${JSON.stringify(question.rubricCriteria ?? [])}`,
     `Profile: ${JSON.stringify(profile)}`,
     `Can follow up: ${JSON.stringify(canFollowUp)}`,
     `Transcript: ${transcript}`,
@@ -1020,6 +1061,7 @@ function turnPrompt(
       difficulty: nextPlannedQuestion?.difficulty,
       objective: nextRubric.objective,
       expectedSignals: nextRubric.expectedSignals,
+      rubricCriteria: nextRubric.rubricCriteria ?? [],
     })}` : "",
   ].filter(Boolean).join("\n");
 }
@@ -1087,6 +1129,13 @@ function followUpDraft(planned: PlannedQuestion, prompt: string): FollowUpDraft 
     difficulty: planned.difficulty,
     isFollowUp: true,
     prompt,
+    objective: (planned as BlueprintQuestion).objective,
+    evidenceIds: (planned as BlueprintQuestion).evidenceIds ?? [],
+    expectedSignals: (planned as BlueprintQuestion).expectedSignals ?? [],
+    missingSignalPrompts: (planned as BlueprintQuestion).missingSignalPrompts ?? [],
+    rubricCriteria: (planned as BlueprintQuestion).rubricCriteria ?? [],
+    followUpLimit: (planned as BlueprintQuestion).followUpLimit ?? 0,
+    sourceConfidence: (planned as BlueprintQuestion).sourceConfidence ?? null,
   };
 }
 

@@ -117,6 +117,42 @@ function categoryMissingSignalPrompts(category: QuestionCategory, subject: strin
   return ["Who did you need alignment from and how did you get it?"];
 }
 
+function categoryRubricCriteria(category: QuestionCategory, subject: string): string[] {
+  if (category === "introduction") {
+    return [
+      "Establish the candidate's recent engineering ownership.",
+      `Keep the summary grounded in ${subject}.`,
+      "Do not drift into unrelated background details.",
+    ];
+  }
+  if (category === "experience") {
+    return [
+      `Name the project or work example in ${subject}.`,
+      "Describe the candidate's role and ownership.",
+      "Explain the decision, trade-off, and outcome.",
+    ];
+  }
+  if (category === "technical") {
+    return [
+      `Name the technical decision being discussed in ${subject}.`,
+      "Explain the constraint or rejected alternative.",
+      "Describe the trade-off and result.",
+    ];
+  }
+  if (category === "architecture") {
+    return [
+      `Explain the requirements or constraints that shaped ${subject}.`,
+      "Describe the system-level decision or architecture choice.",
+      "State the outcome or reliability impact.",
+    ];
+  }
+  return [
+    `Name the collaboration challenge around ${subject}.`,
+    "Describe how the team aligned on the decision.",
+    "State what changed because of the collaboration.",
+  ];
+}
+
 function fallbackCandidateCompetencies(
   category: QuestionCategory,
   competencies: Competency[],
@@ -250,11 +286,12 @@ function fallbackQuestionPlan(
 
 function blueprintObjective(category: QuestionCategory, competencyName: string | null, item: EvidenceItem | null): string {
   const subject = item?.projectOrEmployer ?? competencyName ?? "recent engineering work";
+  const prefix = item || category === "introduction" ? "Probe" : "General objective: Probe";
   if (category === "introduction") return "Establish recent engineering ownership.";
-  if (category === "experience") return `Probe ownership and impact in ${subject}.`;
-  if (category === "technical") return `Probe the core technical decision behind ${subject}.`;
-  if (category === "architecture") return `Probe system design choices around ${subject}.`;
-  return `Probe collaboration and delivery around ${subject}.`;
+  if (category === "experience") return `${prefix} ownership and impact in ${subject}.`;
+  if (category === "technical") return `${prefix} the core technical decision behind ${subject}.`;
+  if (category === "architecture") return `${prefix} system design choices around ${subject}.`;
+  return `${prefix} collaboration and delivery around ${subject}.`;
 }
 
 function blueprintPrompt(question: PlannedQuestion, item: EvidenceItem | null, role: string | null): string {
@@ -307,6 +344,7 @@ function defaultBlueprintQuestion(
     evidenceIds,
     expectedSignals: categorySignals(planned.category),
     missingSignalPrompts: categoryMissingSignalPrompts(planned.category, item?.projectOrEmployer ?? competencyName ?? "that work"),
+    rubricCriteria: categoryRubricCriteria(planned.category, item?.projectOrEmployer ?? competencyName ?? "that work"),
     followUpLimit: planned.category === "introduction" || planned.category === "behavioral" ? 0 : 1,
     sourceConfidence: item?.confidence ?? null,
   };
@@ -381,8 +419,14 @@ export function validateInterviewBlueprint(
     if (!question.prompt.trim()) throw new Error("Interview blueprint questions need prompt text.");
     if (!question.expectedSignals.length) throw new Error("Interview blueprint questions need expected signals.");
     if (!question.missingSignalPrompts.length) throw new Error("Interview blueprint questions need missing-signal prompts.");
+    if (!question.rubricCriteria?.length) throw new Error("Interview blueprint questions need scoring criteria.");
     if (normalizeFollowUpLimit(question.followUpLimit) !== question.followUpLimit) {
       throw new Error("Interview blueprint follow-up limits must stay between 0 and 3.");
+    }
+    if (question.category !== "introduction"
+      && question.evidenceIds.length === 0
+      && !question.objective.startsWith("General objective:")) {
+      throw new Error("Interview blueprint questions without evidence need a clearly labeled general objective.");
     }
     totalFollowUpBudget += question.followUpLimit;
     for (const evidenceId of question.evidenceIds) {

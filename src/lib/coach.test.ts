@@ -115,6 +115,11 @@ const groundedBlueprint = (question: PlannedQuestion, overrides: Partial<Intervi
       missingSignalPrompts: ["Name the trade-off you accepted."],
       followUpLimit: 1,
       sourceConfidence: 0.94,
+      rubricCriteria: [
+        "Name the project or work example.",
+        "Describe the candidate's role and ownership.",
+        "Explain the decision, trade-off, and outcome.",
+      ],
       ...overrides,
     },
   ],
@@ -437,7 +442,8 @@ describe("initialQuestion", () => {
 
     expect(turn.followUp).toBeNull();
     expect(turn.nextQuestion).toContain("System design");
-    expect(turn.evaluation.relevance).toBeGreaterThan(6.5);
+    expect(turn.evaluation.relevance).toBeGreaterThan(6);
+    expect(turn.evaluation.relevance).toBeLessThan(8);
     expect(turn.evaluation.expectedSignalsPresent).toEqual(expect.arrayContaining(["ownership", "trade-off", "impact"]));
   });
 
@@ -593,42 +599,18 @@ describe("initialQuestion", () => {
 
     expect(turn.followUp).toBeNull();
     expect(turn.nextQuestion).toBe("How would you phase the migration?");
-    expect(turn.evaluation).toMatchObject({
-      score: 8.4,
-      competencyId: "react-id",
-      competency: "React architecture",
-      relevance: 8.7,
-      dimensions: {
-        correctness: 8,
-        depth: 8,
-        clarity: 8,
-        structure: 9,
-        practicalExperience: 8,
-        tradeOffAwareness: 8,
-        communication: 8,
-        confidence: 7,
-        relevance: 9,
-      },
-      strengths: ["Specific trade-off framing"],
-      needsWork: ["Quantify the rollout risk"],
-      missingPoints: ["Explain the rollback trigger."],
-      betterStructure: ["Start with constraints, then explain the migration phases."],
-      improvedAnswer: "I would start with the constraints, phase the migration, and define the rollback trigger before rollout.",
-      supportedClaims: ["phase the rollout carefully"],
-      expectedSignalsPresent: ["impact"],
-      unsupportedClaims: [],
-      dimensionReasons: {
-        correctness: "The answer matches the migration question.",
-        depth: "The answer mentions rollout phases and a metric.",
-        clarity: "It is organized and specific.",
-        structure: "It starts with the constraint and ends with the rollback trigger.",
-        practicalExperience: "It refers to an actual migration.",
-        tradeOffAwareness: "It names the rollout trade-off.",
-        communication: "It is concise and explainable.",
-        confidence: "It is stated directly.",
-        relevance: "It answers the checkout migration question.",
-      },
-    });
+    expect(turn.evaluation.competencyId).toBe("react-id");
+    expect(turn.evaluation.competency).toBe("React architecture");
+    expect(turn.evaluation.score).not.toBe(8.4);
+    expect(turn.evaluation.relevance).not.toBe(8.7);
+    expect(turn.evaluation.supportedClaims).not.toContain("We shipped it perfectly.");
+    expect(turn.evaluation.unsupportedClaims).not.toContain("We shipped it perfectly.");
+    expect(turn.evaluation.improvedAnswer).toEqual(expect.any(String));
+    expect(turn.evaluation.dimensionReasons).toBeDefined();
+    if (turn.evaluation.dimensionReasons) {
+      expect(turn.evaluation.dimensionReasons.correctness).toEqual(expect.any(String));
+      expect(turn.evaluation.dimensionReasons.relevance).toEqual(expect.any(String));
+    }
   });
 
   it("requests a bounded follow-up when a weak answer needs clarification", async () => {
@@ -655,6 +637,123 @@ describe("initialQuestion", () => {
     expect(turn.evaluation.missingPoints).toEqual([expect.any(String)]);
     expect(turn.evaluation.betterStructure.length).toBeGreaterThan(0);
     expect(turn.evaluation.improvedAnswer).toEqual(expect.any(String));
+  });
+
+  it("preserves the follow-up rubric contract when a clarification is needed", async () => {
+    const answeredQuestion = groundedBlueprint(planned({
+      id: "question-1",
+      sequence: 1,
+      category: "experience",
+      prompt: "Tell me about the checkout migration.",
+    })).questions[0];
+    const nextQuestion = planned({
+      id: "question-2",
+      sequence: 2,
+      category: "architecture",
+      competencyId: "system-design-id",
+      competencyName: "System design",
+      prompt: "Generic architecture prompt",
+    });
+
+    const blueprint = groundedBlueprint(answeredQuestion);
+
+    const turn = await nextTurn(
+      { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "Owns frontend platforms." },
+      answeredQuestion,
+      nextQuestion,
+      { cvText: "At Acme I led a React migration and measured checkout performance.", coverLetter: "" },
+      session([answeredQuestion, nextQuestion]),
+      "I used React.",
+      blueprint,
+    );
+
+    expect(turn.followUp).toMatchObject({
+      objective: answeredQuestion.objective,
+      evidenceIds: answeredQuestion.evidenceIds,
+      expectedSignals: answeredQuestion.expectedSignals,
+      missingSignalPrompts: answeredQuestion.missingSignalPrompts,
+      followUpLimit: answeredQuestion.followUpLimit,
+      sourceConfidence: answeredQuestion.sourceConfidence,
+      rubricCriteria: answeredQuestion.rubricCriteria,
+    });
+  });
+
+  it("calibrates schema-valid model praise against verified answer signals", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{
+        content: {
+          parts: [{
+            text: JSON.stringify({
+              question: "How would you phase the migration?",
+              shouldFollowUp: false,
+              evaluation: {
+                score: 9.9,
+                competency: "Ignored by normalization",
+                relevance: 9.9,
+                dimensions: {
+                  correctness: 10,
+                  depth: 10,
+                  clarity: 10,
+                  structure: 10,
+                  practicalExperience: 10,
+                  tradeOffAwareness: 10,
+                  communication: 10,
+                  confidence: 10,
+                  relevance: 10,
+                },
+                strengths: ["Perfect migration answer"],
+                needsWork: ["None"],
+                missingPoints: ["None"],
+                betterStructure: ["None"],
+                improvedAnswer: "I would lead the checkout migration, explain the rollout trade-off, and measure the impact.",
+                supportedClaims: ["I led the checkout migration and measured the rollout."],
+                expectedSignalsPresent: ["ownership", "trade-off", "impact"],
+                unsupportedClaims: [],
+                dimensionReasons: {
+                  correctness: "The answer directly addresses the migration objective.",
+                  depth: "It includes detailed rollout evidence.",
+                  clarity: "It is organized and specific.",
+                  structure: "It flows from constraint to result.",
+                  practicalExperience: "It is grounded in the candidate's shipped migration.",
+                  tradeOffAwareness: "It names the trade-off explicitly.",
+                  communication: "It is concise and clear.",
+                  confidence: "It states the ownership directly.",
+                  relevance: "It answers the checkout migration question.",
+                },
+              },
+            }),
+          }],
+        },
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    const question = groundedBlueprint(planned({
+      id: "question-1",
+      sequence: 2,
+      category: "experience",
+      competencyId: "react-id",
+      competencyName: "React architecture",
+      difficulty: "senior",
+      isFollowUp: false,
+      prompt: "Tell me about the checkout migration.",
+      answer: null,
+      createdAt: "2026-08-29T10:00:00.000Z",
+    })).questions[0];
+
+    const evaluation = await evaluateAnswer(
+      question,
+      { status: "grounded", fallbackReason: null, maxFollowUps: 3, maxQuestions: 8, createdAt: "2026-08-29T10:00:00.000Z", questions: [question] },
+      blueprintProfile,
+      "I led the checkout migration, split bundles by route, accepted extra QA during rollout, and measured a 28% bundle-size drop.",
+      "interviewer: Tell me about the checkout migration.",
+    );
+
+    expect(evaluation.score).toBeLessThan(9.9);
+    expect(evaluation.score).toBeGreaterThan(6.5);
+    expect(evaluation.improvedAnswer).toContain("checkout migration");
+    expect(evaluation.dimensionReasons.relevance).toContain("checkout migration");
   });
 
   it("falls back to a deterministic evaluation when the model omits any required dimension", async () => {
@@ -817,6 +916,11 @@ describe("generateInterviewBlueprint", () => {
                   evidenceIds: [],
                   expectedSignals: ["role summary", "recent ownership"],
                   missingSignalPrompts: ["Name the most recent engineering area you owned."],
+                  rubricCriteria: [
+                    "Establish the candidate's recent engineering ownership.",
+                    "Keep the summary grounded in the role context.",
+                    "Do not drift into unrelated background details.",
+                  ],
                   followUpLimit: 0,
                   prompt: "Give me a concise introduction to yourself and the frontend work you have owned recently.",
                   sourceConfidence: null,
@@ -831,6 +935,11 @@ describe("generateInterviewBlueprint", () => {
                   evidenceIds: ["evidence-1"],
                   expectedSignals: ["role", "trade-off", "outcome"],
                   missingSignalPrompts: ["Name the launch trade-off you accepted."],
+                  rubricCriteria: [
+                    "Name the project or work example in Checkout Platform.",
+                    "Describe the candidate's role and ownership.",
+                    "Explain the decision, trade-off, and outcome.",
+                  ],
                   followUpLimit: 1,
                   prompt: "Tell me about the Checkout Platform migration.",
                   sourceConfidence: 0.94,
@@ -844,6 +953,11 @@ describe("generateInterviewBlueprint", () => {
                   evidenceIds: ["evidence-1"],
                   expectedSignals: ["decision", "constraint", "trade-off"],
                   missingSignalPrompts: ["What trade-off did you reject?"],
+                  rubricCriteria: [
+                    "Name the technical decision being discussed in React architecture.",
+                    "Explain the constraint or rejected alternative.",
+                    "Describe the trade-off and result.",
+                  ],
                   followUpLimit: 1,
                   prompt: "Walk me through the route-splitting decision.",
                   sourceConfidence: 0.94,
@@ -857,6 +971,11 @@ describe("generateInterviewBlueprint", () => {
                   evidenceIds: ["evidence-2"],
                   expectedSignals: ["requirements", "signal design", "constraint"],
                   missingSignalPrompts: ["Which alert trade-off mattered most?"],
+                  rubricCriteria: [
+                    "Explain the requirements or constraints that shaped System design.",
+                    "Describe the system-level decision or architecture choice.",
+                    "State the outcome or reliability impact.",
+                  ],
                   followUpLimit: 1,
                   prompt: "How did you shape observability for API regressions?",
                   sourceConfidence: 0.91,
@@ -870,6 +989,11 @@ describe("generateInterviewBlueprint", () => {
                   evidenceIds: ["evidence-2"],
                   expectedSignals: ["collaboration", "decision", "impact"],
                   missingSignalPrompts: ["Who disagreed and how did you resolve it?"],
+                  rubricCriteria: [
+                    "Name the collaboration challenge around System design.",
+                    "Describe how the team aligned on the decision.",
+                    "State what changed because of the collaboration.",
+                  ],
                   followUpLimit: 0,
                   prompt: "How did you align the team on the release-health dashboards?",
                   sourceConfidence: 0.91,
@@ -941,66 +1065,91 @@ describe("generateInterviewBlueprint", () => {
                     category: "introduction",
                     competencyName: null,
                     difficulty: "senior",
-                    objective: "Establish recent engineering ownership.",
-                    evidenceIds: [],
-                    expectedSignals: ["role summary"],
-                    missingSignalPrompts: ["Name the area you owned."],
-                    followUpLimit: 0,
-                    prompt: "Give me a concise introduction to yourself and the frontend work you have owned recently.",
-                    sourceConfidence: null,
-                  },
+                  objective: "Establish recent engineering ownership.",
+                  evidenceIds: [],
+                  expectedSignals: ["role summary"],
+                  missingSignalPrompts: ["Name the area you owned."],
+                  rubricCriteria: [
+                    "Establish the candidate's recent engineering ownership.",
+                    "Keep the summary grounded in the role context.",
+                    "Do not drift into unrelated background details.",
+                  ],
+                  followUpLimit: 0,
+                  prompt: "Give me a concise introduction to yourself and the frontend work you have owned recently.",
+                  sourceConfidence: null,
+                },
                   {
                     sequence: 2,
                     category: "experience",
                     competencyName: "React architecture",
                     difficulty: "senior",
-                    objective: "Probe the checkout migration ownership and impact.",
-                    evidenceIds: ["evidence-1"],
-                    expectedSignals: ["role", "outcome"],
-                    missingSignalPrompts: ["Name the trade-off."],
-                    followUpLimit: 1,
-                    prompt: "Tell me about the Checkout Platform migration.",
-                    sourceConfidence: 0.94,
-                  },
+                  objective: "Probe the checkout migration ownership and impact.",
+                  evidenceIds: ["evidence-1"],
+                  expectedSignals: ["role", "outcome"],
+                  missingSignalPrompts: ["Name the trade-off."],
+                  rubricCriteria: [
+                    "Name the project or work example in Checkout Platform.",
+                    "Describe the candidate's role and ownership.",
+                    "Explain the decision, trade-off, and outcome.",
+                  ],
+                  followUpLimit: 1,
+                  prompt: "Tell me about the Checkout Platform migration.",
+                  sourceConfidence: 0.94,
+                },
                   {
                     sequence: 3,
                     category: "technical",
                     competencyName: "React architecture",
                     difficulty: "senior",
-                    objective: "Probe the route-splitting decision.",
-                    evidenceIds: ["evidence-1"],
-                    expectedSignals: ["decision", "constraint"],
-                    missingSignalPrompts: ["What option did you reject?"],
-                    followUpLimit: 1,
-                    prompt: "Walk me through the route-splitting decision.",
-                    sourceConfidence: 0.94,
-                  },
+                  objective: "Probe the route-splitting decision.",
+                  evidenceIds: ["evidence-1"],
+                  expectedSignals: ["decision", "constraint"],
+                  missingSignalPrompts: ["What option did you reject?"],
+                  rubricCriteria: [
+                    "Name the technical decision being discussed in React architecture.",
+                    "Explain the constraint or rejected alternative.",
+                    "Describe the trade-off and result.",
+                  ],
+                  followUpLimit: 1,
+                  prompt: "Walk me through the route-splitting decision.",
+                  sourceConfidence: 0.94,
+                },
                   {
                     sequence: 4,
                     category: "architecture",
                     competencyName: "System design",
                     difficulty: "senior",
-                    objective: "Probe the observability system design choices.",
-                    evidenceIds: ["evidence-2"],
-                    expectedSignals: ["requirements", "signal design"],
-                    missingSignalPrompts: ["How did you tune the alerts?"],
-                    followUpLimit: 1,
-                    prompt: "How did you shape observability for API regressions?",
-                    sourceConfidence: 0.91,
-                  },
+                  objective: "Probe the observability system design choices.",
+                  evidenceIds: ["evidence-2"],
+                  expectedSignals: ["requirements", "signal design"],
+                  missingSignalPrompts: ["How did you tune the alerts?"],
+                  rubricCriteria: [
+                    "Explain the requirements or constraints that shaped System design.",
+                    "Describe the system-level decision or architecture choice.",
+                    "State the outcome or reliability impact.",
+                  ],
+                  followUpLimit: 1,
+                  prompt: "How did you shape observability for API regressions?",
+                  sourceConfidence: 0.91,
+                },
                   {
                     sequence: 5,
                     category: "behavioral",
                     competencyName: "System design",
                     difficulty: "senior",
-                    objective: "Probe collaboration during observability delivery.",
-                    evidenceIds: ["evidence-2"],
-                    expectedSignals: ["collaboration", "impact"],
-                    missingSignalPrompts: ["Who did you need alignment from?"],
-                    followUpLimit: 0,
-                    prompt: "How did you align the team on release health?",
-                    sourceConfidence: 0.91,
-                  },
+                  objective: "Probe collaboration during observability delivery.",
+                  evidenceIds: ["evidence-2"],
+                  expectedSignals: ["collaboration", "impact"],
+                  missingSignalPrompts: ["Who did you need alignment from?"],
+                  rubricCriteria: [
+                    "Name the collaboration challenge around System design.",
+                    "Describe how the team aligned on the decision.",
+                    "State what changed because of the collaboration.",
+                  ],
+                  followUpLimit: 0,
+                  prompt: "How did you align the team on release health?",
+                  sourceConfidence: 0.91,
+                },
                 ],
               }),
             }],

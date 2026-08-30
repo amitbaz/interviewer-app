@@ -89,6 +89,7 @@ function mapBlueprintQuestion(row: Row, competencyNames: Map<string, string>): B
     evidenceIds: stringArray(row.evidence_ids),
     expectedSignals: stringArray(row.expected_signals),
     missingSignalPrompts: stringArray(row.missing_signal_prompts),
+    rubricCriteria: stringArray(row.rubric_criteria),
     followUpLimit: Number(row.follow_up_limit ?? 0),
     sourceConfidence: row.source_confidence === null || row.source_confidence === undefined
       ? null
@@ -421,6 +422,7 @@ export async function createSessionWithBlueprint(
         evidence_ids: question.evidenceIds,
         expected_signals: question.expectedSignals,
         missing_signal_prompts: question.missingSignalPrompts,
+        rubric_criteria: question.rubricCriteria ?? [],
         follow_up_limit: question.followUpLimit,
         source_confidence: question.sourceConfidence,
       })),
