@@ -23,6 +23,7 @@
 - No job-hunter code, workflow, secrets, SQLite state, or Telegram behavior is changed.
 - No service-role credential is exposed to browser code.
 - Use the existing `RepositoryError` pattern for persistence failures.
+- Historical `opportunity_events`, `career_story_evidence`, and `observation_evidence` are append-oriented: normal application clients may select/insert them but may not update/delete them directly; parent deletion may clean them through foreign-key cascades where specified.
 - Follow red → green → refactor for each task and keep commits scoped to the task.
 - Run migrations only against a disposable/local or explicitly designated development Supabase target during implementation. Do not use production as the migration test environment.
 
@@ -69,7 +70,7 @@ Responsibilities:
 - `observations.ts` owns coach-observation persistence, review state, and typed evidence links.
 - `practice-plans.ts` owns explicit practice-plan persistence and opportunity relationships.
 - `interviews.ts` only gains nullable Career Brain context mapping/linking; existing interview/evaluation behavior remains intact.
-- SQL migrations own relational constraints, RLS, indexes, and transactional invariants.
+- SQL migrations own relational constraints, RLS, indexes, append-only access boundaries, and transactional invariants.
 
 ---
 
@@ -308,21 +309,27 @@ scheduleOpportunityInterview(supabase, userId, opportunityId, interviewAt, optio
 listOpportunityEvents(supabase, userId, opportunityId): Promise<OpportunityEvent[]>
 ```
 
-- [ ] **Step 1: Add failing repository tests for opportunity mapping and lifecycle RPC calls**
+- [ ] **Step 1: Add failing repository tests for opportunity creation, mapping, and lifecycle RPC calls**
 
 Create `src/lib/repositories/opportunities.test.ts` with `vi.mock("server-only", () => ({}))` and mocked Supabase calls.
 
 Minimum RED cases:
 
 ```ts
-it("creates a considering opportunity with durable external identity", async () => {
-  const opportunity = await createOpportunity(supabase as never, "user-1", {
+it("creates an opportunity through the transactional create RPC", async () => {
+  await createOpportunity(supabase as never, "user-1", {
     company: "Example",
     role: "Senior Frontend Engineer",
     sourceSystem: "job-hunter",
     sourceExternalId: "job-123",
   });
-  expect(opportunity.status).toBe("considering");
+
+  expect(rpc).toHaveBeenCalledWith("create_opportunity", expect.objectContaining({
+    p_company: "Example",
+    p_role: "Senior Frontend Engineer",
+    p_source_system: "job-hunter",
+    p_source_external_id: "job-123",
+  }));
 });
 
 it("uses the transactional status RPC instead of direct status update", async () => {
@@ -390,9 +397,14 @@ Create `opportunities` and `opportunity_events` with:
 - partial unique external identity index on `(user_id, source_system, source_external_id)`;
 - user/status, user/next-interview, and user/updated indexes;
 - composite same-user event foreign key;
-- RLS and own-row CRUD policies.
+- `opportunities`: own-row select/insert/update/delete RLS;
+- `opportunity_events`: own-row select/insert RLS only, with no direct update/delete policies.
 
-Create `transition_opportunity(...)` as `security invoker` with `auth.uid()` checks and row locking. Create `schedule_opportunity_interview(...)` similarly. Neither function may accept a caller-supplied `user_id`.
+Create three narrow `security invoker` functions. None accepts a caller-supplied `user_id`.
+
+`create_opportunity(...)` must insert the opportunity and its `created` event in one transaction and return the new opportunity ID. Its event must use `to_status = 'considering'`.
+
+`transition_opportunity(...)` must require `auth.uid()`, lock/verify the owned row, update status, set `applied_at` on the first transition to `applied`, and append one `status_changed` event.
 
 Core status update shape:
 
@@ -419,6 +431,8 @@ insert into public.opportunity_events (...)
 values (..., 'status_changed', v_opportunity.status, p_to_status, ...);
 ```
 
+`schedule_opportunity_interview(...)` must atomically set `next_interview_at`, append `interview_scheduled`, and change status to `interviewing` only when the current status is `considering` or `applied`. It must not silently move `offer`, `rejected`, `withdrawn`, or `closed` back to `interviewing`.
+
 - [ ] **Step 5: Implement `opportunities.ts`**
 
 Follow existing repository conventions:
@@ -429,7 +443,9 @@ Follow existing repository conventions:
 - throw `RepositoryError` with safe messages;
 - never update `status`, `applied_at`, or `next_interview_at` through `updateOpportunityDetails`.
 
-After each lifecycle RPC, reload with `getOpportunity` and fail with `NO_OWNED_ROW` if the updated row cannot be reloaded.
+`createOpportunity` calls `create_opportunity`, extracts `opportunity_id`, and reloads with `getOpportunity`.
+
+After every lifecycle RPC, reload with `getOpportunity` and fail with `NO_OWNED_ROW` if the row cannot be reloaded.
 
 - [ ] **Step 6: Run focused tests and verify GREEN**
 
@@ -443,10 +459,12 @@ Expected: PASS.
 
 After `supabase db push`, verify:
 
+- creation produces exactly one `created` event;
 - duplicate `(user_id, source_system, source_external_id)` fails;
 - the same external identity succeeds for another user;
 - `transition_opportunity` creates one event and changes the summary row together;
-- `schedule_opportunity_interview` creates `interview_scheduled` history and updates `next_interview_at` together.
+- `schedule_opportunity_interview` creates `interview_scheduled` history and updates `next_interview_at` together;
+- direct update/delete of `opportunity_events` is denied to normal authenticated clients.
 
 - [ ] **Step 8: Commit**
 
@@ -521,7 +539,10 @@ Add exact camelCase fields from the spec. Keep `completeness` as a `number` `0..
 
 - [ ] **Step 4: Create the story migration**
 
-Create `career_stories` and `career_story_evidence` with RLS and same-user FKs.
+Create `career_stories` and `career_story_evidence` with same-user FKs and these RLS boundaries:
+
+- `career_stories`: own-row select/insert/update/delete;
+- `career_story_evidence`: own-row select/insert only, with no direct update/delete policy.
 
 The exact-one-source check must be:
 
@@ -540,7 +561,7 @@ foreign key (interview_question_id, user_id)
   references public.interview_questions (id, user_id)
 ```
 
-Use `on delete restrict`/default restrictive behavior for evidence parents so referenced provenance cannot disappear silently; story deletion may cascade its link rows.
+Use restrictive/default delete behavior for evidence parents so referenced provenance cannot disappear silently; story deletion may cascade its link rows.
 
 - [ ] **Step 5: Implement `stories.ts`**
 
@@ -566,7 +587,7 @@ Expected: PASS.
 
 - [ ] **Step 7: Verify DB source constraints on disposable Supabase**
 
-Attempt rows with zero sources and two sources; both must fail. Verify a user cannot reference another user’s story or evidence ID.
+Attempt rows with zero sources and two sources; both must fail. Verify a user cannot reference another user’s story or evidence ID. Verify normal authenticated clients cannot update/delete an existing `career_story_evidence` row directly.
 
 - [ ] **Step 8: Commit**
 
@@ -670,7 +691,10 @@ check (num_nonnulls(
 ) = 1)
 ```
 
-Use composite same-user FKs to every evidence parent and own-row RLS policies.
+Use composite same-user FKs to every evidence parent. RLS boundaries:
+
+- `coach_observations`: own-row select/insert/update/delete;
+- `observation_evidence`: own-row select/insert only, with no direct update/delete policy.
 
 - [ ] **Step 5: Implement `observations.ts`**
 
@@ -692,7 +716,7 @@ npm test -- src/lib/repositories/observations.test.ts
 
 - [ ] **Step 7: Verify provenance constraints and RLS in disposable Supabase**
 
-Verify exact-one-source checks and cross-user FK failures. Confirm an inactive `profile_evidence` row may still be referenced because inactive means historical, not invalid.
+Verify exact-one-source checks and cross-user FK failures. Confirm an inactive `profile_evidence` row may still be referenced because inactive means historical, not invalid. Verify normal authenticated clients cannot update/delete existing `observation_evidence` rows directly.
 
 - [ ] **Step 8: Commit**
 
@@ -773,7 +797,12 @@ Create `practice_plans` and `practice_plan_opportunities` with checks from the s
 check (estimated_minutes is null or estimated_minutes between 1 and 180)
 ```
 
-Add same-user composite FKs and own-row RLS. Add:
+Add same-user composite FKs. RLS boundaries:
+
+- `practice_plans`: own-row select/insert/update/delete;
+- `practice_plan_opportunities`: own-row select/insert/delete because this relationship set is deliberately replaceable, but no update policy is needed.
+
+Add:
 
 ```sql
 create unique index practice_plan_one_primary_opportunity_idx
@@ -1000,13 +1029,16 @@ Manually verify these database invariants before calling the release complete:
 ```text
 1. Equivalent profile evidence keeps one UUID across saves.
 2. Removed profile evidence is inactive, not deleted.
-3. Duplicate external opportunity identity is rejected per user.
-4. Opportunity status/interview scheduling produce matching event history atomically.
-5. Story and observation evidence require exactly one typed source.
-6. Cross-user provenance links are rejected.
-7. Practice plans allow many opportunities but at most one primary.
-8. Existing interview sessions retain null Career Brain context.
-9. New same-user session context can be linked successfully.
+3. Opportunity creation creates one immutable created event.
+4. Duplicate external opportunity identity is rejected per user.
+5. Opportunity status/interview scheduling produce matching event history atomically.
+6. Opportunity events cannot be directly updated/deleted by normal authenticated clients.
+7. Story and observation evidence require exactly one typed source.
+8. Story and observation provenance rows cannot be directly updated/deleted by normal authenticated clients.
+9. Cross-user provenance links are rejected.
+10. Practice plans allow many opportunities but at most one primary.
+11. Existing interview sessions retain null Career Brain context.
+12. New same-user session context can be linked successfully.
 ```
 
 - [ ] **Step 6: Confirm Release 1 does not touch the job hunter**
@@ -1035,7 +1067,7 @@ Expected: all commands succeed.
 Do not mark Release 1 complete unless every acceptance criterion in the design spec has a corresponding passing test or verified database invariant, especially:
 
 - stable profile-evidence identity;
-- atomic opportunity lifecycle history;
+- complete, append-only opportunity lifecycle history;
 - typed story/observation provenance;
 - durable observation correction/dismissal state;
 - explicit practice plans with one primary opportunity at most;
