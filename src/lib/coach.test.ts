@@ -11,7 +11,7 @@ import {
   initialQuestion,
   nextTurn,
 } from "@/lib/coach";
-import type { EvidenceItem, InterviewSession, PlannedQuestion, ProfileDraft } from "@/lib/types";
+import type { EvidenceItem, InterviewBlueprint, InterviewSession, PlannedQuestion, ProfileDraft } from "@/lib/types";
 
 const planned = (overrides: Partial<PlannedQuestion>): PlannedQuestion => ({
   id: "question-1",
@@ -99,6 +99,26 @@ const blueprintProfile: ProfileDraft = {
   ],
 };
 
+const groundedBlueprint = (question: PlannedQuestion, overrides: Partial<InterviewBlueprint["questions"][number]> = {}): InterviewBlueprint => ({
+  status: "grounded",
+  fallbackReason: null,
+  maxFollowUps: 3,
+  maxQuestions: 8,
+  createdAt: "2026-08-29T10:00:00.000Z",
+  questions: [
+    {
+      ...question,
+      objective: "Probe the migration ownership and impact.",
+      evidenceIds: ["evidence-1"],
+      expectedSignals: ["ownership", "trade-off", "impact"],
+      missingSignalPrompts: ["Name the trade-off you accepted."],
+      followUpLimit: 1,
+      sourceConfidence: 0.94,
+      ...overrides,
+    },
+  ],
+});
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
@@ -162,33 +182,18 @@ describe("initialQuestion", () => {
   });
 
   it("scores a relevant answer higher than an unrelated answer of the same length", async () => {
-    const blueprint = {
-      status: "grounded" as const,
-      fallbackReason: null,
-      maxFollowUps: 3,
-      maxQuestions: 8,
+    const blueprint = groundedBlueprint(planned({
+      id: "question-1",
+      sequence: 2,
+      category: "experience",
+      competencyId: "react-id",
+      competencyName: "React architecture",
+      difficulty: "senior",
+      isFollowUp: false,
+      prompt: "Tell me about the checkout migration.",
+      answer: null,
       createdAt: "2026-08-29T10:00:00.000Z",
-      questions: [
-        {
-          id: "question-1",
-          sequence: 2,
-          category: "experience" as const,
-          competencyId: "react-id",
-          competencyName: "React architecture",
-          difficulty: "senior" as const,
-          isFollowUp: false,
-          prompt: "Tell me about the checkout migration.",
-          answer: null,
-          createdAt: "2026-08-29T10:00:00.000Z",
-          objective: "Probe the migration ownership and impact.",
-          evidenceIds: ["evidence-1"],
-          expectedSignals: ["ownership", "trade-off", "impact"],
-          missingSignalPrompts: ["Name the trade-off you accepted."],
-          followUpLimit: 1,
-          sourceConfidence: 0.94,
-        },
-      ],
-    };
+    }));
     const relevantAnswer = "I led the checkout migration, split bundles, and measured a 28% drop in bundle size.";
     const unrelatedAnswer = "I enjoy solving puzzles and learning new things every day.".padEnd(relevantAnswer.length, ".");
 
@@ -217,7 +222,201 @@ describe("initialQuestion", () => {
     expect(relevant.dimensionReasons.relevance).toContain("checkout migration");
   });
 
-  it("preserves grounded coaching fields when model output is normalized through the evaluation schema", async () => {
+  it("does not create a follow-up when the rubric explicitly sets the follow-up limit to zero", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{
+        content: {
+          parts: [{
+            text: JSON.stringify({
+              question: "How would you shape the observability design for that rollout?",
+              shouldFollowUp: true,
+              evaluation: {
+                score: 7.7,
+                competency: "Ignored by normalization",
+                relevance: 8.1,
+                dimensions: {
+                  correctness: 8,
+                  depth: 7,
+                  clarity: 8,
+                  structure: 8,
+                  practicalExperience: 7,
+                  tradeOffAwareness: 8,
+                  communication: 8,
+                  confidence: 7,
+                  relevance: 8,
+                },
+                strengths: ["Specific collaboration example"],
+                needsWork: ["Name the trade-off earlier"],
+                missingPoints: ["Add the launch constraint."],
+                betterStructure: ["Start with the disagreement, then show the outcome."],
+                improvedAnswer: "I aligned engineering and product on the rollout, named the trade-off, and measured the outcome.",
+                supportedClaims: ["I aligned engineering and product on the rollout."],
+                expectedSignalsPresent: ["ownership", "impact"],
+                unsupportedClaims: [],
+                dimensionReasons: {
+                  correctness: "The answer addresses the rollout question.",
+                  depth: "It includes a concrete coordination example.",
+                  clarity: "It is concise and direct.",
+                  structure: "It follows a clear sequence.",
+                  practicalExperience: "It refers to shipped work.",
+                  tradeOffAwareness: "It names the rollout trade-off.",
+                  communication: "It is easy to follow.",
+                  confidence: "It states the ownership directly.",
+                  relevance: "It answers the rollout prompt.",
+                },
+              },
+            }),
+          }],
+        },
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    const answeredQuestion = planned({
+      id: "question-1",
+      sequence: 1,
+      category: "experience",
+      prompt: "Tell me about the checkout migration.",
+    });
+    const nextQuestion = planned({
+      id: "question-2",
+      sequence: 2,
+      category: "architecture",
+      competencyId: "system-design-id",
+      competencyName: "System design",
+      prompt: "Generic architecture prompt",
+    });
+    const blueprint = groundedBlueprint(answeredQuestion, { followUpLimit: 0 });
+
+    const turn = await nextTurn(
+      { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "Owns frontend platforms." },
+      answeredQuestion,
+      nextQuestion,
+      { cvText: "At Acme I led the checkout migration and aligned engineering with product.", coverLetter: "" },
+      session([answeredQuestion, nextQuestion]),
+      "I aligned engineering and product on the checkout migration, accepted extra QA during rollout, and measured the impact after launch.",
+      blueprint,
+    );
+
+    expect(turn.followUp).toBeNull();
+    expect(turn.nextQuestion).toBe("How would you shape the observability design for that rollout?");
+  });
+
+  it("does not request a follow-up solely because a relevant answer is concise", async () => {
+    const answeredQuestion = planned({
+      id: "question-1",
+      sequence: 1,
+      category: "experience",
+      prompt: "Tell me about the checkout migration.",
+    });
+    const nextQuestion = planned({
+      id: "question-2",
+      sequence: 2,
+      category: "architecture",
+      competencyId: "system-design-id",
+      competencyName: "System design",
+      prompt: "Generic architecture prompt",
+    });
+    const blueprint = groundedBlueprint(answeredQuestion);
+
+    const turn = await nextTurn(
+      { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "Owns frontend platforms." },
+      answeredQuestion,
+      nextQuestion,
+      { cvText: "At Acme I led a React migration and measured checkout performance.", coverLetter: "" },
+      session([answeredQuestion, nextQuestion]),
+      "I led the checkout migration, split bundles by route, accepted extra QA during rollout, and measured a 28% bundle-size drop.",
+      blueprint,
+    );
+
+    expect(turn.followUp).toBeNull();
+    expect(turn.nextQuestion).toContain("System design");
+    expect(turn.evaluation.relevance).toBeGreaterThan(6.5);
+    expect(turn.evaluation.expectedSignalsPresent).toEqual(expect.arrayContaining(["ownership", "trade-off", "impact"]));
+  });
+
+  it("rejects schema-valid Gemini praise when the answer is unrelated to the exact question", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{
+        content: {
+          parts: [{
+            text: JSON.stringify({
+              question: "How would you phase the migration?",
+              shouldFollowUp: false,
+              evaluation: {
+                score: 9.1,
+                competency: "Ignored by normalization",
+                relevance: 9.4,
+                dimensions: {
+                  correctness: 9,
+                  depth: 9,
+                  clarity: 9,
+                  structure: 9,
+                  practicalExperience: 9,
+                  tradeOffAwareness: 9,
+                  communication: 9,
+                  confidence: 9,
+                  relevance: 9,
+                },
+                strengths: ["Clear migration ownership"],
+                needsWork: ["Add a metric"],
+                missingPoints: ["Explain the rollback trigger."],
+                betterStructure: ["Start with the constraint, then the decision."],
+                improvedAnswer: "I led the checkout migration, accepted the rollout trade-off, and measured the impact after launch.",
+                supportedClaims: ["I led the checkout migration and measured the rollout."],
+                expectedSignalsPresent: ["ownership", "trade-off", "impact"],
+                unsupportedClaims: [],
+                dimensionReasons: {
+                  correctness: "The answer directly addresses the migration objective.",
+                  depth: "It includes detailed rollout evidence.",
+                  clarity: "It is organized and specific.",
+                  structure: "It flows from constraint to result.",
+                  practicalExperience: "It is grounded in the candidate's shipped migration.",
+                  tradeOffAwareness: "It names the trade-off explicitly.",
+                  communication: "It is concise and clear.",
+                  confidence: "It states the ownership directly.",
+                  relevance: "It answers the checkout migration question.",
+                },
+              },
+            }),
+          }],
+        },
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    const question = groundedBlueprint(planned({
+      id: "question-1",
+      sequence: 2,
+      category: "experience",
+      competencyId: "react-id",
+      competencyName: "React architecture",
+      difficulty: "senior",
+      isFollowUp: false,
+      prompt: "Tell me about the checkout migration.",
+      answer: null,
+      createdAt: "2026-08-29T10:00:00.000Z",
+    })).questions[0];
+
+    const evaluation = await evaluateAnswer(
+      question,
+      { status: "grounded", fallbackReason: null, maxFollowUps: 3, maxQuestions: 8, createdAt: "2026-08-29T10:00:00.000Z", questions: [question] },
+      blueprintProfile,
+      "I enjoy mentoring, reading docs, and learning new tools every week.",
+      "interviewer: Tell me about the checkout migration.",
+    );
+
+    expect(evaluation.score).toBeLessThan(6.5);
+    expect(evaluation.relevance).toBeLessThan(5);
+    expect(evaluation.expectedSignalsPresent).toEqual([]);
+    expect(evaluation.supportedClaims).toEqual([]);
+    expect(evaluation.unsupportedClaims.length).toBeGreaterThan(0);
+    expect(evaluation.dimensionReasons.relevance).toContain("does not directly answer");
+  });
+
+  it("preserves grounded coaching fields while stripping ungrounded model claims", async () => {
     vi.stubEnv("GEMINI_API_KEY", "private-test-key");
     vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
@@ -311,8 +510,8 @@ describe("initialQuestion", () => {
       betterStructure: ["Start with constraints, then explain the migration phases."],
       improvedAnswer: "I would start with the constraints, phase the migration, and define the rollback trigger before rollout.",
       supportedClaims: ["phase the rollout carefully"],
-      expectedSignalsPresent: ["trade-off", "impact"],
-      unsupportedClaims: ["We shipped it perfectly."],
+      expectedSignalsPresent: ["impact"],
+      unsupportedClaims: [],
       dimensionReasons: {
         correctness: "The answer matches the migration question.",
         depth: "The answer mentions rollout phases and a metric.",

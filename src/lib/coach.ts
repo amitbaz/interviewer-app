@@ -234,6 +234,14 @@ function questionOverlap(answerTokens: string[], rubricTokens: string[]): number
   return overlap.length / rubricTokens.length;
 }
 
+function tokenOverlap(left: string, right: string): number {
+  const leftTokens = uniqueTokens(left);
+  const rightTokens = uniqueTokens(right);
+  if (!leftTokens.length || !rightTokens.length) return 0;
+  const overlap = leftTokens.filter((token) => rightTokens.includes(token));
+  return overlap.length / leftTokens.length;
+}
+
 function supportedClaims(answerSentences: string[], question: BlueprintQuestion, signals: string[]): string[] {
   const rubricTokens = questionTokens(question);
   return answerSentences.filter((sentence) => {
@@ -379,6 +387,52 @@ function groundedEvaluationFor(
       answer: trimmed,
     }),
   };
+}
+
+function claimMatchesAnswer(claim: string, answerSentences: string[], question: BlueprintQuestion): boolean {
+  const normalizedClaim = claim.toLowerCase();
+  return answerSentences.some((sentence) => {
+    if (sentence.toLowerCase().includes(normalizedClaim)) return true;
+    const overlap = tokenOverlap(claim, sentence);
+    if (overlap >= 0.66) return true;
+    if (matchedSignals(sentence, question.expectedSignals).length > 0 && overlap >= 0.34) return true;
+    return questionOverlap(uniqueTokens(sentence), questionTokens(question)) >= 0.35 && overlap >= 0.5;
+  });
+}
+
+function validateGroundedModelEvaluation(
+  question: BlueprintQuestion,
+  answer: string,
+  value: z.infer<typeof groundedEvaluationSchema>,
+): { evaluation: GroundedEvaluation; trusted: boolean } {
+  const normalized = normalizeGroundedEvaluation(question, value);
+  const fallback = groundedEvaluationFor(question, answer);
+  const answerSentences = splitSentences(answer.trim().length ? answer.trim() : answer);
+  const groundedSignals = normalized.expectedSignalsPresent
+    .filter((signal) => fallback.expectedSignalsPresent.includes(signal));
+  const groundedSupportedClaims = normalized.supportedClaims
+    .filter((claim) => claimMatchesAnswer(claim, answerSentences, question));
+  const groundedUnsupportedClaims = normalized.unsupportedClaims
+    .filter((claim) => claimMatchesAnswer(claim, answerSentences, question));
+
+  const repaired: GroundedEvaluation = {
+    ...normalized,
+    supportedClaims: groundedSupportedClaims,
+    expectedSignalsPresent: groundedSignals,
+    unsupportedClaims: groundedUnsupportedClaims,
+  };
+
+  const materiallyUngrounded = (fallback.supportedClaims.length === 0 && groundedSupportedClaims.length > 0)
+    || (fallback.unsupportedClaims.length > 0 && groundedUnsupportedClaims.length === 0 && fallback.relevance < 5.5)
+    || (fallback.expectedSignalsPresent.length === 0 && normalized.expectedSignalsPresent.length > 0)
+    || (fallback.relevance < 5.5
+      && normalized.relevance >= 7
+      && fallback.supportedClaims.length === 0
+      && fallback.expectedSignalsPresent.length === 0);
+
+  return materiallyUngrounded
+    ? { evaluation: fallback, trusted: false }
+    : { evaluation: repaired, trusted: true };
 }
 
 async function modelJson<T>(prompt: string, schema: z.ZodType<T>): Promise<T | null> {
@@ -728,6 +782,23 @@ function normalizeGroundedEvaluation(question: PlannedQuestion, value: z.infer<t
   };
 }
 
+function shouldAskFollowUp(question: BlueprintQuestion, evaluation: GroundedEvaluation): boolean {
+  const signalCoverage = question.expectedSignals.length
+    ? evaluation.expectedSignalsPresent.length / question.expectedSignals.length
+    : 1;
+  return evaluation.supportedClaims.length === 0
+    || evaluation.relevance < 4.5
+    || signalCoverage < 0.5
+    || evaluation.unsupportedClaims.length > 0;
+}
+
+function resolveFollowUpLimit(question: BlueprintQuestion, blueprint: InterviewBlueprint | null): number {
+  return Math.max(
+    0,
+    Math.min(question.followUpLimit ?? (blueprint?.maxFollowUps ?? 3), blueprint?.maxFollowUps ?? 3),
+  );
+}
+
 function turnPrompt(
   question: BlueprintQuestion,
   profile: Pick<ProfileDraft, "role" | "seniority" | "expertise" | "narrative">,
@@ -773,7 +844,7 @@ async function evaluateTurn(
   followUpCount: number,
 ): Promise<{ evaluation: GroundedEvaluation; question: string | null; shouldFollowUp: boolean }> {
   const rubric = groundedQuestion(answeredQuestion, blueprint);
-  const followUpLimit = Math.max(0, Math.min(rubric.followUpLimit || blueprint?.maxFollowUps || 3, blueprint?.maxFollowUps ?? 3));
+  const followUpLimit = resolveFollowUpLimit(rubric, blueprint);
   const canFollowUp = !answeredQuestion.isFollowUp
     && (blueprint?.maxQuestions ?? 8) > 0
     && followUpCount < followUpLimit;
@@ -781,13 +852,18 @@ async function evaluateTurn(
     turnPrompt(rubric, profile, answer, transcript, source, nextPlannedQuestion, canFollowUp),
     turnSchema,
   );
-  const evaluation = result
-    ? normalizeGroundedEvaluation(answeredQuestion, result.evaluation)
-    : groundedEvaluationFor(rubric, answer);
-  const shouldFollowUp = canFollowUp && (result?.shouldFollowUp ?? (evaluation.score < 6.5 || answer.trim().length < 120));
+  const modelEvaluation = result
+    ? validateGroundedModelEvaluation(rubric, answer, result.evaluation)
+    : null;
+  const evaluation = modelEvaluation?.evaluation ?? groundedEvaluationFor(rubric, answer);
+  const shouldFollowUp = canFollowUp && (modelEvaluation?.trusted
+    ? result?.shouldFollowUp ?? false
+    : shouldAskFollowUp(rubric, evaluation));
   const question = shouldFollowUp
-    ? (result?.question ?? deterministicFollowUp(answeredQuestion))
-    : (nextPlannedQuestion ? (result?.question ?? promptForPlan(nextPlannedQuestion, source ?? { cvText: "", coverLetter: "" })) : null);
+    ? ((modelEvaluation?.trusted ? result?.question : null) ?? deterministicFollowUp(answeredQuestion))
+    : (nextPlannedQuestion
+      ? ((modelEvaluation?.trusted ? result?.question : null) ?? promptForPlan(nextPlannedQuestion, source ?? { cvText: "", coverLetter: "" }))
+      : null);
   return { evaluation, question, shouldFollowUp };
 }
 
