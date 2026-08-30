@@ -473,3 +473,111 @@ export type UpdateCareerStoryInput = {
   reviewState?: CareerStoryReviewState;
   confirmedAt?: string | null;
 };
+
+export type CoachObservationType =
+  | "strength"
+  | "weakness"
+  | "answer_habit"
+  | "knowledge_gap"
+  | "story_gap"
+  | "story_strength"
+  | "delivery_pattern"
+  | "other";
+
+export type CoachObservationTrend = "unresolved" | "improving" | "stable" | "worsening";
+
+export type CoachObservationReviewState = "unreviewed" | "confirmed" | "corrected" | "dismissed";
+
+/**
+ * A persistent, inspectable coach inference about the user (e.g. "you skip
+ * tradeoffs"). Release 1 only stores and lets the user review observations
+ * -- it never generates, infers, or reconciles them. `claim` is the
+ * original AI/system wording and is never overwritten; a user's review
+ * (confirmation, correction, or dismissal) is recorded alongside it via
+ * `reviewState` and the `*_at` timestamps, never over it. See
+ * `reviewCoachObservation` in `src/lib/repositories/observations.ts` for
+ * the exact timestamp rules per review state.
+ */
+export type CoachObservation = {
+  id: string;
+  userId: string;
+  observationType: CoachObservationType;
+  claim: string;
+  /** 0-1; caller-provided or the database default. Release 1 never computes this automatically. */
+  confidence: number;
+  /** 0-1; caller-provided or the database default. Release 1 never computes this automatically. */
+  importance: number;
+  trend: CoachObservationTrend;
+  reviewState: CoachObservationReviewState;
+  /** User's corrected wording/context, preserved separately from `claim`. Set only when `reviewState` is `"corrected"`. */
+  userCorrection: string | null;
+  firstSeenAt: string | null;
+  lastSeenAt: string | null;
+  confirmedAt: string | null;
+  correctedAt: string | null;
+  dismissedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateCoachObservationInput = {
+  observationType: CoachObservationType;
+  claim: string;
+  confidence?: number;
+  importance?: number;
+  trend?: CoachObservationTrend;
+  firstSeenAt?: string | null;
+  lastSeenAt?: string | null;
+};
+
+/**
+ * A user's review of a coach observation. `corrected` is the only state
+ * that carries a `correction` -- it is stored in `userCorrection`, the
+ * original `claim` is never overwritten. Excluding a `correction` field
+ * from `confirmed`/`dismissed` at the type level prevents a caller from
+ * supplying a correction that would silently be discarded.
+ */
+export type CoachObservationReview =
+  | { state: "confirmed" }
+  | { state: "dismissed" }
+  | { state: "corrected"; correction: string };
+
+export type ObservationEvidenceRole = "supporting" | "contradicting" | "context";
+
+/**
+ * Typed provenance link from a coach observation to the durable evidence
+ * that backs it. Exactly one source is set, enforced in the database with
+ * `check (num_nonnulls(profile_evidence_id, question_evaluation_id, career_story_id, opportunity_event_id) = 1)`.
+ */
+export type ObservationEvidence = {
+  id: string;
+  userId: string;
+  observationId: string;
+  profileEvidenceId: string | null;
+  questionEvaluationId: string | null;
+  careerStoryId: string | null;
+  opportunityEventId: string | null;
+  evidenceRole: ObservationEvidenceRole;
+  /** 0-1; caller-provided or the database default of 1. Release 1 never computes this automatically. */
+  weight: number;
+  reason: string | null;
+  createdAt: string;
+};
+
+/**
+ * A discriminated union so callers cannot supply more than one source ID
+ * when attaching observation evidence. See `observationEvidenceColumns` in
+ * `src/lib/repositories/observations.ts` for the one place this is
+ * converted to nullable database columns.
+ */
+export type ObservationEvidenceSource =
+  | { kind: "profile_evidence"; profileEvidenceId: string }
+  | { kind: "question_evaluation"; questionEvaluationId: string }
+  | { kind: "career_story"; careerStoryId: string }
+  | { kind: "opportunity_event"; opportunityEventId: string };
+
+export type AttachObservationEvidenceOptions = {
+  role?: ObservationEvidenceRole;
+  weight?: number;
+  reason?: string | null;
+};
