@@ -18,7 +18,7 @@ Use TypeScript with strict typing and the `@/*` import alias for `src/` modules.
 
 ## Testing Guidelines
 
-No automated test runner is configured. When adding coverage, follow red → green → refactor: write a failing test, make it pass minimally, then improve both implementation and test. Co-locate `*.test.ts(x)` files, add a `test` script, and run `npm run lint` plus a production build before submission.
+Vitest is the test runner, configured in `vitest.config.ts` with the jsdom environment and the `@/*` alias. Run the suite with `npm test` (`npm run test:watch` while iterating), or a single file with `npx vitest run <path>`. Co-locate `*.test.ts(x)` files next to the code they cover; only files under `src/` matching those suffixes are collected. Follow red → green → refactor: write a failing test, make it pass minimally, then improve both implementation and test. Run `npm test` and `npm run lint` plus a production build before submission.
 
 ## Commits, Pull Requests, and Configuration
 
