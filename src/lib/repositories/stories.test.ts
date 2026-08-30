@@ -48,7 +48,10 @@ const evidenceRow = (overrides: Row = {}): Row => ({
 });
 
 /** A single reusable chainable stub covering insert/select/update/eq/order/maybeSingle. */
-function tableStub(result: QueryResult, capture?: { insert?: Row; update?: Row }) {
+function tableStub(
+  result: QueryResult,
+  capture?: { insert?: Row; update?: Row; eq?: Array<[string, unknown]> },
+) {
   const builder: Record<string, unknown> = {
     insert: (row: Row) => {
       if (capture) capture.insert = row;
@@ -59,7 +62,10 @@ function tableStub(result: QueryResult, capture?: { insert?: Row; update?: Row }
       return builder;
     },
     select: () => builder,
-    eq: () => builder,
+    eq: (field: string, value: unknown) => {
+      if (capture) (capture.eq ??= []).push([field, value]);
+      return builder;
+    },
     order: async () => result,
     maybeSingle: async () => result,
   };
@@ -95,13 +101,18 @@ describe("career story repository", () => {
   });
 
   it("loads a single owned career story scoped by user id", async () => {
-    const from = vi.fn(() => tableStub({ data: storyRow(), error: null }));
+    const capture: { eq?: Array<[string, unknown]> } = {};
+    const from = vi.fn(() => tableStub({ data: storyRow(), error: null }, capture));
     const supabase = { from };
 
     const story = await getCareerStory(supabase as never, "user-1", "story-1");
 
     expect(from).toHaveBeenCalledWith("career_stories");
     expect(story?.title).toBe("Migrated the legacy payments service");
+    expect(capture.eq).toEqual(expect.arrayContaining([
+      ["id", "story-1"],
+      ["user_id", "user-1"],
+    ]));
   });
 
   it("returns null when the career story is not found", async () => {
@@ -196,7 +207,8 @@ describe("career story repository", () => {
   });
 
   it("lists a career story's evidence scoped by user and story", async () => {
-    const from = vi.fn(() => tableStub({ data: [evidenceRow()], error: null }));
+    const capture: { eq?: Array<[string, unknown]> } = {};
+    const from = vi.fn(() => tableStub({ data: [evidenceRow()], error: null }, capture));
     const supabase = { from };
 
     const evidence = await listCareerStoryEvidence(supabase as never, "user-1", "story-1");
@@ -209,5 +221,9 @@ describe("career story repository", () => {
       interviewQuestionId: null,
       note: "Supports the migration outcome",
     })]);
+    expect(capture.eq).toEqual(expect.arrayContaining([
+      ["user_id", "user-1"],
+      ["career_story_id", "story-1"],
+    ]));
   });
 });
