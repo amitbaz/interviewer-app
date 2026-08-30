@@ -735,6 +735,40 @@ describe("assessProfileReadiness", () => {
     });
   });
 
+  it("accepts concise bullets when the source excerpt itself carries the action and outcome", () => {
+    expect(assessProfileReadiness([
+      {
+        id: "evidence-1",
+        sourceKind: "cv",
+        sourceExcerpt: "Created a React checkout flow and cut bundle size by 28%.",
+        projectOrEmployer: null,
+        ownership: null,
+        technologies: ["React", "TypeScript"],
+        decision: null,
+        constraint: null,
+        outcome: null,
+        recency: "2025-02",
+        confidence: 0.94,
+      },
+      {
+        id: "evidence-2",
+        sourceKind: "cv",
+        sourceExcerpt: "Refactored API observability dashboards and reduced triage time by 35%.",
+        projectOrEmployer: null,
+        ownership: null,
+        technologies: ["Next.js", "Postgres"],
+        decision: null,
+        constraint: null,
+        outcome: null,
+        recency: "2024-11",
+        confidence: 0.91,
+      },
+    ])).toEqual({
+      ready: true,
+      missing: [],
+    });
+  });
+
   it("rejects employer-label-only evidence even when technologies are listed", () => {
     expect(assessProfileReadiness([
       {
@@ -760,6 +794,43 @@ describe("assessProfileReadiness", () => {
         decision: null,
         constraint: null,
         outcome: null,
+        recency: null,
+        confidence: 0.35,
+      },
+    ])).toEqual({
+      ready: false,
+      missing: expect.arrayContaining([
+        "two concrete engineering projects or work examples",
+        "responsibilities or outcomes",
+      ]),
+    });
+  });
+
+  it("rejects labeled projects with metrics when no action or ownership semantics are present", () => {
+    expect(assessProfileReadiness([
+      {
+        id: "evidence-1",
+        sourceKind: "cv",
+        sourceExcerpt: "Checkout Platform",
+        projectOrEmployer: "Checkout Platform",
+        ownership: null,
+        technologies: ["React", "TypeScript"],
+        decision: null,
+        constraint: null,
+        outcome: "28% faster.",
+        recency: null,
+        confidence: 0.35,
+      },
+      {
+        id: "evidence-2",
+        sourceKind: "cv",
+        sourceExcerpt: "Reliability Tooling",
+        projectOrEmployer: "Reliability Tooling",
+        ownership: null,
+        technologies: ["Next.js", "Postgres"],
+        decision: null,
+        constraint: null,
+        outcome: "35% lower triage time.",
         recency: null,
         confidence: 0.35,
       },

@@ -54,7 +54,7 @@ const evidenceSchema = z.object({
   confidence: z.number().min(0).max(1),
 });
 const evidenceListSchema = z.union([z.array(evidenceSchema), z.object({ evidence: z.array(evidenceSchema) })]);
-const workExampleVerbPattern = /\b(led|built|shipped|migrated|designed|owned|improved|implemented|launched|reduced|scaled|developed)\b/i;
+const workExampleVerbPattern = /\b(led|built|shipped|migrated|designed|owned|improved|implemented|launched|reduced|scaled|developed|created|refactored|rewrote|reworked|optimized|fixed|deployed|maintained|delivered|introduced|coordinated|debugged|automated)\b/i;
 const blueprintQuestionDraftSchema = z.object({
   sequence: z.number().int().min(1).max(5),
   category: z.enum(["introduction", "experience", "technical", "architecture", "behavioral"]),
@@ -120,12 +120,6 @@ async function modelJson<T>(prompt: string, schema: z.ZodType<T>): Promise<T | n
     const output = body.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("");
     return output ? schema.parse(JSON.parse(output)) : null;
   } catch { return null; }
-}
-
-function normalizeText(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed.length ? trimmed : null;
 }
 
 function normalizeEvidenceItem(value: z.infer<typeof evidenceSchema>, index: number): EvidenceItem {
@@ -330,16 +324,13 @@ export async function generateInterviewBlueprint(
 
 function hasConcreteWorkAnchor(item: EvidenceItem): boolean {
   const sourceExcerpt = item.sourceExcerpt.trim();
-  const projectOrEmployer = item.projectOrEmployer?.trim() ?? null;
-  const ownership = item.ownership?.trim() ?? null;
-  const decision = item.decision?.trim() ?? null;
-  const constraint = item.constraint?.trim() ?? null;
-  const outcome = item.outcome?.trim() ?? null;
-  const hasWorkDetails = item.technologies.length > 0 || Boolean(ownership || decision || constraint || outcome);
-  if (!sourceExcerpt || !hasWorkDetails) return false;
-  if (projectOrEmployer && (ownership || decision || outcome)) return true;
-  const supportingText = [sourceExcerpt, ownership, decision, constraint, outcome].filter((value): value is string => typeof value === "string" && value.length > 0).join(" ");
-  return workExampleVerbPattern.test(supportingText) || Boolean(ownership || decision || constraint || outcome);
+  const structuredText = [item.ownership, item.decision, item.constraint, item.outcome]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join(" ");
+  const supportingText = [sourceExcerpt, structuredText].filter(Boolean).join(" ");
+  const hasAction = workExampleVerbPattern.test(supportingText) || /\b(responsible for|owned|led|built|designed|implemented|created|refactored|migrated|shipped|deployed|improved|reduced|launched|maintained|developed|debugged|automated)\b/i.test(supportingText);
+  const hasConcreteDetail = structuredText.length > 0 || /\b\d+%|\bmetric\b|\boutcome\b|\bimpact\b|\bconstraint\b|\btrade-?off\b/i.test(supportingText);
+  return Boolean(sourceExcerpt) && item.technologies.length > 0 && hasAction && hasConcreteDetail;
 }
 
 function concreteEvidenceCount(evidence: EvidenceItem[]): number {
@@ -358,7 +349,7 @@ export function assessProfileReadiness(evidence: EvidenceItem[]): ProfileReadine
   const missing = new Set<string>();
   if (concreteEvidenceCount(evidence) < 2) missing.add("two concrete engineering projects or work examples");
   if (!evidence.some((item) => item.technologies.length > 0)) missing.add("identifiable technologies");
-  if (!evidence.some((item) => Boolean(item.ownership?.trim()) || Boolean(item.outcome?.trim()))) missing.add("responsibilities or outcomes");
+  if (!evidence.some((item) => hasConcreteWorkAnchor(item))) missing.add("responsibilities or outcomes");
   return { ready: missing.size === 0, missing: [...missing] };
 }
 
@@ -520,46 +511,26 @@ export async function nextTurn(
 ): Promise<{ evaluation: Evaluation; nextQuestion: string | null; followUp: FollowUpDraft | null }> {
   const transcript = session.messages.map((message) => `${message.role}: ${message.content}`).join("\n");
   const followUpCount = session.questions.filter((question) => question.isFollowUp).length;
-  const canFollowUp = !answeredQuestion.isFollowUp && session.questions.length < 8 && followUpCount < 3;
-  const context = {
-    role: profile.role,
-    seniority: profile.seniority,
-    expertise: profile.expertise,
-    narrative: profile.narrative,
-    cvExcerpt: cvExcerpt(source, answeredQuestion),
-    answeredPlan: {
-      category: answeredQuestion.category,
-      competency: answeredQuestion.competencyName,
-      difficulty: answeredQuestion.difficulty,
-    },
-    nextPlan: nextPlannedQuestion ? {
-      category: nextPlannedQuestion.category,
-      competency: nextPlannedQuestion.competencyName,
-      difficulty: nextPlannedQuestion.difficulty,
-      cvExcerpt: cvExcerpt(source, nextPlannedQuestion),
-    } : null,
-    canFollowUp,
+  const { evaluation, question, shouldFollowUp } = await evaluateTurn(
+    profile,
+    answeredQuestion,
+    null,
+    answer,
     transcript,
-    latestAnswer: answer,
-  };
-  const result = await modelJson(
-    `You are an experienced senior-frontend interviewer. Privately evaluate the latest answer. Set shouldFollowUp only when a concise clarification is necessary and canFollowUp is true. If following up, question must probe the answered plan. Otherwise, question must ask the supplied next plan. Do not praise, coach, reveal scores, or teach. Context: ${JSON.stringify(context)}`,
-    turnSchema,
+    source,
+    nextPlannedQuestion,
+    followUpCount,
   );
-  const evaluation = result
-    ? normalizedEvaluation(answeredQuestion, result.evaluation)
-    : evaluationFor(answeredQuestion, answer);
-  const shouldFollowUp = canFollowUp && (result?.shouldFollowUp ?? (evaluation.score < 6.5 || answer.trim().length < 120));
   if (shouldFollowUp) {
     return {
       evaluation,
       nextQuestion: null,
-      followUp: followUpDraft(answeredQuestion, result?.question ?? deterministicFollowUp(answeredQuestion)),
+      followUp: followUpDraft(answeredQuestion, question ?? deterministicFollowUp(answeredQuestion)),
     };
   }
   return {
     evaluation,
-    nextQuestion: nextPlannedQuestion ? result?.question ?? promptForPlan(nextPlannedQuestion, source) : null,
+    nextQuestion: question,
     followUp: null,
   };
 }
