@@ -231,6 +231,19 @@ async function renderHomeView(options: {
   await screen.findByRole("heading", { name: "Ready when you are." });
 }
 
+async function renderPracticeView(options: {
+  profile?: Profile;
+  progress: ProgressSnapshot;
+  sessions?: InterviewSession[];
+}) {
+  mockCoachData(options);
+  render(<App />);
+
+  await screen.findByRole("heading", { name: "Ready when you are." });
+  fireEvent.click(screen.getByRole("button", { name: "practice" }));
+  await screen.findByRole("heading", { name: "Choose deliberate practice." });
+}
+
 beforeEach(() => {
   getUser.mockResolvedValue({ data: { user: { id: "user-1" } }, error: null });
 });
@@ -452,6 +465,33 @@ describe("App home view", () => {
     });
 
     expect(screen.getByRole("button", { name: "Start interview" })).toBeDisabled();
+    expect(screen.getByText("Add the missing source detail in your profile before Relay starts a grounded interview.")).toBeInTheDocument();
+  });
+});
+
+describe("App practice view", () => {
+  it("renders a single grounded start action that respects the readiness gate", async () => {
+    await renderPracticeView({
+      progress: {
+        readiness: null,
+        latestScore: null,
+        trend: null,
+        recentScores: [],
+        strongest: null,
+        weakest: null,
+        recurringWeaknesses: [],
+      },
+      profile: profile({
+        readiness: {
+          ready: false,
+          missing: ["two concrete engineering projects or work examples"],
+        },
+      }),
+    });
+
+    const startButtons = screen.getAllByRole("button", { name: "Start now" });
+    expect(startButtons).toHaveLength(1);
+    expect(startButtons[0]).toBeDisabled();
     expect(screen.getByText("Add the missing source detail in your profile before Relay starts a grounded interview.")).toBeInTheDocument();
   });
 });

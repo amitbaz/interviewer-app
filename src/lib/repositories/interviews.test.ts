@@ -158,6 +158,39 @@ describe("mapSession", () => {
     ]);
   });
 
+  it("hydrates legacy conversation sessions as limited-grounding when no persisted blueprint exists", () => {
+    const mapped = mapSession(
+      {
+        id: "session-legacy", user_id: "user-1", kind: "conversation", status: "complete",
+        started_at: "2026-08-28T10:00:00.000Z", completed_at: "2026-08-28T10:30:00.000Z", exercise: {}, result_summary: {},
+        overall_score: 7, created_at: "2026-08-28T10:00:00.000Z", updated_at: "2026-08-28T10:30:00.000Z",
+      },
+      [{
+        id: "question-legacy-1",
+        sequence: 1,
+        category: "experience",
+        competency_id: "competency-legacy",
+        difficulty: "senior",
+        is_follow_up: false,
+        prompt: "Tell me about your background.",
+        answer: "I work on frontend systems.",
+        created_at: "2026-08-28T10:01:00.000Z",
+        answered_at: "2026-08-28T10:02:00.000Z",
+      }],
+      [],
+      [],
+      new Map([["competency-legacy", "React architecture"]]),
+    );
+
+    expect(mapped.blueprint).toMatchObject({
+      status: "limited-grounding",
+      fallbackReason: "Legacy session created before grounded blueprints were persisted.",
+      maxFollowUps: 3,
+      maxQuestions: 8,
+      questions: [],
+    });
+  });
+
   it("hydrates grounded evaluation claims and reasons from persisted question feedback", () => {
     const mapped = mapSession(
       {

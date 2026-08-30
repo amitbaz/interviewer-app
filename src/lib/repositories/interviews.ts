@@ -244,14 +244,21 @@ export function mapSession(
   const blueprintMaxQuestions = row.blueprint_max_questions === null || row.blueprint_max_questions === undefined
     ? 8
     : Number(row.blueprint_max_questions);
-  const blueprint = kind === "conversation" && (
+  const hasPersistedBlueprint = kind === "conversation" && (
     typeof row.blueprint_status === "string"
     || typeof row.blueprint_fallback_reason === "string"
     || blueprintQuestions.length > 0
-  )
+  );
+  const blueprint = kind === "conversation"
     ? {
-      status: row.blueprint_status === "limited-grounding" ? "limited-grounding" : "grounded",
-      fallbackReason: typeof row.blueprint_fallback_reason === "string" ? row.blueprint_fallback_reason : null,
+      status: !hasPersistedBlueprint || row.blueprint_status === "limited-grounding"
+        ? "limited-grounding"
+        : "grounded",
+      fallbackReason: typeof row.blueprint_fallback_reason === "string"
+        ? row.blueprint_fallback_reason
+        : !hasPersistedBlueprint
+          ? "Legacy session created before grounded blueprints were persisted."
+          : null,
       maxFollowUps: Number.isFinite(blueprintMaxFollowUps) ? blueprintMaxFollowUps : 3,
       maxQuestions: Number.isFinite(blueprintMaxQuestions) ? blueprintMaxQuestions : 8,
       createdAt: stringValue(row.created_at),
