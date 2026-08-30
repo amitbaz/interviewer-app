@@ -190,6 +190,94 @@ function normalizeStrings(value: unknown): string[] {
   return [...new Set(value.map((item) => normalizeText(item)).filter((item): item is string => item !== null))];
 }
 
+function normalizeForSupport(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function sourceSupportScore(candidate: string, sourceText: string): number {
+  const normalizedCandidate = normalizeForSupport(candidate);
+  const normalizedSource = normalizeForSupport(sourceText);
+  if (!normalizedCandidate || !normalizedSource) return 0;
+  if (normalizedSource.includes(normalizedCandidate)) return 1;
+
+  const candidateTokens = normalizedCandidate.split(" ").filter((token) => token.length > 2);
+  if (!candidateTokens.length) return 0;
+  const sourceTokens = new Set(normalizedSource.split(" ").filter((token) => token.length > 2));
+  const overlap = candidateTokens.filter((token) => sourceTokens.has(token)).length / candidateTokens.length;
+  return overlap >= 0.6 ? overlap : 0;
+}
+
+function supportedText(value: unknown, sourceText: string): string | null {
+  const text = normalizeText(value);
+  if (!text) return null;
+  return sourceSupportScore(text, sourceText) > 0 ? text : null;
+}
+
+function supportedTechnology(value: unknown, sourceText: string): string | null {
+  const technology = normalizeText(value);
+  if (!technology) return null;
+  const normalizedTechnology = normalizeForSupport(technology);
+  const normalizedSource = normalizeForSupport(sourceText);
+  if (!normalizedTechnology || !normalizedSource) return null;
+  if (normalizedSource.includes(normalizedTechnology)) return technology;
+  if (normalizedTechnology === "typescript" && /\btypescript\b|\bts\b/.test(normalizedSource)) return technology;
+  if (normalizedTechnology === "javascript" && /\bjavascript\b|\bjs\b/.test(normalizedSource)) return technology;
+  return sourceSupportScore(technology, sourceText) > 0 ? technology : null;
+}
+
+function bestSourceExcerpt(value: z.infer<typeof evidenceSchema>, sourceText: string): string {
+  const normalizedSource = normalizeText(sourceText);
+  if (!normalizedSource) return value.sourceExcerpt.trim();
+
+  const sentences = normalizedSource
+    .split(/(?<=[.!?])\s+|[\r\n]+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+  if (!sentences.length) return normalizedSource.slice(0, 320);
+
+  const anchor = [
+    value.sourceExcerpt,
+    value.projectOrEmployer ?? "",
+    value.ownership ?? "",
+    value.decision ?? "",
+    value.constraint ?? "",
+    value.outcome ?? "",
+    value.technologies.join(" "),
+  ].join(" ");
+
+  const ranked = sentences
+    .map((sentence) => ({
+      sentence,
+      score: Math.max(sourceSupportScore(sentence, anchor), sourceSupportScore(anchor, sentence)),
+    }))
+    .sort((left, right) => right.score - left.score || right.sentence.length - left.sentence.length);
+
+  return (ranked[0]?.score ?? 0) > 0 ? ranked[0].sentence : normalizedSource.slice(0, 320);
+}
+
+function evidenceSignature(item: EvidenceItem): string {
+  return [
+    normalizeForSupport(item.sourceExcerpt),
+    normalizeForSupport(item.projectOrEmployer ?? ""),
+    normalizeForSupport(item.ownership ?? ""),
+    [...item.technologies].map((technology) => normalizeForSupport(technology)).sort().join("|"),
+    normalizeForSupport(item.decision ?? ""),
+    normalizeForSupport(item.constraint ?? ""),
+    normalizeForSupport(item.outcome ?? ""),
+    normalizeForSupport(item.recency ?? ""),
+  ].join("::");
+}
+
+function dedupeEvidenceItems(items: EvidenceItem[]): EvidenceItem[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const signature = evidenceSignature(item);
+    if (seen.has(signature)) return false;
+    seen.add(signature);
+    return true;
+  });
+}
+
 function splitSentences(value: string): string[] {
   return value.split(/(?<=[.!?])\s+/).map((sentence) => sentence.trim()).filter(Boolean);
 }
@@ -452,18 +540,18 @@ async function modelJson<T>(prompt: string, schema: z.ZodType<T>): Promise<T | n
   } catch { return null; }
 }
 
-function normalizeEvidenceItem(value: z.infer<typeof evidenceSchema>, index: number): EvidenceItem {
+function normalizeEvidenceItem(value: z.infer<typeof evidenceSchema>, index: number, sourceText: string): EvidenceItem {
   return {
     id: normalizeText(value.id) ?? `evidence-${index + 1}`,
     sourceKind: value.sourceKind ?? null,
-    sourceExcerpt: value.sourceExcerpt.trim(),
-    projectOrEmployer: normalizeText(value.projectOrEmployer),
-    ownership: normalizeText(value.ownership),
-    technologies: [...new Set(value.technologies.map((technology) => technology.trim()).filter(Boolean))],
-    decision: normalizeText(value.decision),
-    constraint: normalizeText(value.constraint),
-    outcome: normalizeText(value.outcome),
-    recency: normalizeText(value.recency),
+    sourceExcerpt: bestSourceExcerpt(value, sourceText),
+    projectOrEmployer: supportedText(value.projectOrEmployer, sourceText),
+    ownership: supportedText(value.ownership, sourceText),
+    technologies: [...new Set(value.technologies.map((technology) => supportedTechnology(technology, sourceText)).filter((technology): technology is string => technology !== null))],
+    decision: supportedText(value.decision, sourceText),
+    constraint: supportedText(value.constraint, sourceText),
+    outcome: supportedText(value.outcome, sourceText),
+    recency: supportedText(value.recency, sourceText),
     confidence: value.confidence,
   };
 }
@@ -590,13 +678,14 @@ function fallbackBlueprintCompetencies(
  * failure or malformed JSON.
  */
 export async function extractEngineeringEvidence(cvText: string, coverLetter: string): Promise<EvidenceItem[]> {
+  const sourceText = `${cvText} ${coverLetter}`;
   const result = await modelJson(
     `You are extracting engineering evidence for an interview coach. Return only valid JSON. Produce an array of evidence objects. Never invent facts. Preserve null for unknown optional fields. Each item must include a sourceExcerpt and may include sourceKind, projectOrEmployer, ownership, technologies, decision, constraint, outcome, recency, confidence, and a stable id if available. Use only facts explicitly supported by the supplied text.\nCV:\n${cvText}\nCover letter:\n${coverLetter}`,
     evidenceListSchema,
   );
   if (!result) return fallbackEngineeringEvidence(cvText, coverLetter);
   const list = Array.isArray(result) ? result : result.evidence;
-  return list.map((item, index) => normalizeEvidenceItem(item, index));
+  return dedupeEvidenceItems(list.map((item, index) => normalizeEvidenceItem(item, index, sourceText)));
 }
 
 /**
@@ -664,7 +753,7 @@ function hasConcreteWorkAnchor(item: EvidenceItem): boolean {
 }
 
 function concreteEvidenceCount(evidence: EvidenceItem[]): number {
-  return evidence.filter((item) => {
+  return dedupeEvidenceItems(evidence).filter((item) => {
     const hasSpecifics = item.technologies.length > 0 || Boolean(item.ownership?.trim()) || Boolean(item.outcome?.trim()) || Boolean(item.decision?.trim());
     return hasConcreteWorkAnchor(item) && hasSpecifics;
   }).length;

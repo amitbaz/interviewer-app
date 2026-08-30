@@ -643,7 +643,7 @@ describe("initialQuestion", () => {
 });
 
 describe("extractEngineeringEvidence", () => {
-  it("preserves null fields when parsing Gemini evidence output", async () => {
+  it("verifies Gemini evidence against the supplied text and nulls unsupported facts", async () => {
     vi.stubEnv("GEMINI_API_KEY", "private-test-key");
     vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
@@ -658,8 +658,8 @@ describe("extractEngineeringEvidence", () => {
                 projectOrEmployer: "Checkout Platform",
                 ownership: "Owned the frontend migration end to end.",
                 technologies: ["React", "TypeScript"],
-                decision: null,
-                constraint: null,
+                decision: "Split a large route into smaller bundles.",
+                constraint: "Tight launch window.",
                 outcome: "Cut bundle size by 28%.",
                 recency: "2025-02",
                 confidence: 0.94,
@@ -676,14 +676,14 @@ describe("extractEngineeringEvidence", () => {
     )).resolves.toEqual([expect.objectContaining({
       id: "evidence-1",
       sourceKind: "cv",
-      sourceExcerpt: "Led a React migration for the checkout flow.",
-      projectOrEmployer: "Checkout Platform",
-      ownership: "Owned the frontend migration end to end.",
-      technologies: ["React", "TypeScript"],
+      sourceExcerpt: "I led a React migration for checkout.",
+      projectOrEmployer: null,
+      ownership: null,
+      technologies: ["React"],
       decision: null,
       constraint: null,
-      outcome: "Cut bundle size by 28%.",
-      recency: "2025-02",
+      outcome: null,
+      recency: null,
       confidence: 0.94,
     })]);
   });
@@ -927,6 +927,42 @@ describe("generateInterviewBlueprint", () => {
 });
 
 describe("assessProfileReadiness", () => {
+  it("deduplicates equivalent evidence before counting readiness", () => {
+    expect(assessProfileReadiness([
+      {
+        id: "evidence-1",
+        sourceKind: "cv",
+        sourceExcerpt: "Led a React migration for checkout.",
+        projectOrEmployer: "Checkout Platform",
+        ownership: "Owned the frontend migration end to end.",
+        technologies: ["React", "TypeScript"],
+        decision: "Split a large route into smaller bundles.",
+        constraint: "Tight launch window.",
+        outcome: "Cut bundle size by 28%.",
+        recency: "2025-02",
+        confidence: 0.94,
+      },
+      {
+        id: "evidence-2",
+        sourceKind: "cv",
+        sourceExcerpt: "Led a React migration for checkout.",
+        projectOrEmployer: "Checkout Platform",
+        ownership: "Owned the frontend migration end to end.",
+        technologies: ["TypeScript", "React"],
+        decision: "Split a large route into smaller bundles.",
+        constraint: "Tight launch window.",
+        outcome: "Cut bundle size by 28%.",
+        recency: "2025-02",
+        confidence: 0.94,
+      },
+    ])).toEqual({
+      ready: false,
+      missing: expect.arrayContaining([
+        "two concrete engineering projects or work examples",
+      ]),
+    });
+  });
+
   it("does not treat generic skill summaries as two concrete work examples", () => {
     expect(assessProfileReadiness([
       {
