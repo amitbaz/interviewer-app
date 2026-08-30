@@ -19,26 +19,34 @@ import type {
   ProfileDraft,
   ProfileReadiness,
   ProfileSource,
+  GroundedEvaluation,
 } from "@/lib/types";
 
 const dimensions = ["correctness", "depth", "clarity", "structure", "practicalExperience", "tradeOffAwareness", "communication", "confidence", "relevance"] as const;
+const dimensionShape = Object.fromEntries(dimensions.map((dimension) => [dimension, z.number().min(0).max(10)])) as Record<(typeof dimensions)[number], z.ZodNumber>;
+const dimensionReasonShape = Object.fromEntries(dimensions.map((dimension) => [dimension, z.string().min(1)])) as Record<(typeof dimensions)[number], z.ZodString>;
 const profileSchema = z.object({
   role: z.string(), seniority: z.string(), summary: z.string(), narrative: z.string(),
   expertise: z.array(z.string()).min(1).max(8), characteristics: z.array(z.string()).min(1).max(6),
   competencies: z.array(z.object({ name: z.string().min(1), relevance: z.number().min(0).max(1) })).min(1),
 });
-const evaluationSchema = z.object({
+const groundedEvaluationSchema = z.object({
   score: z.number().min(0).max(10), competency: z.string().optional(),
-  dimensions: z.object(Object.fromEntries(dimensions.map((dimension) => [dimension, z.number().min(0).max(10)]))),
+  relevance: z.number().min(0).max(10),
+  dimensions: z.object(dimensionShape),
   strengths: z.array(z.string()), needsWork: z.array(z.string()),
   missingPoints: z.array(z.string()).min(1),
   betterStructure: z.array(z.string()).min(1),
   improvedAnswer: z.string().min(1),
+  supportedClaims: z.array(z.string()).default([]),
+  expectedSignalsPresent: z.array(z.string()).default([]),
+  unsupportedClaims: z.array(z.string()).default([]),
+  dimensionReasons: z.object(dimensionReasonShape),
 });
 const turnSchema = z.object({
   question: z.string().min(1),
   shouldFollowUp: z.boolean(),
-  evaluation: evaluationSchema,
+  evaluation: groundedEvaluationSchema,
 });
 const evidenceSchema = z.object({
   id: z.string().min(1).optional(),
@@ -102,6 +110,274 @@ function fallbackProfile(cvText: string, coverLetter: string): ProfileDraft {
     narrative: "A hands-on engineer who combines frontend delivery with thoughtful technical decisions and collaboration.",
     expertise, characteristics: ["Product ownership", "Pragmatic problem solving", "Cross-functional collaboration"],
     competencies: expertise.map((name) => ({ name, relevance: 1 })),
+  };
+}
+
+const answerVerbs = [
+  "led",
+  "built",
+  "shipped",
+  "migrated",
+  "designed",
+  "owned",
+  "improved",
+  "implemented",
+  "launched",
+  "reduced",
+  "scaled",
+  "measured",
+  "split",
+  "debugged",
+  "tested",
+  "coordinated",
+  "delivered",
+];
+
+const stopWords = new Set([
+  "the",
+  "and",
+  "with",
+  "that",
+  "this",
+  "from",
+  "your",
+  "their",
+  "about",
+  "into",
+  "what",
+  "were",
+  "been",
+  "have",
+  "will",
+  "when",
+  "then",
+  "than",
+  "would",
+  "could",
+  "should",
+  "just",
+  "also",
+  "yourself",
+  "recent",
+  "work",
+  "recently",
+  "tell",
+  "walk",
+  "through",
+  "start",
+  "me",
+  "you",
+  "for",
+  "its",
+  "was",
+  "are",
+  "has",
+  "had",
+]);
+
+function clampScore(value: number): number {
+  return Number(Math.min(10, Math.max(0, value)).toFixed(1));
+}
+
+function normalizeText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : null;
+}
+
+function normalizeStrings(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((item) => normalizeText(item)).filter((item): item is string => item !== null))];
+}
+
+function splitSentences(value: string): string[] {
+  return value.split(/(?<=[.!?])\s+/).map((sentence) => sentence.trim()).filter(Boolean);
+}
+
+function tokens(value: string): string[] {
+  return value.toLowerCase().match(/[a-z0-9]+(?:-[a-z0-9]+)*/g)?.filter((token) => token.length > 2 && !stopWords.has(token)) ?? [];
+}
+
+function uniqueTokens(value: string): string[] {
+  return [...new Set(tokens(value))];
+}
+
+function questionTokens(question: BlueprintQuestion): string[] {
+  return uniqueTokens([
+    question.prompt,
+    question.objective,
+    question.competencyName ?? "",
+    ...question.expectedSignals,
+  ].join(" "));
+}
+
+function matchedSignals(answer: string, expectedSignals: string[]): string[] {
+  return [...new Set(expectedSignals.filter((signal) => signalMatches(answer, signal)))]
+    .slice(0, expectedSignals.length);
+}
+
+function signalMatches(answer: string, signal: string): boolean {
+  const lower = answer.toLowerCase();
+  if (signal === "ownership") return hasFirstPersonOwnership(answer);
+  if (signal === "trade-off") return hasTradeOffLanguage(answer) || /\b(split|balance|compromise|constraint|compare|choice|decision)\b/i.test(answer);
+  if (signal === "impact") return /\b\d+%|\b\d+(?:\.\d+)?x\b/i.test(answer) || /\b(measured|reduced|improved|cut|saved|lowered|faster|scaled|launched|shipped)\b/i.test(answer);
+  return lower.includes(signal.toLowerCase());
+}
+
+function hasFirstPersonOwnership(sentence: string): boolean {
+  return /\b(i|we)\b/i.test(sentence) && answerVerbs.some((verb) => new RegExp(`\\b${verb}\\b`, "i").test(sentence));
+}
+
+function questionOverlap(answerTokens: string[], rubricTokens: string[]): number {
+  if (!answerTokens.length || !rubricTokens.length) return 0;
+  const overlap = answerTokens.filter((token) => rubricTokens.includes(token));
+  return overlap.length / rubricTokens.length;
+}
+
+function supportedClaims(answerSentences: string[], question: BlueprintQuestion, signals: string[]): string[] {
+  const rubricTokens = questionTokens(question);
+  return answerSentences.filter((sentence) => {
+    if (!sentence) return false;
+    if (matchedSignals(sentence, signals).length > 0) return true;
+    if (hasFirstPersonOwnership(sentence)) return true;
+    return questionOverlap(uniqueTokens(sentence), rubricTokens) >= 0.35;
+  }).slice(0, 3);
+}
+
+function unsupportedClaims(answerSentences: string[], question: BlueprintQuestion, signals: string[]): string[] {
+  const rubricTokens = questionTokens(question);
+  return answerSentences.filter((sentence) => {
+    if (!sentence) return false;
+    if (matchedSignals(sentence, signals).length > 0) return false;
+    if (questionOverlap(uniqueTokens(sentence), rubricTokens) >= 0.35) return false;
+    return /\b(i|we)\b/i.test(sentence);
+  }).slice(0, 3);
+}
+
+function hasTradeOffLanguage(answer: string): boolean {
+  return /\b(trade-?off|trade-?offs|constraint|constraints|compare|compared|balanc|choice|rollback|risk|measured?|impact)\b/i.test(answer);
+}
+
+function hasStructureMarkers(answer: string): boolean {
+  return /\b(first|then|next|after|before|because|however|therefore|so)\b/i.test(answer);
+}
+
+function hasHedging(answer: string): boolean {
+  return /\b(maybe|probably|sort of|kind of|guess|might|could be|i think)\b/i.test(answer);
+}
+
+function buildDimensionReasons(question: BlueprintQuestion, evaluation: {
+  relevance: number;
+  expectedSignalsPresent: string[];
+  supportedClaims: string[];
+  unsupportedClaims: string[];
+  answerSentences: string[];
+  answer: string;
+}): Record<(typeof dimensions)[number], string> {
+  return {
+    correctness: evaluation.relevance >= 6.5
+      ? `The answer addresses ${question.objective.toLowerCase()}.`
+      : `The answer does not directly address ${question.objective.toLowerCase()}.`,
+    depth: evaluation.supportedClaims.length >= 2
+      ? "It includes multiple concrete claims and an outcome."
+      : "It stays close to a single claim without much detail.",
+    clarity: evaluation.answerSentences.length <= 3
+      ? "It stays readable and focused."
+      : "It is split into more pieces than the question needs.",
+    structure: hasStructureMarkers(evaluation.answer)
+      ? "It uses a clear sequence to move between ideas."
+      : "It does not show an obvious sequence or progression.",
+    practicalExperience: evaluation.supportedClaims.length > 0
+      ? "It uses first-person ownership and concrete work verbs."
+      : "It does not show hands-on ownership of the work.",
+    tradeOffAwareness: hasTradeOffLanguage(evaluation.answer)
+      ? "It names a trade-off, constraint, or outcome."
+      : "It does not explain the trade-off or constraint behind the choice.",
+    communication: evaluation.answerSentences.length > 0
+      ? "It is expressed as an answer rather than a note fragment."
+      : "It reads more like a fragment than a full answer.",
+    confidence: hasHedging(evaluation.answer)
+      ? "It hedges the claim instead of stating it directly."
+      : "It states the example directly.",
+    relevance: evaluation.expectedSignalsPresent.length > 0
+      ? `It answers the prompt: ${question.prompt}`
+      : `It does not directly answer the prompt: ${question.prompt}`,
+  };
+}
+
+function groundedEvaluationFor(
+  question: BlueprintQuestion,
+  answer: string,
+): GroundedEvaluation {
+  const trimmed = answer.trim();
+  const sentences = splitSentences(trimmed.length ? trimmed : answer);
+  const expectedSignalsPresent = matchedSignals(trimmed, question.expectedSignals);
+  const supported = supportedClaims(sentences, question, expectedSignalsPresent);
+  const unsupported = unsupportedClaims(sentences, question, expectedSignalsPresent);
+  const answerTokenList = uniqueTokens(trimmed);
+  const rubricTokenList = questionTokens(question);
+  const overlap = questionOverlap(answerTokenList, rubricTokenList);
+  const ownership = hasFirstPersonOwnership(trimmed) ? 1.2 : 0;
+  const signalCoverage = question.expectedSignals.length
+    ? expectedSignalsPresent.length / question.expectedSignals.length
+    : 0;
+  const claimCoverage = supported.length > 0 ? Math.min(2, supported.length * 0.8) : 0;
+  const unsupportedPenalty = unsupported.length * 1.2;
+
+  const relevance = clampScore(1.3 + overlap * 5 + signalCoverage * 2.5 + claimCoverage - unsupportedPenalty + ownership);
+  const tradeOffScore = clampScore(4.5 + (hasTradeOffLanguage(trimmed) ? 3.4 : 0) + (supported.length > 0 ? 0.7 : 0) - unsupportedPenalty * 0.2);
+  const practicalScore = clampScore(4.2 + ownership * 2.2 + (supported.length > 0 ? 0.9 : 0) - unsupportedPenalty * 0.2);
+  const correctness = clampScore(relevance * 0.9 + (expectedSignalsPresent.length > 0 ? 0.6 : -0.4));
+  const depth = clampScore(4.4 + supported.length * 1.1 + (question.expectedSignals.length > 1 ? signalCoverage * 1.4 : 0) + (hasTradeOffLanguage(trimmed) ? 0.7 : 0) - unsupportedPenalty * 0.2);
+  const clarity = clampScore(4.9 + (sentences.length > 1 ? 0.9 : 0) + (supported.length > 0 ? 0.6 : 0) - (trimmed.endsWith(".") ? 0 : 0.2));
+  const structure = clampScore(4.8 + (hasStructureMarkers(trimmed) ? 1.4 : 0) + (sentences.length > 1 ? 0.6 : 0) - unsupportedPenalty * 0.1);
+  const communication = clampScore(5 + (sentences.length > 0 ? 0.7 : 0) + (supported.length > 0 ? 0.6 : 0) - unsupportedPenalty * 0.1);
+  const confidence = clampScore(4.6 + (hasHedging(trimmed) ? -1.2 : 1.1) + (/[\d%]/.test(trimmed) ? 0.7 : 0) + (supported.length > 0 ? 0.5 : 0));
+  const score = clampScore((correctness + depth + clarity + structure + practicalScore + tradeOffScore + communication + confidence + relevance) / dimensions.length);
+
+  return {
+    score,
+    questionId: question.id,
+    competencyId: question.competencyId,
+    competency: question.competencyName ?? "Communication",
+    relevance,
+    dimensions: {
+      correctness,
+      depth,
+      clarity,
+      structure,
+      practicalExperience: practicalScore,
+      tradeOffAwareness: tradeOffScore,
+      communication,
+      confidence,
+      relevance,
+    },
+    strengths: supported.length > 0
+      ? ["The answer uses concrete ownership and evidence."]
+      : ["The answer stays concise enough to inspect directly."],
+    needsWork: unsupported.length > 0
+      ? ["Remove unsupported generalities and answer the specific prompt."]
+      : ["Add one more concrete detail tied to the question objective."],
+    missingPoints: expectedSignalsPresent.length < question.expectedSignals.length
+      ? question.missingSignalPrompts.slice(0, 1)
+      : ["Add one concrete example of trade-off or outcome."],
+    betterStructure: hasStructureMarkers(trimmed)
+      ? ["Keep the same sequence but tighten the outcome."]
+      : ["Lead with the specific decision, then explain the trade-off and result."],
+    improvedAnswer: supported.length > 0
+      ? `I would keep the same example but make the decision, trade-off, and outcome explicit: ${supported[0]}`
+      : `I would answer the question directly with one concrete example from ${question.competencyName ?? "the work"} and close with the result.`,
+    supportedClaims: supported,
+    expectedSignalsPresent,
+    unsupportedClaims: unsupported,
+    dimensionReasons: buildDimensionReasons(question, {
+      relevance,
+      expectedSignalsPresent,
+      supportedClaims: supported,
+      unsupportedClaims: unsupported,
+      answerSentences: sentences,
+      answer: trimmed,
+    }),
   };
 }
 
@@ -414,69 +690,117 @@ function promptForPlan(planned: PlannedQuestion, source: ProfileSource): string 
   return templates[planned.category];
 }
 
-function evaluationFor(planned: PlannedQuestion, answer: string): Evaluation {
-  const lower = answer.toLowerCase();
-  const score = Math.min(9, Math.max(5.5, 5.8 + (lower.includes("trade-off") ? 1 : 0) + (lower.includes("measure") ? 0.7 : 0) + (answer.length > 280 ? 0.6 : 0)));
-  const clarity = Number(Math.min(10, 5 + answer.length / 150).toFixed(1));
-  const tradeOffAwareness = lower.includes("trade-off") ? 7 : 5;
-  const practicalExperience = lower.includes("i ") || lower.includes("we ") ? 7 : 5.5;
-  const structure = Number(Math.min(10, clarity + (answer.includes(".") ? 0.4 : 0)).toFixed(1));
-  const communication = Number(Math.min(10, clarity + 0.3).toFixed(1));
-  const relevance = planned.competencyName ? 8 : 7;
-  const confidence = answer.trim().length > 120 ? 7 : 5.5;
-  const correctness = Number(Math.min(10, score + 0.2).toFixed(1));
-  const depth = Number(Math.min(10, score + (answer.length > 220 ? 0.4 : 0)).toFixed(1));
+function groundedQuestion(question: PlannedQuestion, blueprint: InterviewBlueprint | null): BlueprintQuestion {
+  const rubric = blueprint?.questions.find((item) => item.id === question.id);
+  if (rubric) return rubric;
   return {
-    score: Number(score.toFixed(1)),
-    questionId: planned.id,
-    competencyId: planned.competencyId,
-    competency: planned.competencyName ?? "Communication",
-    dimensions: {
-      correctness,
-      depth,
-      clarity,
-      structure,
-      practicalExperience,
-      tradeOffAwareness,
-      communication,
-      confidence,
-      relevance,
-    },
-    strengths: [
-      "Grounded the answer in practical experience.",
-      "Communicated a clear point of view.",
-    ],
-    needsWork: [
-      "Make the trade-off explicit before describing implementation details.",
-    ],
-    missingPoints: [
-      lower.includes("measure")
-        ? "State the baseline or success metric before describing the outcome."
-        : "Name the measurable outcome or signal you used to judge the decision.",
-    ],
-    betterStructure: [
-      "Open with the requirement or problem statement before describing the implementation.",
-      "Close with the trade-off you accepted and the result you measured.",
-    ],
-    improvedAnswer: lower.includes("trade-off")
-      ? "I would start with the requirement, explain the trade-off I chose, and close with the metric that confirmed the decision worked."
-      : "I would start with the requirement, compare the options, explain the trade-off I chose, and close with the metric that confirmed the decision worked.",
+    ...question,
+    objective: question.competencyName
+      ? `Probe ${question.competencyName} with concrete evidence.`
+      : "Probe the candidate's recent engineering work.",
+    evidenceIds: [],
+    expectedSignals: question.competencyName ? [question.competencyName, "ownership", "impact"] : ["ownership", "impact"],
+    missingSignalPrompts: question.competencyName
+      ? [`Name one concrete example from ${question.competencyName}.`]
+      : ["Name one concrete example from the work you owned."],
+    followUpLimit: 1,
+    sourceConfidence: null,
   };
 }
 
-function normalizedEvaluation(planned: PlannedQuestion, value: z.infer<typeof evaluationSchema>): Evaluation {
+function normalizeGroundedEvaluation(question: PlannedQuestion, value: z.infer<typeof groundedEvaluationSchema>): GroundedEvaluation {
   return {
     score: value.score,
-    questionId: planned.id,
-    competencyId: planned.competencyId,
-    competency: planned.competencyName ?? value.competency ?? "Communication",
+    questionId: question.id,
+    competencyId: question.competencyId,
+    competency: question.competencyName ?? value.competency ?? "Communication",
+    relevance: value.relevance,
     dimensions: value.dimensions,
     strengths: value.strengths,
     needsWork: value.needsWork,
     missingPoints: value.missingPoints,
     betterStructure: value.betterStructure,
     improvedAnswer: value.improvedAnswer,
+    supportedClaims: normalizeStrings(value.supportedClaims),
+    expectedSignalsPresent: normalizeStrings(value.expectedSignalsPresent),
+    unsupportedClaims: normalizeStrings(value.unsupportedClaims),
+    dimensionReasons: value.dimensionReasons,
   };
+}
+
+function turnPrompt(
+  question: BlueprintQuestion,
+  profile: Pick<ProfileDraft, "role" | "seniority" | "expertise" | "narrative">,
+  answer: string,
+  transcript: string,
+  source: ProfileSource | null,
+  nextPlannedQuestion: PlannedQuestion | null,
+  canFollowUp: boolean,
+): string {
+  const nextRubric = nextPlannedQuestion ? groundedQuestion(nextPlannedQuestion, null) : null;
+  return [
+    "You are an experienced senior-frontend interviewer.",
+    "Privately evaluate the latest answer against the exact question rubric.",
+    "Return only valid JSON.",
+    "Ground the scoring in the exact question objective, expected signals, and the candidate's answer.",
+    "Do not praise, coach, reveal scores, or invent facts.",
+    "If shouldFollowUp is true, the question must probe the answered plan without changing its objective.",
+    "If shouldFollowUp is false, the question should ask the supplied next plan without changing its objective or evidence target.",
+    `Question: ${JSON.stringify(question)}`,
+    `Profile: ${JSON.stringify(profile)}`,
+    `Can follow up: ${JSON.stringify(canFollowUp)}`,
+    `Transcript: ${transcript}`,
+    `Latest answer: ${answer}`,
+    source ? `CV excerpt: ${cvExcerpt(source, question)}` : "",
+    nextRubric ? `Next plan: ${JSON.stringify({
+      category: nextPlannedQuestion?.category,
+      competency: nextPlannedQuestion?.competencyName,
+      difficulty: nextPlannedQuestion?.difficulty,
+      objective: nextRubric.objective,
+      expectedSignals: nextRubric.expectedSignals,
+    })}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+async function evaluateTurn(
+  profile: Pick<ProfileDraft, "role" | "seniority" | "expertise" | "narrative">,
+  answeredQuestion: PlannedQuestion,
+  blueprint: InterviewBlueprint | null,
+  answer: string,
+  transcript: string,
+  source: ProfileSource | null,
+  nextPlannedQuestion: PlannedQuestion | null,
+  followUpCount: number,
+): Promise<{ evaluation: GroundedEvaluation; question: string | null; shouldFollowUp: boolean }> {
+  const rubric = groundedQuestion(answeredQuestion, blueprint);
+  const followUpLimit = Math.max(0, Math.min(rubric.followUpLimit || blueprint?.maxFollowUps || 3, blueprint?.maxFollowUps ?? 3));
+  const canFollowUp = !answeredQuestion.isFollowUp
+    && (blueprint?.maxQuestions ?? 8) > 0
+    && followUpCount < followUpLimit;
+  const result = await modelJson(
+    turnPrompt(rubric, profile, answer, transcript, source, nextPlannedQuestion, canFollowUp),
+    turnSchema,
+  );
+  const evaluation = result
+    ? normalizeGroundedEvaluation(answeredQuestion, result.evaluation)
+    : groundedEvaluationFor(rubric, answer);
+  const shouldFollowUp = canFollowUp && (result?.shouldFollowUp ?? (evaluation.score < 6.5 || answer.trim().length < 120));
+  const question = shouldFollowUp
+    ? (result?.question ?? deterministicFollowUp(answeredQuestion))
+    : (nextPlannedQuestion ? (result?.question ?? promptForPlan(nextPlannedQuestion, source ?? { cvText: "", coverLetter: "" })) : null);
+  return { evaluation, question, shouldFollowUp };
+}
+
+/** Evaluates the candidate's answer against the persisted question rubric. */
+export async function evaluateAnswer(
+  question: PlannedQuestion,
+  blueprint: InterviewBlueprint | null,
+  profile: Pick<ProfileDraft, "role" | "seniority" | "expertise" | "narrative">,
+  answer: string,
+  transcript: string,
+): Promise<GroundedEvaluation> {
+  const result = await evaluateTurn(profile, question, blueprint, answer, transcript, null, null, 0);
+  return result.evaluation;
 }
 
 export function initialQuestion(profile: Pick<ProfileDraft, "role">, planned: PlannedQuestion, source: ProfileSource): string {

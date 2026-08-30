@@ -29,6 +29,32 @@ const jsonRecord = (value: unknown): Record<string, unknown> => value && typeof 
   ? value as Record<string, unknown>
   : {};
 
+function numericValue(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function evaluationGroundingRecord(evaluation: Evaluation): Record<string, unknown> {
+  return {
+    relevance: evaluation.relevance ?? null,
+    supported_claims: evaluation.supportedClaims ?? [],
+    expected_signals_present: evaluation.expectedSignalsPresent ?? [],
+    unsupported_claims: evaluation.unsupportedClaims ?? [],
+    dimension_reasons: evaluation.dimensionReasons ?? {},
+  };
+}
+
+function evaluationGroundingRpcArgs(evaluation: Evaluation): Record<string, unknown> {
+  const record = evaluationGroundingRecord(evaluation);
+  return {
+    p_relevance: record.relevance,
+    p_supported_claims: record.supported_claims,
+    p_expected_signals_present: record.expected_signals_present,
+    p_unsupported_claims: record.unsupported_claims,
+    p_dimension_reasons: record.dimension_reasons,
+  };
+}
+
 function persistableCompetencyId(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -68,7 +94,7 @@ function mapBlueprintQuestion(row: Row, competencyNames: Map<string, string>): B
 }
 
 function mapEvaluation(row: Row, question: PlannedQuestion): Evaluation {
-  return {
+  const evaluation: Evaluation = {
     score: Number(row.overall_score ?? 0),
     questionId: stringValue(row.question_id) || null,
     competencyId: question.competencyId,
@@ -80,11 +106,18 @@ function mapEvaluation(row: Row, question: PlannedQuestion): Evaluation {
     betterStructure: stringArray(row.better_structure),
     improvedAnswer: stringValue(row.improved_answer),
   };
+  const relevance = numericValue(row.relevance);
+  if (relevance !== null) evaluation.relevance = relevance;
+  evaluation.supportedClaims = stringArray(row.supported_claims);
+  evaluation.expectedSignalsPresent = stringArray(row.expected_signals_present);
+  evaluation.unsupportedClaims = stringArray(row.unsupported_claims);
+  evaluation.dimensionReasons = jsonRecord(row.dimension_reasons) as Evaluation["dimensionReasons"];
+  return evaluation;
 }
 
 function mapSessionEvaluation(row: Row, competencyNames: Map<string, string>): Evaluation {
   const competencyId = typeof row.competency_id === "string" ? row.competency_id : null;
-  return {
+  const evaluation: Evaluation = {
     score: Number(row.overall_score ?? 0),
     questionId: null,
     competencyId,
@@ -98,6 +131,13 @@ function mapSessionEvaluation(row: Row, competencyNames: Map<string, string>): E
     betterStructure: stringArray(row.better_structure),
     improvedAnswer: stringValue(row.improved_answer),
   };
+  const relevance = numericValue(row.relevance);
+  if (relevance !== null) evaluation.relevance = relevance;
+  evaluation.supportedClaims = stringArray(row.supported_claims);
+  evaluation.expectedSignalsPresent = stringArray(row.expected_signals_present);
+  evaluation.unsupportedClaims = stringArray(row.unsupported_claims);
+  evaluation.dimensionReasons = jsonRecord(row.dimension_reasons) as Evaluation["dimensionReasons"];
+  return evaluation;
 }
 
 function mapCheckpoint(row: Row): HandsOnCheckpoint {
@@ -414,6 +454,7 @@ export async function recordAnswerAndEvaluation(
     p_missing_points: evaluation.missingPoints,
     p_better_structure: evaluation.betterStructure,
     p_improved_answer: evaluation.improvedAnswer,
+    ...evaluationGroundingRpcArgs(evaluation),
   });
   if (error || !data) throw new RepositoryError("Could not record your interview answer.", error?.code ?? "NO_OWNED_ROW");
   const result = Array.isArray(data) ? data[0] as Row | undefined : data as Row;
@@ -449,6 +490,7 @@ export async function recordConversationTurn(
     p_missing_points: evaluation.missingPoints,
     p_better_structure: evaluation.betterStructure,
     p_improved_answer: evaluation.improvedAnswer,
+    ...evaluationGroundingRpcArgs(evaluation),
     p_next_question_id: next.nextQuestionId,
     p_next_prompt: next.nextPrompt,
     p_follow_up: next.followUp,
@@ -498,17 +540,18 @@ export async function completeHandsOnSession(
     p_session_id: sessionId,
     p_overall_score: result.overallScore,
     p_summary: result.summary,
-    p_evaluations: result.evaluations.map((evaluation) => ({
-      competency_id: evaluation.competencyId,
-      competency: evaluation.competency,
-      score: evaluation.score,
-      dimensions: evaluation.dimensions,
-      strengths: evaluation.strengths,
-      needs_work: evaluation.needsWork,
-      missing_points: evaluation.missingPoints,
-      better_structure: evaluation.betterStructure,
-      improved_answer: evaluation.improvedAnswer,
-    })),
+      p_evaluations: result.evaluations.map((evaluation) => ({
+        competency_id: evaluation.competencyId,
+        competency: evaluation.competency,
+        score: evaluation.score,
+        dimensions: evaluation.dimensions,
+        strengths: evaluation.strengths,
+        needs_work: evaluation.needsWork,
+        missing_points: evaluation.missingPoints,
+        better_structure: evaluation.betterStructure,
+        improved_answer: evaluation.improvedAnswer,
+        ...evaluationGroundingRecord(evaluation),
+      })),
   });
   if (error || !data) throw new RepositoryError("Could not complete the hands-on interview.", error?.code ?? "NO_OWNED_ROW");
   const rpcRow = Array.isArray(data) ? data[0] as Row | undefined : data as Row;

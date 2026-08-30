@@ -158,6 +158,73 @@ describe("mapSession", () => {
     ]);
   });
 
+  it("hydrates grounded evaluation claims and reasons from persisted question feedback", () => {
+    const mapped = mapSession(
+      {
+        id: "session-1", user_id: "user-1", kind: "conversation", status: "complete",
+        started_at: "2026-08-29T10:00:00.000Z", completed_at: "2026-08-29T10:30:00.000Z", exercise: {}, result_summary: {},
+        overall_score: 7, created_at: "2026-08-29T10:00:00.000Z", updated_at: "2026-08-29T10:30:00.000Z",
+      },
+      [
+        {
+          id: "question-1",
+          sequence: 1,
+          category: "experience",
+          competency_id: "competency-1",
+          difficulty: "senior",
+          is_follow_up: false,
+          prompt: "Tell me about the migration.",
+          answer: "I led the rollout.",
+          objective: "Probe the migration ownership and impact.",
+          evidence_ids: ["evidence-1"],
+          expected_signals: ["ownership", "impact"],
+          missing_signal_prompts: ["Name the trade-off."],
+          follow_up_limit: 1,
+          source_confidence: 0.94,
+          created_at: "2026-08-29T10:01:00.000Z",
+          answered_at: "2026-08-29T10:02:00.000Z",
+        },
+      ],
+      [{
+        id: "evaluation-1",
+        question_id: "question-1",
+        overall_score: 8,
+        relevance: 8.6,
+        supported_claims: ["led the rollout"],
+        expected_signals_present: ["ownership", "impact"],
+        unsupported_claims: ["We shipped everything perfectly."],
+        dimension_reasons: {
+          relevance: "It directly answers the migration prompt.",
+          correctness: "The rollout claim is grounded in the question.",
+        },
+        missing_points: ["Add the trade-off."],
+        better_structure: ["Explain the rollout phases."],
+        improved_answer: "I led the rollout and measured the impact.",
+        dimensions: { relevance: 8.5 },
+        strengths: ["Specific rollout"],
+        weaknesses: ["Add the trade-off"],
+      }],
+      [],
+      new Map([["competency-1", "React architecture"]]),
+    );
+
+    expect(mapped.evaluations).toEqual([expect.objectContaining({
+      competency: "React architecture",
+      score: 8,
+      relevance: 8.6,
+      supportedClaims: ["led the rollout"],
+      expectedSignalsPresent: ["ownership", "impact"],
+      unsupportedClaims: ["We shipped everything perfectly."],
+      dimensionReasons: {
+        relevance: "It directly answers the migration prompt.",
+        correctness: "The rollout claim is grounded in the question.",
+      },
+      missingPoints: ["Add the trade-off."],
+      betterStructure: ["Explain the rollout phases."],
+      improvedAnswer: "I led the rollout and measured the impact.",
+    })]);
+  });
+
   it("hydrates persisted blueprint metadata and limited-grounding state", () => {
     const mapped = mapSession(
       {
@@ -498,12 +565,17 @@ describe("mapSession", () => {
         score: 7,
         competencyId: "react-id",
         competency: "React",
+        relevance: 8.4,
         dimensions: {},
         strengths: ["Specific"],
         needsWork: ["Quantify"],
         missingPoints: ["Name the fallback path."],
         betterStructure: ["Lead with the requirement, then the trade-off."],
         improvedAnswer: "I would start with the requirement, compare the trade-offs, and justify the fallback path.",
+        supportedClaims: ["compared the trade-offs"],
+        expectedSignalsPresent: ["trade-off"],
+        unsupportedClaims: ["It was easy and perfect."],
+        dimensionReasons: { relevance: "It answers the exact trade-off question." },
       },
       { nextQuestionId: "question-2", nextPrompt: "How would you design the system?", followUp: null },
     );
@@ -515,9 +587,14 @@ describe("mapSession", () => {
         p_next_question_id: "question-2",
         p_next_prompt: "How would you design the system?",
         p_follow_up: null,
+        p_relevance: 8.4,
         p_missing_points: ["Name the fallback path."],
         p_better_structure: ["Lead with the requirement, then the trade-off."],
         p_improved_answer: "I would start with the requirement, compare the trade-offs, and justify the fallback path.",
+        p_supported_claims: ["compared the trade-offs"],
+        p_expected_signals_present: ["trade-off"],
+        p_unsupported_claims: ["It was easy and perfect."],
+        p_dimension_reasons: { relevance: "It answers the exact trade-off question." },
       }),
     }]);
   });
@@ -535,12 +612,17 @@ describe("mapSession", () => {
         score: 7,
         competencyId: "react-id",
         competency: "React",
+        relevance: 8.2,
         dimensions: {},
         strengths: ["Specific"],
         needsWork: ["Quantify"],
         missingPoints: ["Name the fallback path."],
         betterStructure: ["Lead with the requirement, then the trade-off."],
         improvedAnswer: "I would start with the requirement, compare the trade-offs, and justify the fallback path.",
+        supportedClaims: ["compared the trade-offs"],
+        expectedSignalsPresent: ["trade-off"],
+        unsupportedClaims: ["It was easy and perfect."],
+        dimensionReasons: { relevance: "It answers the exact trade-off question." },
       },
     );
 
@@ -551,6 +633,11 @@ describe("mapSession", () => {
         p_missing_points: ["Name the fallback path."],
         p_better_structure: ["Lead with the requirement, then the trade-off."],
         p_improved_answer: "I would start with the requirement, compare the trade-offs, and justify the fallback path.",
+        p_relevance: 8.2,
+        p_supported_claims: ["compared the trade-offs"],
+        p_expected_signals_present: ["trade-off"],
+        p_unsupported_claims: ["It was easy and perfect."],
+        p_dimension_reasons: { relevance: "It answers the exact trade-off question." },
       }),
     }]);
   });
@@ -570,12 +657,17 @@ describe("mapSession", () => {
           score: 7,
           competencyId: null,
           competency: "React architecture",
+          relevance: 8.1,
           dimensions: { structure: 8 },
           strengths: ["Clear ownership"],
           needsWork: ["Add cancellation"],
           missingPoints: ["Call out keyboard focus recovery."],
           betterStructure: ["Start with interaction states, then discuss implementation."],
           improvedAnswer: "I would begin with the interaction states, then explain how the implementation preserves keyboard focus.",
+          supportedClaims: ["preserves keyboard focus"],
+          expectedSignalsPresent: ["ownership"],
+          unsupportedClaims: ["It was perfect."],
+          dimensionReasons: { relevance: "It answers the exact trade-off question." },
         }],
       },
     );
@@ -591,6 +683,11 @@ describe("mapSession", () => {
           missing_points: ["Call out keyboard focus recovery."],
           better_structure: ["Start with interaction states, then discuss implementation."],
           improved_answer: "I would begin with the interaction states, then explain how the implementation preserves keyboard focus.",
+          relevance: 8.1,
+          supported_claims: ["preserves keyboard focus"],
+          expected_signals_present: ["ownership"],
+          unsupported_claims: ["It was perfect."],
+          dimension_reasons: { relevance: "It answers the exact trade-off question." },
         })],
       }),
     }]);

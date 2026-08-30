@@ -115,6 +115,47 @@ export type Evaluation = {
   betterStructure: string[];
   /** A concise example of how the answer could be improved without inventing facts. */
   improvedAnswer: string;
+  /** Optional grounded-answer metadata persisted for richer coaching history. */
+  relevance?: number | null;
+  /** Optional exact claims the answer supports. */
+  supportedClaims?: string[];
+  /** Optional expected rubric signals the answer actually covered. */
+  expectedSignalsPresent?: string[];
+  /** Optional unsupported or contradictory claims the answer introduced. */
+  unsupportedClaims?: string[];
+  /** Optional dimension-level justifications for the grounded evaluation. */
+  dimensionReasons?: Partial<Record<
+    | "correctness"
+    | "depth"
+    | "clarity"
+    | "structure"
+    | "practicalExperience"
+    | "tradeOffAwareness"
+    | "communication"
+    | "confidence"
+    | "relevance",
+    string
+  >>;
+};
+
+/** A fully grounded interview evaluation with answer-relevance and claim evidence. */
+export type GroundedEvaluation = Evaluation & {
+  relevance: number;
+  supportedClaims: string[];
+  expectedSignalsPresent: string[];
+  unsupportedClaims: string[];
+  dimensionReasons: Record<
+    | "correctness"
+    | "depth"
+    | "clarity"
+    | "structure"
+    | "practicalExperience"
+    | "tradeOffAwareness"
+    | "communication"
+    | "confidence"
+    | "relevance",
+    string
+  >;
 };
 
 export type CompetencyScope = {
