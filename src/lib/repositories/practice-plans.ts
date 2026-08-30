@@ -245,6 +245,16 @@ export async function updatePracticePlan(
  * Existing links are deleted scoped to BOTH `user_id` and `practice_plan_id`
  * -- never by plan id alone -- so this can never delete another user's
  * rows, or another plan's rows, as a side effect.
+ *
+ * NOT ATOMIC: the delete and the insert are two separate round trips, with
+ * no wrapping transaction or compensating rollback. If the insert fails
+ * after the delete has already succeeded -- e.g. one `opportunityId` in
+ * `links` fails the `(opportunity_id, user_id)` composite foreign key
+ * because it belongs to another user or no longer exists -- this throws
+ * `RepositoryError`, but the plan is left with zero opportunity links; the
+ * previously-valid links are not restored. Callers must validate every
+ * `opportunityId` (same user, still existing) before calling, rather than
+ * relying on this function to roll back a partial failure.
  */
 export async function setPracticePlanOpportunities(
   supabase: SupabaseClient,
