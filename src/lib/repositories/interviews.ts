@@ -11,6 +11,7 @@ import type {
   InterviewSession,
   Message,
   PlannedQuestion,
+  SessionCareerContext,
 } from "@/lib/types";
 import { RepositoryError } from "@/lib/repositories/profile";
 
@@ -295,6 +296,8 @@ export function mapSession(
     messages: kind === "hands-on" ? handsOnTranscript(row, checkpoints) : transcriptFor(questions, answerTimes),
     createdAt: stringValue(row.created_at),
     updatedAt: stringValue(row.updated_at),
+    practicePlanId: typeof row.practice_plan_id === "string" ? row.practice_plan_id : null,
+    opportunityId: typeof row.opportunity_id === "string" ? row.opportunity_id : null,
   };
 }
 
@@ -606,4 +609,99 @@ export async function completeSession(
     .maybeSingle();
   if (error || !data) throw new RepositoryError("Could not complete the interview.", error?.code ?? "NO_OWNED_ROW");
   return hydrateSession(supabase, userId, data as Row);
+}
+
+/**
+ * Links (or clears) an owned interview session's Career Brain context --
+ * which practice plan explains why the session existed, and which real
+ * opportunity it primarily prepared for. Either field may be null; passing
+ * both null clears existing links. Never adds a required parameter to any
+ * session-creation function, and never assigns context automatically --
+ * this is the only place `practice_plan_id`/`opportunity_id` are written.
+ *
+ * When both `practicePlanId` and `opportunityId` are supplied, the
+ * opportunity must be one the plan actually serves (a row in
+ * `practice_plan_opportunities` for that exact user/plan/opportunity), and
+ * if the plan has a `primary` opportunity, the requested `opportunityId`
+ * must equal it -- see design doc section 10. A mismatch throws
+ * `RepositoryError` with the stable code `INVALID_PLAN_CONTEXT` rather
+ * than a raw constraint-violation error, since this relationship is
+ * enforced here, not by a cross-table SQL constraint.
+ */
+export async function linkSessionCareerContext(
+  supabase: SupabaseClient,
+  userId: string,
+  sessionId: string,
+  context: SessionCareerContext,
+): Promise<InterviewSession> {
+  const { data: sessionRow, error: sessionError } = await supabase
+    .from("interview_sessions")
+    .select("id")
+    .eq("id", sessionId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (sessionError || !sessionRow) {
+    throw new RepositoryError("The interview session was not found.", sessionError?.code ?? "NO_OWNED_ROW");
+  }
+
+  if (context.practicePlanId !== null) {
+    const { data: planRow, error: planError } = await supabase
+      .from("practice_plans")
+      .select("id")
+      .eq("id", context.practicePlanId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (planError || !planRow) {
+      throw new RepositoryError("The practice plan was not found.", planError?.code ?? "NO_OWNED_ROW");
+    }
+  }
+
+  if (context.opportunityId !== null) {
+    const { data: opportunityRow, error: opportunityError } = await supabase
+      .from("opportunities")
+      .select("id")
+      .eq("id", context.opportunityId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (opportunityError || !opportunityRow) {
+      throw new RepositoryError("The opportunity was not found.", opportunityError?.code ?? "NO_OWNED_ROW");
+    }
+  }
+
+  if (context.practicePlanId !== null && context.opportunityId !== null) {
+    const { data: linkRows, error: linkError } = await supabase
+      .from("practice_plan_opportunities")
+      .select("opportunity_id, relevance")
+      .eq("user_id", userId)
+      .eq("practice_plan_id", context.practicePlanId);
+    if (linkError) {
+      throw new RepositoryError("Could not verify the practice plan's linked opportunities.", linkError.code);
+    }
+    const links = (linkRows ?? []) as Row[];
+    const associated = links.some((link) => stringValue(link.opportunity_id) === context.opportunityId);
+    if (!associated) {
+      throw new RepositoryError("The practice plan and opportunity do not match.", "INVALID_PLAN_CONTEXT");
+    }
+    const primaryLink = links.find((link) => link.relevance === "primary");
+    if (primaryLink && stringValue(primaryLink.opportunity_id) !== context.opportunityId) {
+      throw new RepositoryError("The practice plan and opportunity do not match.", "INVALID_PLAN_CONTEXT");
+    }
+  }
+
+  const { error: updateError } = await supabase
+    .from("interview_sessions")
+    .update({
+      practice_plan_id: context.practicePlanId,
+      opportunity_id: context.opportunityId,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", sessionId)
+    .eq("user_id", userId);
+  if (updateError) {
+    throw new RepositoryError("Could not link the interview session to its career context.", updateError.code);
+  }
+
+  const session = await getSession(supabase, userId, sessionId);
+  if (!session) throw new RepositoryError("Could not reload the linked interview session.", "NO_OWNED_ROW");
+  return session;
 }

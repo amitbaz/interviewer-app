@@ -264,6 +264,20 @@ export type InterviewSession = {
   messages: Message[];
   createdAt: string;
   updatedAt: string;
+  /** Why this practice existed; null for legacy sessions and any session never linked to a plan. */
+  practicePlanId: string | null;
+  /** The primary real job/interview this session prepared for; null for legacy sessions and any unlinked session. */
+  opportunityId: string | null;
+};
+
+/**
+ * The Career Brain context to attach to an existing interview session via
+ * `linkSessionCareerContext` in `src/lib/repositories/interviews.ts`. Either
+ * or both fields may be null; passing both null clears existing links.
+ */
+export type SessionCareerContext = {
+  practicePlanId: string | null;
+  opportunityId: string | null;
 };
 
 /** Deterministic progress signals derived from completed coaching evidence. */

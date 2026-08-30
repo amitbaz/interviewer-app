@@ -114,6 +114,8 @@ function session(questions: PlannedQuestion[], status: InterviewSession["status"
     messages: [],
     createdAt: "2026-08-29T10:00:00.000Z",
     updatedAt: "2026-08-29T10:00:00.000Z",
+    practicePlanId: null,
+    opportunityId: null,
   };
 }
 

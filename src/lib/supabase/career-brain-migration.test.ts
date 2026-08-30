@@ -27,6 +27,11 @@ const practicePlansMigrationPath = resolve(
   "supabase/migrations/202608300005_practice_plans.sql",
 );
 
+const sessionCareerContextMigrationPath = resolve(
+  process.cwd(),
+  "supabase/migrations/202608300006_session_career_context.sql",
+);
+
 describe("stable profile evidence migration", () => {
   it("adds the durable identity columns to profile_evidence", async () => {
     const migration = await readFile(migrationPath, "utf8");
@@ -439,5 +444,57 @@ describe("practice plan migration", () => {
     expect(migration).toContain("create policy insert_own on public.practice_plan_opportunities for insert with check (auth.uid() = user_id);");
     expect(migration).toContain("create policy delete_own on public.practice_plan_opportunities for delete using (auth.uid() = user_id);");
     expect(migration).not.toMatch(/on public\.practice_plan_opportunities for update/);
+  });
+});
+
+// No live Supabase target exists in this environment (no `supabase` CLI, no
+// credentials), so `supabase db push` and manual DB verification cannot run.
+// This block statically verifies the migration's invariants instead --
+// both columns nullable, both composite same-user foreign keys using the
+// required `on delete set null (column)` form, and the user/context
+// indexes -- in place of Task 6 brief Step 7.
+describe("session career context migration", () => {
+  it("adds practice_plan_id and opportunity_id as nullable uuid columns", async () => {
+    const migration = await readFile(sessionCareerContextMigrationPath, "utf8");
+
+    expect(migration).toContain("add column practice_plan_id uuid,");
+    expect(migration).toContain("add column opportunity_id uuid,");
+    // Neither column may be constrained not null -- historical sessions
+    // must remain valid without a backfill guess.
+    expect(migration).not.toMatch(/practice_plan_id uuid not null/);
+    expect(migration).not.toMatch(/opportunity_id uuid not null/);
+  });
+
+  it("uses the exact same-user composite foreign keys, with the required column-list on delete set null form", async () => {
+    const migration = await readFile(sessionCareerContextMigrationPath, "utf8");
+
+    // interview_sessions.user_id is not null, so a plain composite
+    // `on delete set null` would try to null user_id too and fail at
+    // runtime -- the column-list form nulls only the Career Brain
+    // reference and leaves ownership intact. This is deliberate, not a
+    // typo; see the migration's header comment.
+    expect(migration).toContain(
+      "foreign key (practice_plan_id, user_id)\n    references public.practice_plans (id, user_id) on delete set null (practice_plan_id),",
+    );
+    expect(migration).toContain(
+      "foreign key (opportunity_id, user_id)\n    references public.opportunities (id, user_id) on delete set null (opportunity_id);",
+    );
+  });
+
+  it("does not re-create the practice_plans or opportunities tables -- Tasks 5 and 2 already added them", async () => {
+    const migration = await readFile(sessionCareerContextMigrationPath, "utf8");
+
+    expect(migration).not.toMatch(/create table public\.(practice_plans|opportunities)/);
+  });
+
+  it("adds cheap user/context indexes for later Release 2 queries", async () => {
+    const migration = await readFile(sessionCareerContextMigrationPath, "utf8");
+
+    expect(migration).toContain(
+      "create index interview_sessions_user_opportunity_idx\n  on public.interview_sessions (user_id, opportunity_id, created_at desc);",
+    );
+    expect(migration).toContain(
+      "create index interview_sessions_user_plan_idx\n  on public.interview_sessions (user_id, practice_plan_id);",
+    );
   });
 });
