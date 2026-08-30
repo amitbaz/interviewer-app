@@ -22,6 +22,11 @@ const coachObservationsMigrationPath = resolve(
   "supabase/migrations/202608300004_coach_observations.sql",
 );
 
+const practicePlansMigrationPath = resolve(
+  process.cwd(),
+  "supabase/migrations/202608300005_practice_plans.sql",
+);
+
 describe("stable profile evidence migration", () => {
   it("adds the durable identity columns to profile_evidence", async () => {
     const migration = await readFile(migrationPath, "utf8");
@@ -359,5 +364,80 @@ describe("coach observation migration", () => {
     expect(migration).toContain("create policy select_own on public.observation_evidence for select using (auth.uid() = user_id);");
     expect(migration).toContain("create policy insert_own on public.observation_evidence for insert with check (auth.uid() = user_id);");
     expect(migration).not.toMatch(/on public\.observation_evidence for (update|delete)/);
+  });
+});
+
+describe("practice plan migration", () => {
+  it("constrains status and format to the spec'd values", async () => {
+    const migration = await readFile(practicePlansMigrationPath, "utf8");
+
+    expect(migration).toContain(
+      "check (status in ('draft', 'ready', 'started', 'completed', 'cancelled', 'failed'))",
+    );
+    expect(migration).toContain(
+      "check (format in (\n    'targeted_drill', 'story_work', 'self_presentation', 'behavioral',\n    'technical_communication', 'role_prep', 'full_simulation', 'hands_on'\n  ))",
+    );
+  });
+
+  it("constrains relevance to the spec'd values", async () => {
+    const migration = await readFile(practicePlansMigrationPath, "utf8");
+
+    expect(migration).toContain("check (relevance in ('primary', 'supporting'))");
+  });
+
+  it("constrains estimated_minutes to the 1..180 range when present", async () => {
+    const migration = await readFile(practicePlansMigrationPath, "utf8");
+
+    expect(migration).toContain("check (estimated_minutes is null or estimated_minutes between 1 and 180)");
+  });
+
+  it("gives practice_plans unique (id, user_id) for the composite foreign key practice_plan_opportunities needs", async () => {
+    const migration = await readFile(practicePlansMigrationPath, "utf8");
+
+    const createTable = migration.split("create table public.practice_plans (")[1].split(");")[0];
+    expect(createTable).toContain("unique (id, user_id)");
+  });
+
+  it("uses the exact same-user composite foreign keys the brief specifies", async () => {
+    const migration = await readFile(practicePlansMigrationPath, "utf8");
+
+    expect(migration).toContain(
+      "foreign key (practice_plan_id, user_id)\n    references public.practice_plans (id, user_id) on delete cascade,",
+    );
+    expect(migration).toContain(
+      "foreign key (opportunity_id, user_id)\n    references public.opportunities (id, user_id) on delete cascade",
+    );
+  });
+
+  it("keys practice_plan_opportunities on (practice_plan_id, opportunity_id)", async () => {
+    const migration = await readFile(practicePlansMigrationPath, "utf8");
+
+    expect(migration).toContain("primary key (practice_plan_id, opportunity_id)");
+  });
+
+  it("enforces at most one primary opportunity per plan with a partial unique index", async () => {
+    const migration = await readFile(practicePlansMigrationPath, "utf8");
+
+    expect(migration).toContain(
+      "create unique index practice_plan_one_primary_opportunity_idx\non public.practice_plan_opportunities (practice_plan_id)\nwhere relevance = 'primary';",
+    );
+  });
+
+  it("gives practice_plans full own-row CRUD RLS policies", async () => {
+    const migration = await readFile(practicePlansMigrationPath, "utf8");
+
+    expect(migration).toContain("create policy select_own on public.practice_plans for select using (auth.uid() = user_id);");
+    expect(migration).toContain("create policy insert_own on public.practice_plans for insert with check (auth.uid() = user_id);");
+    expect(migration).toContain("create policy update_own on public.practice_plans for update using (auth.uid() = user_id) with check (auth.uid() = user_id);");
+    expect(migration).toContain("create policy delete_own on public.practice_plans for delete using (auth.uid() = user_id);");
+  });
+
+  it("gives practice_plan_opportunities select/insert/delete RLS policies -- but no update policy", async () => {
+    const migration = await readFile(practicePlansMigrationPath, "utf8");
+
+    expect(migration).toContain("create policy select_own on public.practice_plan_opportunities for select using (auth.uid() = user_id);");
+    expect(migration).toContain("create policy insert_own on public.practice_plan_opportunities for insert with check (auth.uid() = user_id);");
+    expect(migration).toContain("create policy delete_own on public.practice_plan_opportunities for delete using (auth.uid() = user_id);");
+    expect(migration).not.toMatch(/on public\.practice_plan_opportunities for update/);
   });
 });

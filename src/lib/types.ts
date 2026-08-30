@@ -581,3 +581,91 @@ export type AttachObservationEvidenceOptions = {
   weight?: number;
   reason?: string | null;
 };
+
+export type PracticePlanStatus = "draft" | "ready" | "started" | "completed" | "cancelled" | "failed";
+
+export type PracticeFormat =
+  | "targeted_drill"
+  | "story_work"
+  | "self_presentation"
+  | "behavioral"
+  | "technical_communication"
+  | "role_prep"
+  | "full_simulation"
+  | "hands_on";
+
+export type PracticePlanOpportunityRelevance = "primary" | "supporting";
+
+/**
+ * One row linking a practice plan to an opportunity it serves. A plan may
+ * serve several opportunities, but at most one link per plan may be
+ * `"primary"` -- enforced by the database's partial unique index
+ * (`practice_plan_one_primary_opportunity_idx`) and, before any write, by
+ * `setPracticePlanOpportunities` in `src/lib/repositories/practice-plans.ts`.
+ */
+export type PracticePlanOpportunity = {
+  userId: string;
+  practicePlanId: string;
+  opportunityId: string;
+  relevance: PracticePlanOpportunityRelevance;
+  createdAt: string;
+};
+
+/**
+ * One link to include when replacing a practice plan's opportunity set via
+ * `setPracticePlanOpportunities`. `relevance` defaults to `"supporting"`
+ * when omitted, matching the database column default.
+ */
+export type PracticePlanOpportunityLink = {
+  opportunityId: string;
+  relevance?: PracticePlanOpportunityRelevance;
+};
+
+/**
+ * A practice plan is the explicit persisted contract explaining what a
+ * future practice session is trying to improve and why (see
+ * `docs/superpowers/specs/2026-08-30-career-brain-release-1-foundation-design.md`
+ * section 9). `opportunities` hydrates the plan's current links from
+ * `practice_plan_opportunities`, so later callers (Release 2) get the full
+ * plan-and-links shape from one repository call instead of a
+ * table-specific query.
+ *
+ * Release 1 does not define the prioritization formula -- `priorityScore`
+ * and `priorityFactors` are nullable/default placeholders reserved for
+ * Release 3's deterministic recommendation snapshot and are never computed
+ * here.
+ */
+export type PracticePlan = {
+  id: string;
+  userId: string;
+  status: PracticePlanStatus;
+  primaryFocus: string;
+  secondaryFocus: string | null;
+  rationale: string;
+  format: PracticeFormat;
+  /** Minutes; null when not estimated, otherwise constrained to 1-180. */
+  estimatedMinutes: number | null;
+  successCriteria: unknown[];
+  priorityScore: number | null;
+  priorityFactors: Record<string, unknown>;
+  /** Set when a later AI-generation step fails, so the plan persists safely instead of being lost. */
+  generationError: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  opportunities: PracticePlanOpportunity[];
+};
+
+export type CreatePracticePlanInput = {
+  status?: PracticePlanStatus;
+  primaryFocus: string;
+  secondaryFocus?: string | null;
+  rationale?: string;
+  format: PracticeFormat;
+  estimatedMinutes?: number | null;
+  successCriteria?: unknown[];
+  priorityScore?: number | null;
+  priorityFactors?: Record<string, unknown>;
+  generationError?: string | null;
+  completedAt?: string | null;
+};
