@@ -12,6 +12,11 @@ const opportunitiesMigrationPath = resolve(
   "supabase/migrations/202608300002_opportunities.sql",
 );
 
+const careerStoriesMigrationPath = resolve(
+  process.cwd(),
+  "supabase/migrations/202608300003_career_stories.sql",
+);
+
 describe("stable profile evidence migration", () => {
   it("adds the durable identity columns to profile_evidence", async () => {
     const migration = await readFile(migrationPath, "utf8");
@@ -143,5 +148,88 @@ describe("opportunity lifecycle migration", () => {
     expect(definition).toContain("else v_opportunity.status");
     expect(definition).toContain("next_interview_at = p_interview_at");
     expect(definition).toContain("'interview_scheduled'");
+  });
+});
+
+describe("career story provenance migration", () => {
+  it("requires exactly one typed evidence source on career_story_evidence", async () => {
+    const migration = await readFile(careerStoriesMigrationPath, "utf8");
+
+    expect(migration).toContain("check (num_nonnulls(profile_evidence_id, interview_question_id) = 1)");
+  });
+
+  it("gives career_stories unique (id, user_id) for the composite foreign key Task 4 needs", async () => {
+    const migration = await readFile(careerStoriesMigrationPath, "utf8");
+
+    const createTable = migration.split("create table public.career_stories (")[1].split(");")[0];
+    expect(createTable).toContain("unique (id, user_id)");
+  });
+
+  it("does not re-add unique (id, user_id) to career_story_evidence", async () => {
+    const migration = await readFile(careerStoriesMigrationPath, "utf8");
+
+    const createTable = migration
+      .split("create table public.career_story_evidence (")[1]
+      .split("create index")[0];
+    expect(createTable).not.toContain("unique (id, user_id)");
+  });
+
+  it("uses the exact same-user composite foreign keys the brief specifies", async () => {
+    const migration = await readFile(careerStoriesMigrationPath, "utf8");
+
+    expect(migration).toContain(
+      "foreign key (career_story_id, user_id)\n    references public.career_stories (id, user_id) on delete cascade,",
+    );
+    expect(migration).toContain(
+      "foreign key (profile_evidence_id, user_id)\n    references public.profile_evidence (id, user_id),",
+    );
+    expect(migration).toContain(
+      "foreign key (interview_question_id, user_id)\n    references public.interview_questions (id, user_id)",
+    );
+  });
+
+  it("does not cascade the evidence-parent foreign keys, only the career_story_id link", async () => {
+    const migration = await readFile(careerStoriesMigrationPath, "utf8");
+
+    const createTable = migration
+      .split("create table public.career_story_evidence (")[1]
+      .split("create index")[0];
+    const foreignKeys = createTable.split("foreign key")[0].length < createTable.length
+      ? createTable.slice(createTable.indexOf("foreign key"))
+      : "";
+
+    // Exactly one "on delete cascade" among this table's foreign keys -- the
+    // career_story_id link -- so the two evidence-parent foreign keys
+    // (profile_evidence, interview_questions) fall back to restrictive
+    // default delete behavior and cannot silently disappear.
+    expect((foreignKeys.match(/on delete cascade/g) ?? [])).toHaveLength(1);
+    expect(createTable.split("foreign key (career_story_id")[1]).toContain("on delete cascade");
+    expect(createTable.split("foreign key (profile_evidence_id")[1].split("foreign key (interview_question_id")[0])
+      .not.toContain("on delete");
+    expect(createTable.split("foreign key (interview_question_id")[1]).not.toContain("on delete");
+  });
+
+  it("constrains completeness to 0..1 and review_state to the spec'd values", async () => {
+    const migration = await readFile(careerStoriesMigrationPath, "utf8");
+
+    expect(migration).toContain("check (completeness between 0 and 1)");
+    expect(migration).toContain("check (review_state in ('draft', 'confirmed', 'retired'))");
+  });
+
+  it("gives career_stories full own-row CRUD RLS policies", async () => {
+    const migration = await readFile(careerStoriesMigrationPath, "utf8");
+
+    expect(migration).toContain("create policy select_own on public.career_stories for select using (auth.uid() = user_id);");
+    expect(migration).toContain("create policy insert_own on public.career_stories for insert with check (auth.uid() = user_id);");
+    expect(migration).toContain("create policy update_own on public.career_stories for update using (auth.uid() = user_id) with check (auth.uid() = user_id);");
+    expect(migration).toContain("create policy delete_own on public.career_stories for delete using (auth.uid() = user_id);");
+  });
+
+  it("gives career_story_evidence only select/insert RLS policies -- no update or delete", async () => {
+    const migration = await readFile(careerStoriesMigrationPath, "utf8");
+
+    expect(migration).toContain("create policy select_own on public.career_story_evidence for select using (auth.uid() = user_id);");
+    expect(migration).toContain("create policy insert_own on public.career_story_evidence for insert with check (auth.uid() = user_id);");
+    expect(migration).not.toMatch(/on public\.career_story_evidence for (update|delete)/);
   });
 });

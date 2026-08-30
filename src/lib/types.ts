@@ -384,3 +384,92 @@ export type UpdateOpportunityDetailsInput = {
   gaps?: string[];
   notes?: string | null;
 };
+
+/**
+ * A career story is a real, reusable professional experience the user can
+ * tell in an interview -- not a coach inference. `completeness` describes
+ * whether enough factual fields exist to use the story, not how well the
+ * user delivers it, and Release 1 never computes it automatically.
+ */
+export type CareerStoryReviewState = "draft" | "confirmed" | "retired";
+
+export type CareerStory = {
+  id: string;
+  userId: string;
+  title: string;
+  situation: string | null;
+  responsibility: string | null;
+  problem: string | null;
+  actions: string | null;
+  alternatives: string | null;
+  tradeoffs: string | null;
+  ownership: string | null;
+  outcome: string | null;
+  lessons: string | null;
+  tags: string[];
+  /** 0-1; caller-provided or the database default, never computed by Release 1. */
+  completeness: number;
+  reviewState: CareerStoryReviewState;
+  confirmedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/**
+ * Typed provenance link from a career story to the durable evidence that
+ * backs it. Exactly one source is set, enforced in the database with
+ * `check (num_nonnulls(profile_evidence_id, interview_question_id) = 1)`.
+ */
+export type CareerStoryEvidence = {
+  id: string;
+  userId: string;
+  careerStoryId: string;
+  profileEvidenceId: string | null;
+  interviewQuestionId: string | null;
+  note: string | null;
+  createdAt: string;
+};
+
+/**
+ * A discriminated union so callers cannot supply two source IDs when
+ * attaching career story evidence. See `storyEvidenceColumns` in
+ * `src/lib/repositories/stories.ts` for the one place this is converted to
+ * nullable database columns.
+ */
+export type CareerStoryEvidenceSource =
+  | { kind: "profile_evidence"; profileEvidenceId: string }
+  | { kind: "interview_question"; interviewQuestionId: string };
+
+export type CreateCareerStoryInput = {
+  title: string;
+  situation?: string | null;
+  responsibility?: string | null;
+  problem?: string | null;
+  actions?: string | null;
+  alternatives?: string | null;
+  tradeoffs?: string | null;
+  ownership?: string | null;
+  outcome?: string | null;
+  lessons?: string | null;
+  tags?: string[];
+  /** Omit to use the database default of 0. Release 1 never computes this automatically. */
+  completeness?: number;
+  reviewState?: CareerStoryReviewState;
+};
+
+export type UpdateCareerStoryInput = {
+  title?: string;
+  situation?: string | null;
+  responsibility?: string | null;
+  problem?: string | null;
+  actions?: string | null;
+  alternatives?: string | null;
+  tradeoffs?: string | null;
+  ownership?: string | null;
+  outcome?: string | null;
+  lessons?: string | null;
+  tags?: string[];
+  completeness?: number;
+  reviewState?: CareerStoryReviewState;
+  confirmedAt?: string | null;
+};
