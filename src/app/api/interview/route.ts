@@ -1,12 +1,11 @@
 import { NextResponse } from "next/server";
-import { completeSession as summarizeSession, evaluateHandsOn, handsOnCheckpoint, handsOnExercise, initialQuestion, nextTurn } from "@/lib/coach";
-import { buildInterviewPlan } from "@/lib/interview-planner";
+import { completeSession as summarizeSession, evaluateHandsOn, generateInterviewBlueprint, handsOnCheckpoint, handsOnExercise, initialQuestion, nextTurn } from "@/lib/coach";
 import { calculateProgress } from "@/lib/progress";
 import {
   completeHandsOnSession,
   completeSession,
   createHandsOnSession,
-  createSessionWithPlan,
+  createSessionWithBlueprint,
   getSession,
   listRecentSessions,
   recordConversationTurn,
@@ -62,12 +61,24 @@ export async function POST(request: Request) {
         const session = await createHandsOnSession(supabase, user.id, handsOnExercise(profile));
         return NextResponse.json({ session });
       }
-      const plan = buildInterviewPlan(profile.competencies, profile.seniority ?? "Intermediate");
-      const firstQuestion = plan[0];
-      const plannedQuestions = plan.map((question, index) => index === 0
-        ? { ...question, prompt: initialQuestion(profile, firstQuestion, profile.source) }
-        : question);
-      const session = await createSessionWithPlan(supabase, user.id, plannedQuestions);
+      if (!profile.readiness?.ready) {
+        return NextResponse.json({
+          error: `Add ${profile.readiness?.missing.join(", ") ?? "more evidence"} before starting a personalized interview.`,
+          readiness: profile.readiness,
+        }, { status: 400 });
+      }
+      const blueprint = await generateInterviewBlueprint(profile, profile.evidence ?? []);
+      const session = await createSessionWithBlueprint(supabase, user.id, blueprint);
+      session.blueprint = blueprint;
+      if (session.questions[0]) {
+        const openingPrompt = initialQuestion(profile, session.questions[0], profile.source);
+        session.questions[0] = openingPrompt
+          ? {
+            ...session.questions[0],
+            prompt: openingPrompt,
+          }
+          : session.questions[0];
+      }
       return NextResponse.json({ session: visibleConversation(session) });
     }
 
@@ -92,6 +103,7 @@ export async function POST(request: Request) {
         profile.source,
         visibleConversation(session),
         answer,
+        session.blueprint ?? null,
       );
       const updated = await recordConversationTurn(
         supabase,
@@ -153,6 +165,7 @@ async function finishConversation(
 }
 
 function visibleConversation(session: InterviewSession): InterviewSession {
+  if (!session.questions) return session;
   const visibleQuestionIds = new Set(session.questions.filter((question) => question.answer).map((question) => question.id));
   const nextQuestion = session.questions.find((question) => !question.answer);
   if (nextQuestion) visibleQuestionIds.add(nextQuestion.id);

@@ -832,13 +832,14 @@ export async function nextTurn(
   source: ProfileSource,
   session: InterviewSession,
   answer: string,
+  blueprint: InterviewBlueprint | null = null,
 ): Promise<{ evaluation: Evaluation; nextQuestion: string | null; followUp: FollowUpDraft | null }> {
   const transcript = session.messages.map((message) => `${message.role}: ${message.content}`).join("\n");
   const followUpCount = session.questions.filter((question) => question.isFollowUp).length;
   const { evaluation, question, shouldFollowUp } = await evaluateTurn(
     profile,
     answeredQuestion,
-    null,
+    blueprint,
     answer,
     transcript,
     source,

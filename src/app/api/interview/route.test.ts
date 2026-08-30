@@ -8,11 +8,13 @@ const mocks = vi.hoisted(() => ({
   listRecentSessions: vi.fn(),
   createHandsOnSession: vi.fn(),
   createSessionWithPlan: vi.fn(),
+  createSessionWithBlueprint: vi.fn(),
   recordConversationTurn: vi.fn(),
   saveHandsOnCheckpoint: vi.fn(),
   completeSession: vi.fn(),
   completeHandsOnSession: vi.fn(),
   buildInterviewPlan: vi.fn(),
+  generateInterviewBlueprint: vi.fn(),
   nextTurn: vi.fn(),
   initialQuestion: vi.fn(),
   summarizeSession: vi.fn(),
@@ -28,6 +30,7 @@ vi.mock("@/lib/repositories/interviews", () => ({
   listRecentSessions: mocks.listRecentSessions,
   createHandsOnSession: mocks.createHandsOnSession,
   createSessionWithPlan: mocks.createSessionWithPlan,
+  createSessionWithBlueprint: mocks.createSessionWithBlueprint,
   recordConversationTurn: mocks.recordConversationTurn,
   saveHandsOnCheckpoint: mocks.saveHandsOnCheckpoint,
   completeSession: mocks.completeSession,
@@ -41,6 +44,7 @@ vi.mock("@/lib/coach", () => ({
   evaluateHandsOn: mocks.evaluateHandsOn,
   handsOnCheckpoint: mocks.handsOnCheckpoint,
   handsOnExercise: mocks.handsOnExercise,
+  generateInterviewBlueprint: mocks.generateInterviewBlueprint,
 }));
 
 import { GET, POST } from "@/app/api/interview/route";
@@ -70,6 +74,7 @@ const profile: Profile = {
   characteristics: ["Pragmatic"],
   competencies: [competency],
   source: { cvText: "At Acme I led a React migration.", coverLetter: "" },
+  readiness: { ready: true, missing: [] },
   createdAt: "2026-08-29T10:00:00.000Z",
   updatedAt: "2026-08-29T10:00:00.000Z",
 };
@@ -129,6 +134,32 @@ describe("POST /api/interview", () => {
     expect(json).not.toHaveBeenCalled();
   });
 
+  it("rejects profiles that do not meet the readiness gate before planning an interview", async () => {
+    mocks.getProfile.mockResolvedValue({
+      ...profile,
+      readiness: {
+        ready: false,
+        missing: ["two concrete engineering projects or work examples"],
+      },
+    });
+
+    const response = await POST(new Request("http://localhost/api/interview", {
+      method: "POST",
+      body: JSON.stringify({ action: "start" }),
+    }));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: expect.stringContaining("two concrete engineering projects"),
+      readiness: {
+        ready: false,
+        missing: ["two concrete engineering projects or work examples"],
+      },
+    });
+    expect(mocks.generateInterviewBlueprint).not.toHaveBeenCalled();
+    expect(mocks.createSessionWithBlueprint).not.toHaveBeenCalled();
+  });
+
   it("logs the underlying failure while keeping the public error generic", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     mocks.getSession.mockRejectedValue(new Error("database function is unavailable"));
@@ -179,6 +210,166 @@ describe("POST /api/interview", () => {
       expect.objectContaining({ followUp: expect.objectContaining({ prompt: "Which trade-off did you choose?" }) }),
     );
     expect(mocks.completeSession).not.toHaveBeenCalled();
+  });
+
+  it("starts a conversation from the generated blueprint and returns the first question", async () => {
+    const blueprint = {
+      status: "grounded" as const,
+      fallbackReason: null,
+      maxFollowUps: 3,
+      maxQuestions: 5,
+      createdAt: "2026-08-29T10:00:00.000Z",
+      questions: [
+        {
+          id: "blueprint-question-1",
+          sequence: 1,
+          category: "introduction" as const,
+          competencyId: null,
+          competencyName: null,
+          difficulty: "senior" as const,
+          isFollowUp: false,
+          prompt: "Tell me about the migration.",
+          answer: null,
+          createdAt: "2026-08-29T10:00:00.000Z",
+          objective: "Understand the candidate's recent work.",
+          evidenceIds: ["evidence-1"],
+          expectedSignals: ["ownership"],
+          missingSignalPrompts: ["Name one concrete example."],
+          followUpLimit: 1,
+          sourceConfidence: 0.9,
+        },
+      ],
+    };
+    const persisted = session([
+      {
+        ...question(1, null),
+        id: "blueprint-question-1",
+        prompt: "Tell me about the migration.",
+      },
+    ]);
+    persisted.blueprint = blueprint;
+
+    mocks.generateInterviewBlueprint.mockResolvedValue(blueprint);
+    mocks.createSessionWithBlueprint.mockResolvedValue(persisted);
+    mocks.initialQuestion.mockReturnValue("Tell me about the migration.");
+
+    const response = await POST(new Request("http://localhost/api/interview", {
+      method: "POST",
+      body: JSON.stringify({ action: "start" }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(mocks.generateInterviewBlueprint).toHaveBeenCalledWith(profile, []);
+    expect(mocks.createSessionWithBlueprint).toHaveBeenCalledWith(expect.anything(), "user-1", blueprint);
+    expect(body.session.blueprint.questions[0].objective).toBe("Understand the candidate's recent work.");
+    expect(body.session.questions[0].prompt).toBe("Tell me about the migration.");
+  });
+
+  it("passes the persisted blueprint into exact-question evaluation", async () => {
+    const persistedBlueprint = {
+      status: "grounded" as const,
+      fallbackReason: null,
+      maxFollowUps: 3,
+      maxQuestions: 5,
+      createdAt: "2026-08-29T10:00:00.000Z",
+      questions: [
+        {
+          id: "question-1",
+          sequence: 1,
+          category: "experience" as const,
+          competencyId: "react-id",
+          competencyName: "React architecture",
+          difficulty: "senior" as const,
+          isFollowUp: false,
+          prompt: "Tell me about the checkout migration.",
+          answer: null,
+          createdAt: "2026-08-29T10:00:00.000Z",
+          objective: "Probe the migration ownership and impact.",
+          evidenceIds: ["evidence-1"],
+          expectedSignals: ["ownership", "trade-off", "impact"],
+          missingSignalPrompts: ["Name the trade-off you accepted."],
+          followUpLimit: 1,
+          sourceConfidence: 0.94,
+        },
+      ],
+    };
+    const activeSession = session([question(1, null), question(2, null)]);
+    activeSession.blueprint = persistedBlueprint;
+    mocks.getSession.mockResolvedValue(activeSession);
+    mocks.nextTurn.mockResolvedValue({
+      evaluation: { score: 8, competencyId: "react-id", competency: "React architecture", dimensions: {}, strengths: ["Specific"], needsWork: [] },
+      nextQuestion: null,
+      followUp: null,
+    });
+    mocks.recordConversationTurn.mockResolvedValue(session([question(1, "A complete answer."), question(2, null)]));
+
+    const response = await POST(new Request("http://localhost/api/interview", {
+      method: "POST",
+      body: JSON.stringify({ action: "respond", sessionId: "session-1", answer: "A complete answer." }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(mocks.nextTurn).toHaveBeenCalledWith(
+      profile,
+      expect.objectContaining({ id: "question-1", prompt: "Question 1" }),
+      expect.objectContaining({ id: "question-2" }),
+      profile.source,
+      expect.anything(),
+      "A complete answer.",
+      persistedBlueprint,
+    );
+  });
+
+  it("falls back to a limited-grounding blueprint without failing the start request", async () => {
+    const limitedBlueprint = {
+      status: "limited-grounding" as const,
+      fallbackReason: "Gemini returned invalid blueprint JSON after one repair attempt.",
+      maxFollowUps: 3,
+      maxQuestions: 5,
+      createdAt: "2026-08-29T10:00:00.000Z",
+      questions: [
+        {
+          id: "blueprint-question-1",
+          sequence: 1,
+          category: "introduction" as const,
+          competencyId: null,
+          competencyName: null,
+          difficulty: "senior" as const,
+          isFollowUp: false,
+          prompt: "Tell me about yourself.",
+          answer: null,
+          createdAt: "2026-08-29T10:00:00.000Z",
+          objective: "Understand the candidate's background.",
+          evidenceIds: [],
+          expectedSignals: ["ownership"],
+          missingSignalPrompts: ["Name one concrete example."],
+          followUpLimit: 0,
+          sourceConfidence: null,
+        },
+      ],
+    };
+    const persisted = session([
+      {
+        ...question(1, null),
+        id: "blueprint-question-1",
+        prompt: "Tell me about yourself.",
+      },
+    ]);
+    persisted.blueprint = limitedBlueprint;
+
+    mocks.generateInterviewBlueprint.mockResolvedValue(limitedBlueprint);
+    mocks.createSessionWithBlueprint.mockResolvedValue(persisted);
+
+    const response = await POST(new Request("http://localhost/api/interview", {
+      method: "POST",
+      body: JSON.stringify({ action: "start" }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.session.blueprint.status).toBe("limited-grounding");
+    expect(body.session.blueprint.fallbackReason).toContain("invalid blueprint JSON");
   });
 
   it("completes naturally only after the final persisted question is answered", async () => {
