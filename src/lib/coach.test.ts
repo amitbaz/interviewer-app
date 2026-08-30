@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 
 import {
+  analyzeProfile,
   assessProfileReadiness,
   extractEngineeringEvidence,
   extractPdfText,
@@ -140,6 +141,23 @@ describe("initialQuestion", () => {
     expect(question).toContain("Acme");
   });
 
+  it("falls back to a backend-oriented software-engineering profile when Gemini is unavailable", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "");
+
+    const profile = await analyzeProfile(
+      "Built Node.js APIs for a payments platform. Owned Postgres migrations and improved production reliability.",
+      "",
+    );
+
+    expect(profile.role).toBe("Backend Engineer");
+    expect(profile.summary).toContain("software-engineering");
+    expect(profile.expertise).toEqual(expect.arrayContaining(["Node.js", "Postgres", "Reliability"]));
+    expect(profile.competencies).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "Node.js" }),
+      expect.objectContaining({ name: "Postgres" }),
+    ]));
+  });
+
   it("bounds a single long CV sentence before placing it in an interview prompt", () => {
     const cvText = `React migration ${"confidential detail ".repeat(80)}TAIL_MARKER.`;
     const question = initialQuestion(
@@ -150,6 +168,93 @@ describe("initialQuestion", () => {
 
     expect(question.length).toBeLessThan(700);
     expect(question).not.toContain("TAIL_MARKER");
+  });
+
+  it("frames the first interviewer prompt around the candidate's engineering role", () => {
+    const question = initialQuestion(
+      { role: "Backend Engineer" },
+      planned({ category: "introduction" }),
+      { cvText: "Built backend systems and APIs.", coverLetter: "" },
+    );
+
+    expect(question).toContain("backend work");
+    expect(question).not.toContain("frontend");
+  });
+
+  it("identifies the evaluator as a software-engineering interviewer", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{
+        content: {
+          parts: [{
+            text: JSON.stringify({
+              question: "How would you design the backend rollout?",
+              shouldFollowUp: false,
+              evaluation: {
+                score: 7,
+                competency: "Ignored by normalization",
+                relevance: 7,
+                dimensions: {
+                  correctness: 7,
+                  depth: 7,
+                  clarity: 7,
+                  structure: 7,
+                  practicalExperience: 7,
+                  tradeOffAwareness: 7,
+                  communication: 7,
+                  confidence: 7,
+                  relevance: 7,
+                },
+                strengths: ["Specific example"],
+                needsWork: ["Add one trade-off"],
+                missingPoints: ["Call out the risk"],
+                betterStructure: ["Start with the constraint, then the plan."],
+                improvedAnswer: "I would start with the constraint, explain the plan, and close with the trade-off.",
+                supportedClaims: ["I would start with the constraint."],
+                expectedSignalsPresent: ["decision"],
+                unsupportedClaims: [],
+                dimensionReasons: {
+                  correctness: "The answer addresses the prompt.",
+                  depth: "It includes a concrete plan.",
+                  clarity: "It is easy to follow.",
+                  structure: "It has a clear sequence.",
+                  practicalExperience: "It refers to shipped work.",
+                  tradeOffAwareness: "It names the trade-off.",
+                  communication: "It is concise.",
+                  confidence: "It is direct.",
+                  relevance: "It answers the backend rollout question.",
+                },
+              },
+            }),
+          }],
+        },
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    const answeredQuestion = planned({ id: "question-1", sequence: 1, category: "experience", prompt: "Tell me about the rollout." });
+    const nextQuestion = planned({
+      id: "question-2",
+      sequence: 2,
+      category: "architecture",
+      competencyId: "system-design-id",
+      competencyName: "System design",
+      prompt: "Generic architecture prompt",
+    });
+
+    await nextTurn(
+      { role: "Backend Engineer", seniority: "Senior", expertise: ["Node.js"], narrative: "Owns backend platforms." },
+      answeredQuestion,
+      nextQuestion,
+      { cvText: "Built backend systems and APIs.", coverLetter: "" },
+      session([answeredQuestion, nextQuestion]),
+      "I led the backend rollout, accepted a staged release, and measured the result.",
+    );
+
+    expect(fetchSpy).toHaveBeenCalled();
+    const requestBody = JSON.parse(String(fetchSpy.mock.calls[0][1]?.body));
+    expect(requestBody.contents[0].parts[0].text).toContain("software-engineering interviewer");
+    expect(requestBody.contents[0].parts[0].text).not.toContain("senior-frontend interviewer");
   });
 
   it("returns a generated prompt for the next planned question when no follow-up is warranted", async () => {

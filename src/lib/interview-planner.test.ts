@@ -98,6 +98,8 @@ describe("adaptive interview planning", () => {
     expect(plan.map((question) => question.category)).toEqual([
       "introduction", "experience", "technical", "architecture", "behavioral",
     ]);
+    expect(plan[0].prompt).toContain("engineering work");
+    expect(plan[0].prompt).not.toContain("frontend");
     for (let index = 1; index < plan.length; index += 1) {
       const previous = plan[index - 1].competencyId;
       const current = plan[index].competencyId;

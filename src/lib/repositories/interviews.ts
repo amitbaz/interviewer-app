@@ -63,12 +63,15 @@ function persistableCompetencyId(value: unknown): string | null {
 
 function mapQuestion(row: Row, competencyNames: Map<string, string>): PlannedQuestion {
   const competencyId = typeof row.competency_id === "string" ? row.competency_id : null;
+  const competencyName = competencyId
+    ? competencyNames.get(competencyId) ?? stringValue(row.competency_name) ?? null
+    : stringValue(row.competency_name) || null;
   return {
     id: stringValue(row.id),
     sequence: Number(row.sequence ?? 0),
     category: row.category as PlannedQuestion["category"],
     competencyId,
-    competencyName: competencyId ? competencyNames.get(competencyId) ?? null : null,
+    competencyName,
     difficulty: row.difficulty as PlannedQuestion["difficulty"],
     isFollowUp: Boolean(row.is_follow_up),
     prompt: stringValue(row.prompt),
@@ -376,6 +379,7 @@ export async function createSessionWithPlan(
       sequence: question.sequence,
       category: question.category,
       competency_id: persistableCompetencyId(question.competencyId),
+      competency_name: question.competencyName ?? null,
       difficulty: question.difficulty,
       is_follow_up: question.isFollowUp,
       prompt: question.prompt,
@@ -410,6 +414,7 @@ export async function createSessionWithBlueprint(
         sequence: question.sequence,
         category: question.category,
         competency_id: persistableCompetencyId(question.competencyId),
+        competency_name: question.competencyName ?? null,
         difficulty: question.difficulty,
         prompt: question.prompt,
         objective: question.objective,

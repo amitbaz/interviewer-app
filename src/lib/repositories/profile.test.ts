@@ -5,24 +5,20 @@ vi.mock("server-only", () => ({}));
 import { competencyScopeFor, getProfile, profileScopeRows, saveProfile } from "@/lib/repositories/profile";
 
 describe("competencyScopeFor", () => {
-  it("keeps expertise at full relevance and adds related frontend scope without evidence", () => {
-    expect(competencyScopeFor(["React", "TypeScript"])).toEqual([
+  it("keeps expertise at full relevance and adds generic engineering scope without evidence", () => {
+    expect(competencyScopeFor(["React", "TypeScript"])).toEqual(expect.arrayContaining([
       { name: "React", relevance: 1 },
       { name: "TypeScript", relevance: 1 },
-      { name: "React architecture", relevance: 0.9 },
-      { name: "System design", relevance: 0.7 },
-      { name: "Performance", relevance: 0.7 },
-      { name: "Accessibility", relevance: 0.7 },
-      { name: "Testing", relevance: 0.7 },
-      { name: "Communication", relevance: 0.7 },
-    ]);
+      { name: "Architecture and system design", relevance: 0.9 },
+      { name: "Accessibility and user impact", relevance: 0.9 },
+      { name: "Testing and quality", relevance: 0.7 },
+    ]));
   });
 
-  it("limits related relevance to the named baseline competencies", () => {
+  it("maps backend expertise onto the shared engineering taxonomy", () => {
     expect(competencyScopeFor(["Backend platform"])).toEqual(expect.arrayContaining([
-      { name: "System design", relevance: 0.9 },
-      { name: "Performance", relevance: 0.7 },
-      { name: "Communication", relevance: 0.7 },
+      { name: "Architecture and system design", relevance: 0.9 },
+      { name: "Debugging and reliability", relevance: 0.9 },
     ]));
   });
 
@@ -39,7 +35,7 @@ describe("competencyScopeFor", () => {
 
     expect(rows).toContainEqual(expect.objectContaining({
       user_id: "user-1",
-      name: "React architecture",
+      name: "Architecture and system design",
       relevance: 0.9,
       expected_level: "senior",
     }));
@@ -101,7 +97,7 @@ describe("competencyScopeFor", () => {
     expect(calls[0].payload.p_profile_ready).toBe(true);
     expect(calls[0].payload.p_profile_missing).toEqual([]);
     expect(calls[0].payload.p_scope).toEqual(expect.arrayContaining([
-      expect.objectContaining({ name: "React architecture", relevance: 0.9 }),
+      expect.objectContaining({ name: "Architecture and system design", relevance: 0.9 }),
     ]));
     expect(calls[0].payload.p_evidence).toHaveLength(1);
     expect((calls[0].payload.p_evidence as Array<Record<string, unknown>>)[0]).toMatchObject({

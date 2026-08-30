@@ -24,13 +24,14 @@ export class RepositoryError extends Error {
 }
 
 const baselineCompetencies = [
-  "React architecture",
-  "TypeScript",
-  "System design",
-  "Performance",
-  "Accessibility",
-  "Testing",
-  "Communication",
+  "Coding and implementation",
+  "Debugging and reliability",
+  "Architecture and system design",
+  "Testing and quality",
+  "Performance and scalability",
+  "Accessibility and user impact",
+  "Delivery and trade-offs",
+  "Collaboration and communication",
 ];
 
 function stringArray(value: unknown): string[] {
@@ -127,9 +128,14 @@ function mapProfile(row: Row, competencies: Competency[], source: ProfileSource,
 
 function relatedExpertise(name: string, expertise: string[]): boolean {
   const values = expertise.map((item) => item.toLowerCase());
-  if (name === "React architecture") return values.some((item) => /react|frontend|front-end|ui/.test(item));
-  if (name === "TypeScript") return values.some((item) => /typescript|\bts\b/.test(item));
-  if (name === "System design") return values.some((item) => /system|architecture|distributed|backend|platform/.test(item));
+  if (name === "Coding and implementation") return values.length > 0;
+  if (name === "Debugging and reliability") return values.some((item) => /debug|reliab|observability|incident|production|backend|platform|infra/.test(item));
+  if (name === "Architecture and system design") return values.some((item) => /react|frontend|front-end|ui|backend|platform|infrastructure|distributed|architecture|system|mobile|security|data|api/.test(item));
+  if (name === "Testing and quality") return values.some((item) => /test|quality|qa|e2e|unit|integration|coverage/.test(item));
+  if (name === "Performance and scalability") return values.some((item) => /performance|scale|latency|throughput|optimi[sz]e/.test(item));
+  if (name === "Accessibility and user impact") return values.some((item) => /accessibility|a11y|frontend|front-end|react|typescript|ui|user|mobile|product/.test(item));
+  if (name === "Delivery and trade-offs") return values.some((item) => /delivery|launch|release|migration|trade|ownership|roadmap/.test(item));
+  if (name === "Collaboration and communication") return values.some((item) => /collaboration|communication|leadership|stakeholder|cross-functional|partner/.test(item));
   return false;
 }
 

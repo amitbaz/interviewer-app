@@ -15,6 +15,13 @@ const plannerTimestamp = "1970-01-01T00:00:00.000Z";
 const defaultMaxFollowUps = 3;
 const defaultMaxQuestions = 8;
 
+function roleDescriptor(role: string | null): string {
+  const normalized = role?.trim().toLowerCase();
+  if (!normalized) return "engineering";
+  if (normalized.includes("software engineer")) return "engineering";
+  return normalized.replace(/\b(engineer|developer)\b/g, "").replace(/\s+/g, " ").trim() || "engineering";
+}
+
 function normalizedSeniority(seniority: string): Difficulty {
   const value = seniority.toLowerCase();
   if (/staff|principal|lead|advanced/.test(value)) return "advanced";
@@ -81,7 +88,7 @@ function selectCompetency(
 function promptFor(category: QuestionCategory, competency: Competency | null): string {
   const subject = competency?.name ?? "your recent work";
   const templates: Record<QuestionCategory, string> = {
-    introduction: "Give me a concise introduction to yourself and the work you have owned recently.",
+    introduction: "Give me a concise introduction to yourself and the engineering work you have owned recently.",
     experience: `Tell me about a meaningful project involving ${subject}. What was your role and impact?`,
     technical: `Walk me through a technical decision involving ${subject}. What trade-offs did you consider?`,
     practical: `Describe how you would apply ${subject} to a realistic delivery constraint.`,
@@ -215,6 +222,7 @@ function fallbackQuestionPlan(
   competencies: Competency[],
   seniority: string,
   evidence: EvidenceItem[],
+  role: string | null,
 ): PlannedQuestion {
   const candidates = fallbackCandidateCompetencies(category, competencies);
   const selected = [...candidates].sort((left, right) => {
@@ -232,7 +240,9 @@ function fallbackQuestionPlan(
     competencyName: selected?.name ?? null,
     difficulty: selected ? chooseDifficulty(selected, seniority) : normalizedSeniority(seniority),
     isFollowUp: false,
-    prompt: promptFor(category, selected),
+    prompt: category === "introduction"
+      ? `Give me a concise introduction to yourself and the ${roleDescriptor(role)} work you have owned recently.`
+      : promptFor(category, selected),
     answer: null,
     createdAt: plannerTimestamp,
   };
@@ -247,10 +257,10 @@ function blueprintObjective(category: QuestionCategory, competencyName: string |
   return `Probe collaboration and delivery around ${subject}.`;
 }
 
-function blueprintPrompt(question: PlannedQuestion, item: EvidenceItem | null): string {
+function blueprintPrompt(question: PlannedQuestion, item: EvidenceItem | null, role: string | null): string {
   const subject = item?.projectOrEmployer ?? question.competencyName ?? "your recent engineering work";
   if (question.category === "introduction") {
-    return "Give me a concise introduction to yourself and the frontend work you have owned recently.";
+    return `Give me a concise introduction to yourself and the ${roleDescriptor(role)} work you have owned recently.`;
   }
   if (question.category === "experience") {
     return `Tell me about ${subject}. What was your role, what decision did you own, and what changed because of it?`;
@@ -289,7 +299,7 @@ function defaultBlueprintQuestion(
 ): BlueprintQuestion {
   const evidenceIds = item ? [item.id] : [];
   const competencyName = planned.competencyName;
-  const prompt = blueprintPrompt(planned, item);
+  const prompt = blueprintPrompt(planned, item, null);
   return {
     ...planned,
     prompt,
@@ -337,7 +347,9 @@ export function buildInterviewPlan(
       competencyName: competency?.name ?? null,
       difficulty: competency ? chooseDifficulty(competency, seniority) : normalizedSeniority(seniority),
       isFollowUp: false,
-      prompt: promptFor(category, competency),
+      prompt: category === "introduction"
+        ? "Give me a concise introduction to yourself and the engineering work you have owned recently."
+        : promptFor(category, competency),
       answer: null,
       createdAt: plannerTimestamp,
     };
@@ -405,6 +417,7 @@ export function buildFallbackInterviewBlueprint(
     competencies,
     seniority,
     evidence,
+    profile.role ?? null,
   ));
   return {
     status: "limited-grounding",

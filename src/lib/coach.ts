@@ -85,6 +85,89 @@ const blueprintDraftSchema = z.object({
   questions: z.array(blueprintQuestionDraftSchema).length(5),
 });
 
+function roleDescriptor(role: string | null): string {
+  const normalized = role?.trim().toLowerCase();
+  if (!normalized) return "engineering";
+  if (normalized.includes("software engineer")) return "engineering";
+  return normalized.replace(/\b(engineer|developer)\b/g, "").replace(/\s+/g, " ").trim() || "engineering";
+}
+
+function detectSoftwareEngineeringRole(source: string): string {
+  const hasFrontend = /\b(frontend|front-end|ui|react|next\.?js|typescript|accessibility)\b/i.test(source);
+  const hasBackend = /\b(backend|api|server|service|node\.?js|postgres|sql|microservice|distributed)\b/i.test(source);
+  const hasMobile = /\b(mobile|ios|android|swift|kotlin|react native|flutter)\b/i.test(source);
+  const hasInfrastructure = /\b(infrastructure|platform|devops|kubernetes|terraform|aws|gcp|azure|ci\/cd|observability|sre)\b/i.test(source);
+  const hasSecurity = /\b(security|auth|authentication|authorization|vulnerability|threat|encryption|iam|incident response)\b/i.test(source);
+  const hasData = /\b(data|analytics|pipeline|warehouse|etl|dbt|spark|airflow|snowflake|bigquery)\b/i.test(source);
+  const hasFullStack = /\bfull[- ]stack\b/i.test(source) || (hasFrontend && hasBackend);
+  if (hasFullStack) return "Full-Stack Engineer";
+  if (hasBackend) return "Backend Engineer";
+  if (hasMobile) return "Mobile Engineer";
+  if (hasInfrastructure) return "Infrastructure Engineer";
+  if (hasSecurity) return "Security Engineer";
+  if (hasData) return "Data Engineer";
+  if (hasFrontend) return "Frontend Engineer";
+  return "Software Engineer";
+}
+
+function fallbackExpertise(source: string, role: string): string[] {
+  const text = source.toLowerCase();
+  const expertise = new Set<string>();
+  const techs = [
+    "React",
+    "TypeScript",
+    "JavaScript",
+    "Next.js",
+    "Node.js",
+    "Postgres",
+    "GraphQL",
+    "Redux",
+    "Supabase",
+    "Vercel",
+    "AWS",
+    "Swift",
+    "Kotlin",
+    "iOS",
+    "Android",
+    "Flutter",
+    "Python",
+    "Go",
+    "Java",
+    "Rust",
+    "Docker",
+    "Kubernetes",
+    "Terraform",
+    "Kafka",
+    "Redis",
+    "Spark",
+    "Airflow",
+    "Snowflake",
+    "BigQuery",
+    "Testing",
+    "Accessibility",
+  ];
+  for (const technology of techs) {
+    if (text.includes(technology.toLowerCase())) expertise.add(technology);
+  }
+  if (/\b(reliability|resilience|availability|incident|outage|latency|monitoring|observability)\b/i.test(source)) {
+    expertise.add("Reliability");
+  }
+  if (/\bbackend\b/i.test(role) || /\bfull[- ]stack\b/i.test(role)) {
+    expertise.add("Backend systems");
+    expertise.add("APIs");
+  }
+  if (/\bmobile\b/i.test(role)) expertise.add("Mobile apps");
+  if (/\binfrastructure\b/i.test(role)) {
+    expertise.add("Infrastructure");
+    expertise.add("Reliability");
+  }
+  if (/\bsecurity\b/i.test(role)) expertise.add("Security");
+  if (/\bdata\b/i.test(role)) expertise.add("Data pipelines");
+  if (/\bfrontend\b/i.test(role)) expertise.add("Frontend interfaces");
+  if (expertise.size === 0) expertise.add("Software engineering");
+  return [...expertise].slice(0, 6);
+}
+
 const handsOnStarter = `import { useEffect, useRef, useState } from "react";
 
 type Product = { id: string; name: string; category: string; };
@@ -101,13 +184,13 @@ export function ProductSearch() {
 
 function fallbackProfile(cvText: string, coverLetter: string): ProfileDraft {
   const source = `${cvText} ${coverLetter}`.toLowerCase();
-  const expertise = ["React", "TypeScript", "JavaScript", "Frontend architecture", "Accessibility", "Testing"]
-    .filter((skill) => source.includes(skill.toLowerCase()) || skill === "React" || skill === "TypeScript").slice(0, 6);
+  const role = detectSoftwareEngineeringRole(source);
+  const expertise = fallbackExpertise(source, role);
   return {
-    role: /senior/i.test(source) ? "Senior Frontend Engineer" : "Frontend Engineer",
+    role,
     seniority: /senior|lead|staff/i.test(source) ? "Senior" : "Mid-level",
-    summary: "Frontend engineer with a product-minded approach to reliable, accessible web experiences.",
-    narrative: "A hands-on engineer who combines frontend delivery with thoughtful technical decisions and collaboration.",
+    summary: `${role} with a software-engineering focus on reliable delivery.`,
+    narrative: `A hands-on engineer who combines ${roleDescriptor(role)} delivery with thoughtful technical decisions and collaboration.`,
     expertise, characteristics: ["Product ownership", "Pragmatic problem solving", "Cross-functional collaboration"],
     competencies: expertise.map((name) => ({ name, relevance: 1 })),
   };
@@ -569,6 +652,24 @@ function techMatches(text: string): string[] {
     "Supabase",
     "Vercel",
     "AWS",
+    "Swift",
+    "Kotlin",
+    "iOS",
+    "Android",
+    "Flutter",
+    "Python",
+    "Go",
+    "Java",
+    "Rust",
+    "Docker",
+    "Kubernetes",
+    "Terraform",
+    "Kafka",
+    "Redis",
+    "Spark",
+    "Airflow",
+    "Snowflake",
+    "BigQuery",
     "Testing",
     "Accessibility",
   ];
@@ -800,7 +901,7 @@ export async function extractPdfText(file: File): Promise<string> {
 
 export async function analyzeProfile(cvText: string, coverLetter: string): Promise<ProfileDraft> {
   const result = await modelJson(
-    `You are a career-profile analyst. Extract a concise frontend-engineer profile from this CV and optional cover letter. Never invent facts. Return role, seniority, summary, narrative, expertise, characteristics, and competency names with professional relevance (0 to 1). Do not estimate ability, scores, confidence, or seniority beyond stated evidence.\nCV:\n${cvText}\nCover letter:\n${coverLetter}`,
+    `You are a career-profile analyst. Extract a concise software-engineering profile from this CV and optional cover letter. Identify the most accurate engineering specialization when the evidence supports it, such as frontend, backend, mobile, infrastructure, security, data, or full-stack. Never invent facts. Return role, seniority, summary, narrative, expertise, characteristics, and competency names with professional relevance (0 to 1). Do not estimate ability, scores, confidence, or seniority beyond stated evidence.\nCV:\n${cvText}\nCover letter:\n${coverLetter}`,
     profileSchema,
   );
   return result ?? fallbackProfile(cvText, coverLetter);
@@ -817,11 +918,12 @@ function cvExcerpt(source: ProfileSource, planned: PlannedQuestion): string {
   return selected.slice(0, 420).trimEnd();
 }
 
-function promptForPlan(planned: PlannedQuestion, source: ProfileSource): string {
+function promptForPlan(planned: PlannedQuestion, source: ProfileSource, role: string | null = null): string {
   const competency = planned.competencyName ?? "your recent work";
+  const roleFocus = roleDescriptor(role);
   const excerpt = cvExcerpt(source, planned);
   const templates: Record<PlannedQuestion["category"], string> = {
-    introduction: "Give me a concise introduction to yourself and the frontend work you have owned recently.",
+    introduction: `Give me a concise introduction to yourself and the ${roleFocus} work you have owned recently.`,
     experience: excerpt ? `Your CV mentions “${excerpt}”. Tell me about that experience through the lens of ${competency}: what was your role, decision, and impact?` : `Tell me about a meaningful project involving ${competency}. What was your role and impact?`,
     technical: `Walk me through a technical decision involving ${competency}. What trade-offs did you consider?`,
     practical: `Describe how you would apply ${competency} to a realistic delivery constraint.`,
@@ -899,7 +1001,7 @@ function turnPrompt(
 ): string {
   const nextRubric = nextPlannedQuestion ? groundedQuestion(nextPlannedQuestion, null) : null;
   return [
-    "You are an experienced senior-frontend interviewer.",
+    "You are an experienced senior software-engineering interviewer.",
     "Privately evaluate the latest answer against the exact question rubric.",
     "Return only valid JSON.",
     "Ground the scoring in the exact question objective, expected signals, and the candidate's answer.",
@@ -951,8 +1053,8 @@ async function evaluateTurn(
   const question = shouldFollowUp
     ? ((modelEvaluation?.trusted ? result?.question : null) ?? deterministicFollowUp(answeredQuestion))
     : (nextPlannedQuestion
-      ? ((modelEvaluation?.trusted ? result?.question : null) ?? promptForPlan(nextPlannedQuestion, source ?? { cvText: "", coverLetter: "" }))
-      : null);
+    ? ((modelEvaluation?.trusted ? result?.question : null) ?? promptForPlan(nextPlannedQuestion, source ?? { cvText: "", coverLetter: "" }, profile.role))
+    : null);
   return { evaluation, question, shouldFollowUp };
 }
 
@@ -969,8 +1071,7 @@ export async function evaluateAnswer(
 }
 
 export function initialQuestion(profile: Pick<ProfileDraft, "role">, planned: PlannedQuestion, source: ProfileSource): string {
-  void profile;
-  return promptForPlan(planned, source);
+  return promptForPlan(planned, source, profile.role);
 }
 
 function deterministicFollowUp(planned: PlannedQuestion): string {
@@ -1025,6 +1126,9 @@ export async function nextTurn(
   };
 }
 
+// The hands-on exercise remains intentionally React-specific for now; the
+// broader profile and interview flow are generalized across engineering roles,
+// but this task still uses a single production-minded frontend exercise.
 export function handsOnExercise(profile: Pick<Profile, "role">): HandsOnExercise {
   return { title: "Accessible product search", durationMinutes: 60, briefing: `You are joining a product team building a catalog experience. Implement a production-minded React + TypeScript search component appropriate for a ${profile.role ?? "frontend engineer"}. You may work from the starter and explain decisions as you go.`, requirements: ["Fetch matching products from /api/products?q=… after the user pauses typing.", "Show clear loading, empty, and recoverable error states.", "Prevent stale responses from replacing newer results.", "Make suggestions navigable with the keyboard and understandable to assistive technology.", "Keep component responsibilities and TypeScript models deliberate."], starterCode: handsOnStarter, interviewerOpening: "Start by reading the brief, then tell me which requirements you would clarify before you begin implementing." };
 }

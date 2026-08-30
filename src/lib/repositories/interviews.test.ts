@@ -12,7 +12,7 @@ import {
   recordAnswerAndEvaluation,
   recordConversationTurn,
 } from "@/lib/repositories/interviews";
-import type { Competency, EvidenceItem, InterviewBlueprint, ProfileDraft } from "@/lib/types";
+import type { Competency, EvidenceItem, InterviewBlueprint, PlannedQuestion, ProfileDraft } from "@/lib/types";
 
 const fallbackProfile: ProfileDraft = {
   role: "Frontend Engineer",
@@ -547,6 +547,120 @@ describe("mapSession", () => {
         }),
       }),
     }]);
+  });
+
+  it("persists competency names when blueprint questions do not have UUIDs and hydrates them back", async () => {
+    const calls: Array<{ name: string; payload: unknown }> = [];
+    const sessionRow = {
+      id: "session-1", user_id: "user-1", kind: "conversation", status: "active",
+      started_at: "2026-08-30T10:00:00.000Z", completed_at: null, exercise: {}, result_summary: {},
+      overall_score: null, blueprint_status: "grounded", blueprint_fallback_reason: null,
+      created_at: "2026-08-30T10:00:00.000Z", updated_at: "2026-08-30T10:00:00.000Z",
+    };
+    const emptyQuery = {
+      eq: () => emptyQuery,
+      in: async () => ({ data: [], error: null }),
+      order: async () => ({ data: [], error: null }),
+    };
+    const sessionQuery = {
+      eq: () => sessionQuery,
+      maybeSingle: async () => ({ data: sessionRow, error: null }),
+    };
+    const blueprintQuestion = (sequence: number, category: PlannedQuestion["category"], competencyName: string | null, competencyId: string | null = null) => ({
+      id: `blueprint-question-${sequence}`,
+      sequence,
+      category,
+      competencyId,
+      competencyName,
+      difficulty: "senior" as const,
+      isFollowUp: false,
+      prompt: `Question ${sequence}`,
+      answer: null,
+      createdAt: "2026-08-30T10:00:00.000Z",
+      objective: `Objective ${sequence}`,
+      evidenceIds: [],
+      expectedSignals: ["signal"],
+      missingSignalPrompts: ["Prompt"],
+      followUpLimit: 1,
+      sourceConfidence: 0.8,
+    });
+    const supabase = {
+      rpc: async (name: string, payload: unknown) => {
+        calls.push({ name, payload });
+        return { data: [{ session_id: "session-1" }], error: null };
+      },
+      from: (table: string) => ({ select: () => table === "interview_sessions" ? sessionQuery : emptyQuery }),
+    };
+    const blueprint = {
+      status: "grounded" as const,
+      fallbackReason: null,
+      maxFollowUps: 3,
+      maxQuestions: 8,
+      createdAt: "2026-08-30T10:00:00.000Z",
+      questions: [
+        blueprintQuestion(1, "introduction", null),
+        blueprintQuestion(2, "experience", "Backend systems"),
+        blueprintQuestion(3, "technical", "System design", "system-design"),
+        blueprintQuestion(4, "architecture", "Reliability"),
+        blueprintQuestion(5, "behavioral", "Communication"),
+      ],
+    };
+
+    await createSessionWithBlueprint(supabase as never, "user-1", blueprint);
+
+    expect(calls).toEqual([{
+      name: "create_conversation_session_with_blueprint",
+      payload: expect.objectContaining({
+        p_blueprint: expect.objectContaining({
+          questions: expect.arrayContaining([
+            expect.objectContaining({
+              sequence: 2,
+              competency_id: null,
+              competency_name: "Backend systems",
+            }),
+          ]),
+        }),
+      }),
+    }]);
+
+    const mapped = mapSession(
+      sessionRow,
+      [
+        {
+          id: "question-1",
+          sequence: 1,
+          category: "introduction",
+          competency_id: null,
+          competency_name: null,
+          difficulty: "senior",
+          is_follow_up: false,
+          prompt: "one",
+          answer: null,
+          created_at: "2026-08-30T10:01:00.000Z",
+        },
+        {
+          id: "question-2",
+          sequence: 2,
+          category: "experience",
+          competency_id: null,
+          competency_name: "Backend systems",
+          difficulty: "senior",
+          is_follow_up: false,
+          prompt: "two",
+          answer: "I owned it.",
+          created_at: "2026-08-30T10:02:00.000Z",
+          answered_at: "2026-08-30T10:03:00.000Z",
+        },
+      ],
+      [],
+      [],
+      new Map(),
+    );
+
+    expect(mapped.questions[1]).toMatchObject({
+      competencyId: null,
+      competencyName: "Backend systems",
+    });
   });
 
   it("hydrates persisted hands-on evaluations and interviewer history", () => {
