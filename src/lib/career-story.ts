@@ -28,7 +28,7 @@ function isFilledIn(value: string | null): boolean {
 /**
  * Deterministically scores how much of a career story's FACTUAL coverage is
  * filled in -- never delivery, style, or answer quality (see design section
- * 8, career story completeness). Returns `coveredDimensions / 6`, where a
+ * 10, "Story completeness in Release 2"). Returns `coveredDimensions / 6`, where a
  * dimension counts as covered when at least one of its mapped
  * `CareerStoryDraftFields` holds non-blank text (see `DIMENSIONS`).
  * Pure and synchronous: never calls an LLM, and the same input always

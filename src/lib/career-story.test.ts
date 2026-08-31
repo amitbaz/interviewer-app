@@ -46,7 +46,7 @@ describe("careerStoryCompleteness", () => {
     expect(careerStoryCompleteness({ ...blankDraft, problem: "Problem." })).toBe(1 / 6);
   });
 
-  it("does not double-count when both fields of a paired dimension are filled", () => {
+  it("does not double-count context/problem when both situation and problem are filled", () => {
     expect(careerStoryCompleteness({ ...blankDraft, situation: "Context.", problem: "Problem." })).toBe(1 / 6);
   });
 
@@ -55,9 +55,17 @@ describe("careerStoryCompleteness", () => {
     expect(careerStoryCompleteness({ ...blankDraft, ownership: "I made the call." })).toBe(1 / 6);
   });
 
+  it("does not double-count responsibility/ownership when both responsibility and ownership are filled", () => {
+    expect(careerStoryCompleteness({ ...blankDraft, responsibility: "I owned it.", ownership: "I made the call." })).toBe(1 / 6);
+  });
+
   it("covers the tradeoff/alternative dimension from either field alone", () => {
     expect(careerStoryCompleteness({ ...blankDraft, alternatives: "Considered X." })).toBe(1 / 6);
     expect(careerStoryCompleteness({ ...blankDraft, tradeoffs: "Chose Y over X." })).toBe(1 / 6);
+  });
+
+  it("does not double-count tradeoff/alternative when both tradeoffs and alternatives are filled", () => {
+    expect(careerStoryCompleteness({ ...blankDraft, tradeoffs: "Chose Y over X.", alternatives: "Considered X." })).toBe(1 / 6);
   });
 
   it("requires actions, outcome, and lessons individually -- they have no paired field", () => {
