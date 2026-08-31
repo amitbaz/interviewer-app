@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CareerDashboard, Competency, InterviewSession, PlannedQuestion, PracticeRecommendation, Profile, ProgressSnapshot } from "@/lib/types";
+import type { CareerDashboard, Competency, InterviewSession, Opportunity, PlannedQuestion, PracticeRecommendation, Profile, ProgressSnapshot } from "@/lib/types";
 import App from "@/app/page";
 import { ResultsFeedbackCards } from "@/app/results-feedback-cards";
 
@@ -174,6 +174,32 @@ function session(overrides: Partial<InterviewSession> = {}): InterviewSession {
     updatedAt: "2026-08-29T11:00:00.000Z",
     practicePlanId: null,
     opportunityId: null,
+    ...overrides,
+  };
+}
+
+function opportunity(overrides: Partial<Opportunity> = {}): Opportunity {
+  return {
+    id: "opp-1",
+    userId: "user-1",
+    company: "Northwind",
+    role: "Staff Engineer",
+    status: "considering",
+    location: null,
+    remote: null,
+    jobUrl: null,
+    jobDescription: null,
+    sourceLabel: null,
+    sourceSystem: null,
+    sourceExternalId: null,
+    matchScore: null,
+    strengths: [],
+    gaps: [],
+    notes: null,
+    appliedAt: null,
+    nextInterviewAt: null,
+    createdAt: "2026-08-29T10:00:00.000Z",
+    updatedAt: "2026-08-29T10:00:00.000Z",
     ...overrides,
   };
 }
@@ -647,6 +673,54 @@ describe("App home view", () => {
     fireEvent.click(screen.getByRole("button", { name: buttonName }));
 
     await waitFor(() => expect(screen.queryByRole("button", { name: "Start recommended practice" })).not.toBeInTheDocument());
+  });
+});
+
+describe("App applications view", () => {
+  /**
+   * Drives an Applications mutation through the *real* shell (not
+   * ApplicationsView's own isolated tests, which mock every callback) so
+   * `handleCreateOpportunity`'s `setBusy`/`setError`/`refreshDashboard()`/
+   * rethrow wiring in `relay-shell.tsx` is actually exercised. The dashboard
+   * route's handler tracks its own call count and only starts returning the
+   * created opportunity from its second response onward, so the new
+   * opportunity appearing in the list can only mean the shell re-fetched the
+   * dashboard after the mutation succeeded -- not that it read the create
+   * response directly (the view never does that; it navigates by prop).
+   */
+  it("creates an opportunity through the real shell and refreshes the dashboard so it appears in the list", async () => {
+    const created = opportunity({ id: "opp-new", company: "Globex", role: "Principal Engineer" });
+    let dashboardCalls = 0;
+    mockRoutes({
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/career/dashboard": () => {
+        dashboardCalls += 1;
+        return { body: dashboardPayload(profile(), [], emptyProgress(), { opportunities: dashboardCalls > 1 ? [created] : [] }) };
+      },
+      "/api/opportunities": (init) => {
+        const body = requestBody(init);
+        if (body.action === "create") return { body: { opportunity: created } };
+        throw new Error(`Unexpected /api/opportunities action in this test: ${body.action}`);
+      },
+      "/api/opportunities?opportunityId=opp-new": () => ({ body: { events: [] } }),
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Ready when you are." });
+    fireEvent.click(screen.getByRole("button", { name: "applications" }));
+    await screen.findByRole("heading", { name: "Applications" });
+
+    expect(dashboardCalls).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "Add application" }));
+    fireEvent.change(screen.getByLabelText("Company"), { target: { value: "Globex" } });
+    fireEvent.change(screen.getByLabelText("Role"), { target: { value: "Principal Engineer" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save application" }));
+
+    // The detail heading (not the list row, which would also match "Globex")
+    // confirms the freshly created opportunity was auto-selected from the
+    // refreshed dashboard's own data.
+    expect(await screen.findByRole("heading", { name: "Globex" })).toBeInTheDocument();
+    expect(dashboardCalls).toBe(2);
   });
 });
 

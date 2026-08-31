@@ -6,7 +6,7 @@ import type {
   OpportunityTransitionOptions,
   ScheduleOpportunityInterviewOptions,
 } from "@/app/api-client";
-import type { Opportunity, OpportunityEvent, OpportunityStatus, UpdateOpportunityDetailsInput } from "@/lib/types";
+import type { Opportunity, OpportunityEvent, OpportunityStatus, PracticePlan, UpdateOpportunityDetailsInput } from "@/lib/types";
 
 /**
  * Props for {@link ApplicationsView}. Follows the shell's mutation-callback
@@ -28,6 +28,14 @@ export type ApplicationsViewProps = {
   onAddNote: (opportunityId: string, note: string) => Promise<OpportunityEvent>;
   /** Loads one opportunity's real, persisted, append-only event history (its timeline). Never fabricated client-side. */
   onLoadEvents: (opportunityId: string) => Promise<OpportunityEvent[]>;
+  /**
+   * The dashboard's already-loaded `CareerDashboard.recentPracticePlans` --
+   * no new fetch. Capped at 20 (Task 4's bounded listing), most recent
+   * first, so an opportunity's older plans may not appear here; the "Recent
+   * practice" heading and copy say so explicitly rather than implying a
+   * complete history.
+   */
+  recentPracticePlans: PracticePlan[];
 };
 
 /** Lifecycle states whose outcome is settled -- shown only under the "Terminal" filter. */
@@ -93,7 +101,7 @@ const secondaryButtonClass = "rounded-full border border-[var(--line)] px-4 py-2
  * `occurredAt` (when the note was recorded) are rendered as distinct facts
  * in the timeline -- never conflated, per the release's binding UX ruling.
  */
-export function ApplicationsView({ opportunities, busy, onCreate, onUpdate, onTransition, onScheduleInterview, onAddNote, onLoadEvents }: ApplicationsViewProps) {
+export function ApplicationsView({ opportunities, busy, onCreate, onUpdate, onTransition, onScheduleInterview, onAddNote, onLoadEvents, recentPracticePlans }: ApplicationsViewProps) {
   const [filter, setFilter] = useState<ListFilter>("active");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -115,6 +123,13 @@ export function ApplicationsView({ opportunities, busy, onCreate, onUpdate, onTr
     [opportunities, filter],
   );
   const selected = selectedId ? opportunities.find((item) => item.id === selectedId) ?? null : null;
+  // `recentPracticePlans` is already the dashboard's bounded (most-recent-20)
+  // list -- no new fetch. Matched by the plan's own `opportunities` links,
+  // never by any other field, so a plan never appears under an opportunity
+  // it isn't actually linked to.
+  const associatedPlans = selected
+    ? recentPracticePlans.filter((plan) => plan.opportunities.some((link) => link.opportunityId === selected.id))
+    : [];
 
   // Loads the real, persisted event history whenever the selected opportunity
   // changes -- never fabricated client-side (see `onLoadEvents` doc comment).
@@ -365,6 +380,27 @@ export function ApplicationsView({ opportunities, busy, onCreate, onUpdate, onTr
                     </label>
                     <button disabled={busy || !noteText.trim()} className={secondaryButtonClass}>Save note</button>
                   </form>
+                </section>
+
+                <section aria-label="Recent practice" className="mt-6 border-t border-[var(--line)] pt-5">
+                  <h3 className="text-sm font-semibold uppercase tracking-[.1em] text-[var(--ink-muted)]">Recent practice</h3>
+                  <p className="mt-1 text-xs leading-5 text-[var(--ink-muted)]">
+                    Showing your most recent practice history -- older sessions may not appear here.
+                  </p>
+                  {associatedPlans.length === 0 ? (
+                    <p className="mt-3 text-sm text-[var(--ink-muted)]">No recent practice sessions are linked to this application yet.</p>
+                  ) : (
+                    <ul className="mt-3 space-y-2 text-sm leading-6">
+                      {associatedPlans.map((plan) => (
+                        <li key={plan.id} className="rounded-2xl bg-[#f3f5ef] p-3">
+                          <p className="font-semibold">{plan.primaryFocus}</p>
+                          <p className="text-xs uppercase tracking-[.1em] text-[var(--ink-muted)]">
+                            {plan.status}{plan.estimatedMinutes ? ` · ${plan.estimatedMinutes} min` : ""}
+                          </p>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </section>
               </>
             ) : editDraft && (

@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi, type Mock } from "vitest";
-import type { Opportunity, OpportunityEvent } from "@/lib/types";
+import type { Opportunity, OpportunityEvent, PracticePlan } from "@/lib/types";
 import { ApplicationsView } from "@/app/views/applications-view";
 
 type ApplicationsViewMocks = {
@@ -54,7 +54,33 @@ function opportunityEvent(overrides: Partial<OpportunityEvent> = {}): Opportunit
   };
 }
 
-function renderApplications(opportunities: Opportunity[], overrides: Partial<ApplicationsViewMocks> = {}) {
+function practicePlan(overrides: Partial<PracticePlan> = {}): PracticePlan {
+  return {
+    id: "plan-1",
+    userId: "user-1",
+    status: "completed",
+    primaryFocus: "Role prep for Northwind",
+    secondaryFocus: null,
+    rationale: "Your Staff Engineer interview at Northwind is coming up.",
+    format: "role_prep",
+    estimatedMinutes: 18,
+    successCriteria: [],
+    priorityScore: null,
+    priorityFactors: {},
+    generationError: null,
+    completedAt: "2026-08-20T10:00:00.000Z",
+    createdAt: "2026-08-18T10:00:00.000Z",
+    updatedAt: "2026-08-20T10:00:00.000Z",
+    opportunities: [{ userId: "user-1", practicePlanId: "plan-1", opportunityId: "opp-1", relevance: "primary", createdAt: "2026-08-18T10:00:00.000Z" }],
+    ...overrides,
+  };
+}
+
+function renderApplications(
+  opportunities: Opportunity[],
+  overrides: Partial<ApplicationsViewMocks> = {},
+  recentPracticePlans: PracticePlan[] = [],
+) {
   const defaults: ApplicationsViewMocks = {
     onCreate: vi.fn().mockResolvedValue(opportunity()),
     onUpdate: vi.fn().mockResolvedValue(opportunity()),
@@ -64,11 +90,11 @@ function renderApplications(opportunities: Opportunity[], overrides: Partial<App
     onLoadEvents: vi.fn().mockResolvedValue([]),
   };
   const effective = { ...defaults, ...overrides };
-  const view = render(<ApplicationsView opportunities={opportunities} busy={false} {...effective} />);
+  const view = render(<ApplicationsView opportunities={opportunities} busy={false} recentPracticePlans={recentPracticePlans} {...effective} />);
   return {
     ...effective,
     rerenderWithOpportunities: (next: Opportunity[]) =>
-      view.rerender(<ApplicationsView opportunities={next} busy={false} {...effective} />),
+      view.rerender(<ApplicationsView opportunities={next} busy={false} recentPracticePlans={recentPracticePlans} {...effective} />),
   };
 }
 
@@ -185,10 +211,17 @@ describe("ApplicationsView", () => {
   });
 
   it("shows an honest empty state in the timeline when no history has been recorded", async () => {
-    renderApplications([opportunity()], { onLoadEvents: vi.fn().mockResolvedValue([]) });
+    const onLoadEvents = vi.fn().mockResolvedValue([]);
+    renderApplications([opportunity()], { onLoadEvents });
 
     fireEvent.click(screen.getByRole("button", { name: /Northwind.*Staff Engineer/ }));
 
+    // `events` also starts as `[]` before the fetch resolves, so without this
+    // wait the empty-state text would already be present on first render --
+    // a component that never called `onLoadEvents` at all would pass this
+    // test unchanged. Waiting on the call proves the empty state reflects a
+    // real (empty) server response, not just the pre-fetch initial state.
+    await waitFor(() => expect(onLoadEvents).toHaveBeenCalledWith("opp-1"));
     const timeline = screen.getByRole("region", { name: "Timeline" });
     expect(await within(timeline).findByText(/no history/i)).toBeInTheDocument();
   });
@@ -239,5 +272,42 @@ describe("ApplicationsView", () => {
     renderApplications([]);
 
     expect(screen.getByText(/no applications/i)).toBeInTheDocument();
+  });
+
+  it("shows recent practice sessions associated with the selected opportunity", () => {
+    const plan = practicePlan({ primaryFocus: "Role prep for Northwind" });
+    renderApplications([opportunity()], {}, [plan]);
+
+    fireEvent.click(screen.getByRole("button", { name: /Northwind.*Staff Engineer/ }));
+
+    const practiceSection = screen.getByRole("region", { name: "Recent practice" });
+    expect(within(practiceSection).getByText("Role prep for Northwind")).toBeInTheDocument();
+  });
+
+  it("only shows plans linked to the selected opportunity, not another opportunity's plans", () => {
+    const planForOther = practicePlan({
+      id: "plan-other",
+      primaryFocus: "Role prep for Acme",
+      opportunities: [{ userId: "user-1", practicePlanId: "plan-other", opportunityId: "opp-other", relevance: "primary", createdAt: "2026-08-18T10:00:00.000Z" }],
+    });
+    const planForSelected = practicePlan({ id: "plan-selected", primaryFocus: "Role prep for Northwind" });
+    renderApplications([opportunity()], {}, [planForOther, planForSelected]);
+
+    fireEvent.click(screen.getByRole("button", { name: /Northwind.*Staff Engineer/ }));
+
+    const practiceSection = screen.getByRole("region", { name: "Recent practice" });
+    expect(within(practiceSection).getByText("Role prep for Northwind")).toBeInTheDocument();
+    // A filter bug (e.g. showing every plan, or matching on something other
+    // than the opportunity link) would leak the other opportunity's plan in here.
+    expect(within(practiceSection).queryByText("Role prep for Acme")).not.toBeInTheDocument();
+  });
+
+  it("shows an honest empty state, labeled as recent rather than complete, when no practice is linked", () => {
+    renderApplications([opportunity()], {}, []);
+
+    fireEvent.click(screen.getByRole("button", { name: /Northwind.*Staff Engineer/ }));
+
+    const practiceSection = screen.getByRole("region", { name: "Recent practice" });
+    expect(within(practiceSection).getByText(/no recent practice/i)).toBeInTheDocument();
   });
 });
