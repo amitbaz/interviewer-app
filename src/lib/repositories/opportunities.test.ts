@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 
 import {
+  addOpportunityNote,
   createOpportunity,
   getOpportunity,
   listOpportunities,
@@ -318,5 +319,72 @@ describe("opportunities repository", () => {
     // Must be scoped by BOTH the requesting user id and the opportunity id --
     // an `.eq` stub that swallows its arguments could never fail this.
     expect(capture.eq).toEqual([["user_id", "user-1"], ["opportunity_id", "opp-1"]]);
+  });
+});
+
+describe("addOpportunityNote", () => {
+  /** Captures the single row handed to `.insert(...)` on the events table. */
+  function insertClient(result: RpcResult = { data: eventRow({ event_type: "note", note: "Recruiter call went well" }), error: null }) {
+    let insertedRow: Row | undefined;
+    const insert = vi.fn((row: Row) => {
+      insertedRow = row;
+      return builder;
+    });
+    const builder: Record<string, unknown> = {
+      insert,
+      select: () => builder,
+      maybeSingle: async () => result,
+    };
+    const from = vi.fn(() => builder);
+    return { from, insert, supabase: { rpc: vi.fn(), from }, inserted: () => insertedRow };
+  }
+
+  it("creates exactly one owned append-only note event", async () => {
+    const { from, insert, supabase, inserted } = insertClient();
+
+    const event = await addOpportunityNote(supabase as never, "user-1", "opp-1", "Recruiter call went well");
+
+    expect(from).toHaveBeenCalledWith("opportunity_events");
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(inserted()).toEqual({
+      user_id: "user-1",
+      opportunity_id: "opp-1",
+      event_type: "note",
+      note: "Recruiter call went well",
+      metadata: {},
+    });
+    expect(event).toEqual(expect.objectContaining({ eventType: "note", note: "Recruiter call went well" }));
+  });
+
+  it("trims the stored note", async () => {
+    const { supabase, inserted } = insertClient();
+
+    await addOpportunityNote(supabase as never, "user-1", "opp-1", "  Recruiter call went well  ");
+
+    expect(inserted()).toEqual(expect.objectContaining({ note: "Recruiter call went well" }));
+  });
+
+  it("rejects a blank note without touching the database", async () => {
+    const { from, supabase } = insertClient();
+
+    await expect(addOpportunityNote(supabase as never, "user-1", "opp-1", "   "))
+      .rejects.toBeInstanceOf(RepositoryError);
+    expect(from).not.toHaveBeenCalled();
+  });
+
+  it("never writes a lifecycle status onto the note event", async () => {
+    const { supabase, inserted } = insertClient();
+
+    await addOpportunityNote(supabase as never, "user-1", "opp-1", "Recruiter call went well");
+
+    expect(inserted()).not.toHaveProperty("from_status");
+    expect(inserted()).not.toHaveProperty("to_status");
+  });
+
+  it("fails with a repository error when the insert returns no owned row", async () => {
+    const { supabase } = insertClient({ data: null, error: null });
+
+    await expect(addOpportunityNote(supabase as never, "user-1", "opp-1", "Recruiter call went well"))
+      .rejects.toMatchObject({ code: "NO_OWNED_ROW" });
   });
 });
