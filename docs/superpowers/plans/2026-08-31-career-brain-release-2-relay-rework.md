@@ -4,9 +4,9 @@
 
 **Goal:** Recenter Relay around an explainable recommended-practice command center, manual application/story/coach-memory management, and plan-driven short practice sessions while preserving the existing generic interview flow and leaving the job-hunter untouched.
 
-**Architecture:** Keep the existing single authenticated client shell for Release 2, but split its large `page.tsx` into focused views and typed API calls. Add a deterministic baseline recommendation service and server-side Career Brain APIs. Add separate transactional plan-driven conversation and hands-on session starts rather than loosening the existing generic interview contracts.
+**Architecture:** Keep the existing authenticated client shell, but split the large `page.tsx` into focused views and typed API calls. Add a deterministic baseline recommendation service and server-side Career Brain read/write APIs. Add separate transactional plan-driven conversation and hands-on session starts instead of weakening the existing generic interview contracts.
 
-**Tech Stack:** Next.js 16.3.3, React 19.2.8, TypeScript 5, Tailwind CSS 4, Supabase Postgres/Auth/RLS, `@supabase/supabase-js` 2.x, Vitest 4.1.11, existing Gemini provider/coach code.
+**Tech Stack:** Next.js 16.3.3, React 19.2.8, TypeScript 5, Tailwind CSS 4, Supabase Postgres/Auth/RLS, `@supabase/supabase-js` 2.x, Vitest 4.1.11, existing Gemini provider and coach code.
 
 **Spec:** `docs/superpowers/specs/2026-08-31-career-brain-release-2-relay-rework-design.md`
 
@@ -14,16 +14,17 @@
 
 - Home's primary action is `Start recommended practice`.
 - Recommendation selection is deterministic and never calls an LLM.
-- Release 2 does not automatically create/reconcile coach observations.
+- Release 2 does not automatically create or reconcile coach observations.
 - Existing generic conversation keeps the exact five-question backbone.
 - Plan-driven conversation supports 1–5 base questions.
+- A planned conversation cannot be explicitly completed while any currently persisted question, including a follow-up, is unanswered.
 - Candidate facts remain grounded in candidate evidence; job descriptions shape questions but do not prove candidate experience.
 - All Career Brain APIs use `requireUser()` and server-only repositories; browser code never supplies a trusted `userId`.
 - Started/completed plan context is immutable in normal UI flows.
 - Interview evidence survives post-session practice-plan bookkeeping failures.
-- No Google Sheet sync/import and no job-hunter changes.
-- Follow existing mobile-first View Transition/animation rules.
-- Red → green → refactor; scoped commit after every task.
+- No Google Sheet synchronization/import and no job-hunter changes.
+- Follow existing mobile-first View Transition and animation rules.
+- Follow red → green → refactor and make one scoped commit per task.
 - Verify migrations on disposable/development Supabase before production.
 
 ## File Structure
@@ -93,7 +94,7 @@ src/app/page.test.tsx
 README.md
 ```
 
-Existing Profile/Progress/Interview/Results JSX may remain in `relay-shell.tsx` if extracting it is unrelated churn. New Release 2 views must not be added to the old `page.tsx` monolith.
+Existing Profile, Progress, Interview, and Results JSX may remain in `relay-shell.tsx` if extracting it is unrelated churn. New Release 2 views must not be added to the old `page.tsx` monolith.
 
 ---
 
@@ -148,6 +149,8 @@ export function recommendPractice(input: PracticeRecommendationInput): PracticeR
 
 - [ ] **Step 1: Write RED precedence tests**
 
+Add fixed fixtures and cover all required precedence branches. Include these assertions:
+
 ```ts
 it("prioritizes an interview in three days over a generic weakness", () => {
   const result = recommendPractice({
@@ -163,16 +166,21 @@ it("prioritizes an interview in three days over a generic weakness", () => {
   expect(result).toMatchObject({ format: "role_prep", primaryOpportunityId: opportunity.id });
 });
 
-it("uses corrected observation text and ignores dismissed observations", () => {
-  const corrected = { ...observation, reviewState: "corrected" as const, importance: .9, userCorrection: "Make ownership explicit." };
-  expect(recommendPractice({ ...baseInput, observations: [corrected] }).primaryFocus)
-    .toContain("Make ownership explicit");
-  expect(recommendPractice({ ...baseInput, observations: [{ ...corrected, reviewState: "dismissed" as const }] }).signals)
-    .not.toEqual(expect.arrayContaining([expect.objectContaining({ kind: "reviewed_observation" })]));
+it("uses corrected observation text", () => {
+  const result = recommendPractice({
+    ...baseInput,
+    observations: [{
+      ...observation,
+      reviewState: "corrected",
+      importance: 0.9,
+      userCorrection: "Make ownership explicit.",
+    }],
+  });
+  expect(result.primaryFocus).toContain("Make ownership explicit");
 });
 ```
 
-Add all spec cases: upcoming interview, interviewing, reviewed observation, story-bank gap, progress weakness, applied opportunity, first practice, fallback, terminal-opportunity exclusion, unreviewed-observation exclusion.
+Also test: any interviewing opportunity; confirmed high-importance observation; dismissed observation ignored; unreviewed observation ignored; applied/interviewing plus zero confirmed stories; weakest/recurring progress signal; applied opportunity; first-practice fallback; full-simulation fallback; offer/rejected/withdrawn/closed do not create urgency.
 
 - [ ] **Step 2: Run RED**
 
@@ -180,11 +188,15 @@ Add all spec cases: upcoming interview, interviewing, reviewed observation, stor
 npm test -- src/lib/practice-recommendation.test.ts
 ```
 
+Expected: FAIL because the recommendation types/function do not exist.
+
 - [ ] **Step 3: Add the DTO types above to `types.ts`**
 
 Keep them non-persisted read models.
 
 - [ ] **Step 4: Implement the pure selector**
+
+Use explicit helpers:
 
 ```ts
 const terminalStatuses = new Set<OpportunityStatus>(["offer", "rejected", "withdrawn", "closed"]);
@@ -201,7 +213,7 @@ Apply this exact precedence:
 ```text
 1 future interview within 7 days
 2 any interviewing opportunity
-3 confirmed/corrected observation with importance >= .6
+3 confirmed/corrected observation with importance >= 0.6
 4 applied/interviewing opportunity + zero confirmed stories
 5 weakest/recurring ProgressSnapshot signal
 6 applied opportunity
@@ -209,13 +221,15 @@ Apply this exact precedence:
 8 full_simulation fallback
 ```
 
-Use explicit `now`, deterministic sorting, no randomness.
+Use explicit `now`, deterministic sorting, and no randomness.
 
 - [ ] **Step 5: Run GREEN**
 
 ```bash
 npm test -- src/lib/practice-recommendation.test.ts
 ```
+
+Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
@@ -259,7 +273,7 @@ export async function createHandsOnPracticeSession(
 ): Promise<InterviewSession>;
 ```
 
-Keep `createSessionWithBlueprint(...)` and `createHandsOnSession(...)` unchanged for legacy/manual flows.
+Keep `createSessionWithBlueprint(...)` and `createHandsOnSession(...)` unchanged for generic/manual flows.
 
 - [ ] **Step 1: Write RED repository tests**
 
@@ -269,22 +283,26 @@ it("accepts three planned base questions but generic backbone still rejects them
   expect(() => assertConversationPlan(practiceBlueprint(3).questions)).toThrow();
 });
 
-it("calls the planned conversation RPC with context", async () => {
+it("calls planned conversation RPC with context", async () => {
   await createSessionWithPracticeBlueprint(supabase as never, "user-1", practiceBlueprint(3), {
-    practicePlanId: "plan-1", opportunityId: "opp-1",
+    practicePlanId: "plan-1",
+    opportunityId: "opp-1",
   });
-  expect(rpc).toHaveBeenCalledWith("create_planned_conversation_session_with_blueprint", expect.objectContaining({
-    p_practice_plan_id: "plan-1", p_opportunity_id: "opp-1",
-  }));
+  expect(rpc).toHaveBeenCalledWith(
+    "create_planned_conversation_session_with_blueprint",
+    expect.objectContaining({ p_practice_plan_id: "plan-1", p_opportunity_id: "opp-1" }),
+  );
 });
 
-it("calls the planned hands-on RPC with context", async () => {
+it("calls planned hands-on RPC with context", async () => {
   await createHandsOnPracticeSession(supabase as never, "user-1", exercise, {
-    practicePlanId: "plan-1", opportunityId: null,
+    practicePlanId: "plan-1",
+    opportunityId: null,
   });
-  expect(rpc).toHaveBeenCalledWith("start_hands_on_practice_session", expect.objectContaining({
-    p_practice_plan_id: "plan-1", p_exercise: exercise,
-  }));
+  expect(rpc).toHaveBeenCalledWith(
+    "start_hands_on_practice_session",
+    expect.objectContaining({ p_practice_plan_id: "plan-1", p_exercise: exercise }),
+  );
 });
 ```
 
@@ -294,9 +312,11 @@ it("calls the planned hands-on RPC with context", async () => {
 npm test -- src/lib/repositories/interviews.test.ts
 ```
 
+Expected: FAIL on the new interfaces.
+
 - [ ] **Step 3: Update blueprint documentation and add `PracticeSessionContext`**
 
-`InterviewBlueprint` is reusable: generic interviews use five base questions; planned practice may use 1–5. Do not rename it.
+Document `InterviewBlueprint` as reusable: generic interviews use five base questions, planned practice may use 1–5. Do not rename it.
 
 - [ ] **Step 4: Implement TypeScript validation/wrappers**
 
@@ -320,6 +340,7 @@ Widen only the session metadata constraint:
 ```sql
 alter table public.interview_sessions
   drop constraint if exists interview_sessions_blueprint_max_questions_check;
+
 alter table public.interview_sessions
   add constraint interview_sessions_blueprint_max_questions_check
   check (blueprint_max_questions between 1 and 8);
@@ -327,46 +348,24 @@ alter table public.interview_sessions
 
 Do not modify `create_conversation_session_with_blueprint`; it must still enforce its exact five-question backbone.
 
-Create:
+Create `create_planned_conversation_session_with_blueprint(p_blueprint jsonb, p_practice_plan_id uuid, p_opportunity_id uuid default null)` and `start_hands_on_practice_session(p_practice_plan_id uuid, p_opportunity_id uuid, p_exercise jsonb)`.
 
-```sql
-create_planned_conversation_session_with_blueprint(
-  p_blueprint jsonb,
-  p_practice_plan_id uuid,
-  p_opportunity_id uuid default null
-)
-```
-
-and:
-
-```sql
-start_hands_on_practice_session(
-  p_practice_plan_id uuid,
-  p_opportunity_id uuid,
-  p_exercise jsonb
-)
-```
-
-Both are `security invoker`, derive `auth.uid()`, lock the owned `ready` plan `for update`, verify optional opportunity ownership and plan linkage/primary consistency, create the session with `practice_plan_id` + `opportunity_id`, mark the plan `started` in the same transaction, and return `session_id`.
-
-Conversation-specific validation:
+Both functions must:
 
 ```text
-question array 1–5
-contiguous sequences 1..N
-valid existing categories/difficulties
-blueprint_max_questions 1..8
+security invoker
+derive auth.uid()
+lock the owned ready PracticePlan FOR UPDATE
+verify optional opportunity ownership
+verify the opportunity is linked to the plan
+honor any primary opportunity designation
+create the session with practice_plan_id and opportunity_id
+set the plan status to started in the same transaction
+return session_id
+reject a second start of the same plan
 ```
 
-Hands-on-specific validation:
-
-```text
-p_exercise is a JSON object
-session kind = hands-on
-exercise stored unchanged
-```
-
-A second start against an already-started plan must fail.
+Conversation RPC additionally validates 1–5 contiguous base questions, existing category/difficulty constraints, and `blueprint_max_questions` 1–8. Hands-on RPC requires a JSON object exercise and stores it unchanged on a `hands-on` session.
 
 - [ ] **Step 6: Verify SQL invariants on disposable Supabase**
 
@@ -374,13 +373,15 @@ A second start against an already-started plan must fail.
 supabase db push
 ```
 
-Verify old generic RPC still rejects three questions; new conversation RPC accepts 1/3/5 and rejects 0/6; both new RPCs reject cross-user/mismatched context; both atomically set session context + plan status; both reject repeat start.
+Verify: old generic RPC rejects three questions; new conversation RPC accepts 1/3/5 and rejects 0/6; both new RPCs reject cross-user/mismatched context; both atomically set session context and plan status; repeat start fails.
 
 - [ ] **Step 7: Run GREEN**
 
 ```bash
 npm test -- src/lib/repositories/interviews.test.ts
 ```
+
+Expected: PASS.
 
 - [ ] **Step 8: Commit**
 
@@ -420,12 +421,16 @@ export async function generatePracticeBlueprint(
 
 ```ts
 it.each([
-  ["targeted_drill", 3], ["story_work", 3], ["self_presentation", 2],
-  ["behavioral", 3], ["technical_communication", 3], ["role_prep", 4],
+  ["targeted_drill", 3],
+  ["story_work", 3],
+  ["self_presentation", 2],
+  ["behavioral", 3],
+  ["technical_communication", 3],
+  ["role_prep", 4],
   ["full_simulation", 5],
 ] as const)("generates %s with %d base questions", async (format, count) => {
-  expect((await generatePracticeBlueprint(profile, evidence, { ...plan, format }, context)).questions)
-    .toHaveLength(count);
+  const blueprint = await generatePracticeBlueprint(profile, evidence, { ...plan, format }, context);
+  expect(blueprint.questions).toHaveLength(count);
 });
 ```
 
@@ -455,30 +460,27 @@ function baseQuestionCountFor(format: PracticeFormat): number {
 
 - [ ] **Step 4: Implement grounded practice generation**
 
-Reuse existing structured provider conventions. Include:
+Reuse existing structured provider conventions. Include plan focus, format, success criteria, exact question count, primary/supporting job context, reviewed effective observations, confirmed stories, and candidate profile evidence.
+
+The prompt contract must state:
 
 ```text
-plan primary/secondary focus
-format
-success criteria
-exact base question count
-primary/supporting job context
-reviewed effective observations
-confirmed stories
-candidate profile evidence
+Job requirements are targets to probe, not candidate evidence.
+Candidate factual claims must be grounded in supplied evidence or confirmed story facts.
+Do not invent company interview-process facts.
 ```
 
-Prompt contract explicitly states job requirements are targets to probe, not candidate evidence, and company interview-process facts must not be invented.
+- [ ] **Step 5: Test `nextTurn` with a 2- and 3-question blueprint**
 
-- [ ] **Step 5: Test `nextTurn` with a 2/3-question blueprint**
-
-Remove only any hidden fixed-five assumption; preserve evaluation/follow-up rubric behavior.
+Remove only any hidden fixed-five assumption; preserve evaluation and follow-up rubric behavior.
 
 - [ ] **Step 6: Run GREEN**
 
 ```bash
 npm test -- src/lib/coach.test.ts
 ```
+
+Expected: PASS.
 
 - [ ] **Step 7: Commit**
 
@@ -537,11 +539,18 @@ export async function completeLinkedPracticePlanBestEffort(
 it("recomputes recommended practice on the server", async () => {
   await startRecommendedPractice(supabase as never, "user-1", now);
   expect(recommendPracticeMock).toHaveBeenCalled();
-  expect(createPracticePlanMock).toHaveBeenCalledWith(expect.anything(), "user-1", expect.objectContaining({ status: "ready" }));
+  expect(createPracticePlanMock).toHaveBeenCalledWith(
+    expect.anything(),
+    "user-1",
+    expect.objectContaining({ status: "ready" }),
+  );
 });
 
 it("dispatches hands-on through the transactional planned hands-on wrapper", async () => {
-  await startManualPractice(supabase as never, "user-1", { format: "hands_on", primaryFocus: "React implementation" });
+  await startManualPractice(supabase as never, "user-1", {
+    format: "hands_on",
+    primaryFocus: "React implementation",
+  });
   expect(createHandsOnPracticeSessionMock).toHaveBeenCalled();
 });
 
@@ -558,7 +567,7 @@ it("keeps interview completion successful when plan completion fails", async () 
 npm test -- src/lib/practice-service.test.ts
 ```
 
-- [ ] **Step 3: Implement context loading + ready plan creation**
+- [ ] **Step 3: Implement context loading and ready plan creation**
 
 Load profile, sessions/progress, opportunities, observations, stories, and recent plans. `startRecommendedPractice` calls `recommendPractice`; manual start validates user input. Both create one `ready` `PracticePlan` and set primary/supporting opportunity links before session creation.
 
@@ -569,11 +578,11 @@ non-hands-on -> generatePracticeBlueprint -> createSessionWithPracticeBlueprint
 hands-on     -> handsOnExercise(profile) -> createHandsOnPracticeSession
 ```
 
-The transactional session RPC changes the plan to `started`. Reload plan and return `{ plan, session }`.
+The transactional session RPC changes the plan to `started`. Reload the plan and return `{ plan, session }`.
 
 - [ ] **Step 5: Mark pre-session failures safely**
 
-If a ready plan exists but generation/session start fails before a session is created:
+If a ready plan exists but generation/session start fails before a session exists:
 
 ```ts
 await updatePracticePlan(supabase, userId, plan.id, {
@@ -585,7 +594,7 @@ throw error;
 
 - [ ] **Step 6: Make linked-plan completion best-effort**
 
-After current interview completion successfully saves the session/evidence:
+After current interview completion has successfully saved the completed session/evidence, call:
 
 ```ts
 const { warning } = await completeLinkedPracticePlanBestEffort(supabase, user.id, completed);
@@ -595,21 +604,22 @@ Return HTTP 200 with the completed session even if this produces `practicePlanWa
 
 - [ ] **Step 7: Make explicit conversation completion plan-aware**
 
+Use exactly this rule:
+
 ```ts
-function canExplicitlyCompleteConversation(session: InterviewSession): boolean {
+export function canExplicitlyCompleteConversation(session: InterviewSession): boolean {
   if (!session.practicePlanId) {
     return session.questions.filter((question) => question.answer).length >= 5;
   }
-  return session.questions.filter((question) => !question.isFollowUp)
-    .every((question) => Boolean(question.answer));
+  return session.questions.every((question) => Boolean(question.answer));
 }
 ```
 
-Generic/manual behavior remains unchanged.
+For planned practice, this deliberately includes persisted follow-up questions. If a follow-up exists and is unanswered, explicit completion is rejected. Generic/manual behavior remains the existing five-answer rule.
 
 - [ ] **Step 8: Implement `/api/practice`**
 
-GET authenticates and returns current recommendation + recent plans. POST only accepts:
+GET authenticates and returns current recommendation plus recent plans. POST accepts only:
 
 ```json
 { "action": "start_recommended" }
@@ -631,13 +641,24 @@ Never trust a browser-supplied recommendation object.
 
 - [ ] **Step 9: Add interview-route tests for changed completion branches**
 
-Test planned 3-question explicit completion, generic <5 rejection, generic >=5 success, and non-fatal plan-completion warning.
+Add these exact cases:
+
+```text
+planned 3 base questions all answered, no follow-up -> allowed
+planned 3 base questions answered + persisted unanswered follow-up -> rejected
+same planned session after follow-up answer -> allowed
+generic conversation with fewer than 5 answers -> rejected
+generic conversation with at least 5 answers -> allowed
+plan-completion bookkeeping error after session completion -> HTTP 200 + warning
+```
 
 - [ ] **Step 10: Run GREEN**
 
 ```bash
 npm test -- src/lib/practice-service.test.ts src/app/api/practice/route.test.ts src/app/api/interview/route.test.ts
 ```
+
+Expected: PASS.
 
 - [ ] **Step 11: Commit**
 
@@ -648,7 +669,7 @@ git commit -m "feat: orchestrate persisted recommended practice"
 
 ---
 
-### Task 5: Career Dashboard + coach-memory evidence read models
+### Task 5: Career Dashboard and coach-memory evidence read models
 
 **Files:**
 - Create: `src/lib/coach-memory.ts`
@@ -675,7 +696,9 @@ export type CoachObservationSummary = CoachObservation & {
   evidence: CoachEvidenceDisplay[];
 };
 
-export type CareerStorySummary = CareerStory & { evidenceCount: number };
+export type CareerStorySummary = CareerStory & {
+  evidenceCount: number;
+};
 
 export type CareerDashboard = {
   profile: Profile;
@@ -704,7 +727,7 @@ Resolve each typed evidence source to a user-safe label/summary. Assert correcte
 
 - [ ] **Step 2: Implement `coach-memory.ts`**
 
-Resolve only owned source rows. Return concise profile excerpt, question/evaluation, story title, or opportunity-event display; never browser-side joins/raw UUID-only UI.
+Resolve only owned source rows. Return concise profile excerpt, question/evaluation, story title, or opportunity-event display. Never require browser-side joins or raw UUID-only display.
 
 - [ ] **Step 3: Write RED dashboard tests**
 
@@ -717,23 +740,23 @@ expect(dashboard.observations.every((item) => item.reviewState !== "dismissed"))
 
 - [ ] **Step 4: Implement dashboard aggregation**
 
-Load repositories in parallel where safe; calculate progress from completed sessions; resolve active observations; sort upcoming future interviews; call `recommendPractice` with explicit `now`.
+Load repositories in parallel where safe; calculate progress from completed sessions; resolve active observations; sort future interviews; call `recommendPractice` with explicit `now`.
 
 - [ ] **Step 5: Implement `GET /api/career/dashboard`**
-
-Use:
 
 ```ts
 const coachMode = process.env.GEMINI_API_KEY ? "live" : "demo";
 ```
 
-Authenticate with `requireUser()`, call `loadCareerDashboard`, return one canonical dashboard payload.
+Authenticate with `requireUser()`, call `loadCareerDashboard`, and return one canonical dashboard payload.
 
 - [ ] **Step 6: Run GREEN**
 
 ```bash
 npm test -- src/lib/coach-memory.test.ts src/lib/career-dashboard.test.ts src/app/api/career/dashboard/route.test.ts
 ```
+
+Expected: PASS.
 
 - [ ] **Step 7: Commit**
 
@@ -763,11 +786,11 @@ export async function addOpportunityNote(
 ): Promise<OpportunityEvent>;
 ```
 
-GET returns `{ opportunities: Opportunity[] }`. POST actions are `create`, `update`, `transition`, `schedule_interview`, `add_note`.
+GET returns `{ opportunities: Opportunity[] }`. POST actions are `create`, `update`, `transition`, `schedule_interview`, and `add_note`.
 
 - [ ] **Step 1: Write RED route/repository tests**
 
-Test that creating with `initialStatus: "applied"` calls `createOpportunity` then `transitionOpportunity`, never direct lifecycle-column update. Test schedule uses `scheduleOpportunityInterview`. Test `addOpportunityNote` inserts one owned append-only event with `event_type: "note"` and reloads/returns it.
+Test that `initialStatus: "applied"` calls `createOpportunity` then `transitionOpportunity`, never a direct lifecycle-column update. Test scheduling uses `scheduleOpportunityInterview`. Test `addOpportunityNote` creates one owned append-only `note` event.
 
 - [ ] **Step 2: Run RED**
 
@@ -777,7 +800,7 @@ npm test -- src/app/api/opportunities/route.test.ts src/lib/repositories/opportu
 
 - [ ] **Step 3: Implement `addOpportunityNote`**
 
-Insert only:
+Insert exactly one event row:
 
 ```ts
 {
@@ -789,21 +812,23 @@ Insert only:
 }
 ```
 
-Do not expose event update/delete.
+Reject blank notes. Do not expose event update/delete.
 
 - [ ] **Step 4: Implement explicit request parsing**
 
-Use helpers for required/optional strings, status union, 0–100 match score, valid ISO interview time. Do not cast raw JSON to domain input.
+Validate required/optional strings, status union, 0–100 match score, and a valid future ISO interview timestamp. Do not cast raw request JSON to domain input.
 
 - [ ] **Step 5: Implement GET/POST**
 
-All actions call Release 1 repository APIs; no direct status/`next_interview_at` writes.
+All lifecycle actions call Release 1 repository APIs; no direct status or `next_interview_at` writes.
 
 - [ ] **Step 6: Run GREEN**
 
 ```bash
 npm test -- src/app/api/opportunities/route.test.ts src/lib/repositories/opportunities.test.ts
 ```
+
+Expected: PASS.
 
 - [ ] **Step 7: Commit**
 
@@ -814,7 +839,7 @@ git commit -m "feat: expose application lifecycle API"
 
 ---
 
-### Task 7: Story + coach-memory review APIs and deterministic story completeness
+### Task 7: Story and coach-memory review APIs plus deterministic story completeness
 
 **Files:**
 - Create: `src/lib/career-story.ts`
@@ -839,7 +864,7 @@ export function careerStoryCompleteness(story: CareerStoryDraftFields): number;
 
 - [ ] **Step 1: Write RED completeness tests**
 
-Six dimensions:
+Use six factual dimensions:
 
 ```text
 context/problem
@@ -850,25 +875,27 @@ outcome
 lesson/reflection
 ```
 
-Return `covered / 6`; never score delivery/style.
+Return `coveredDimensions / 6`; never score delivery/style.
 
-- [ ] **Step 2: Implement `careerStoryCompleteness` and run GREEN**
+- [ ] **Step 2: Implement completeness helper and run GREEN**
 
 ```bash
 npm test -- src/lib/career-story.test.ts
 ```
 
+Expected: PASS.
+
 - [ ] **Step 3: Write RED Story route tests**
 
-Actions: `create`, `update`, `confirm`, `retire`, `attach_profile_evidence`. Server computes completeness and ignores browser completeness. Confirm sets `reviewState=confirmed` + server timestamp. Retire preserves row/provenance.
+Actions: `create`, `update`, `confirm`, `retire`, `attach_profile_evidence`. Server computes completeness and ignores browser-supplied completeness. Confirm sets `reviewState = "confirmed"` plus a server timestamp. Retire preserves row/provenance.
 
 - [ ] **Step 4: Implement Story GET/POST**
 
-Use existing story repository; attach profile evidence with typed source `{ kind: "profile_evidence", profileEvidenceId }`.
+Use existing story repositories and typed evidence source `{ kind: "profile_evidence", profileEvidenceId }`.
 
 - [ ] **Step 5: Write RED Observation route tests**
 
-Only actions `confirm`, `correct`, `dismiss`. `correct` requires non-empty replacement; no create action.
+Only allow `confirm`, `correct`, `dismiss`. `correct` requires non-empty replacement text. There is no normal create action.
 
 - [ ] **Step 6: Implement Observation GET/POST**
 
@@ -879,6 +906,8 @@ GET returns active/history read models with resolved evidence from `coach-memory
 ```bash
 npm test -- src/lib/career-story.test.ts src/app/api/stories/route.test.ts src/app/api/observations/route.test.ts
 ```
+
+Expected: PASS.
 
 - [ ] **Step 8: Commit**
 
@@ -900,12 +929,14 @@ git commit -m "feat: expose stories and coach memory review"
 **Interfaces:**
 
 ```tsx
-// page.tsx
 import { RelayShell } from "@/app/relay-shell";
-export default function App() { return <RelayShell />; }
+
+export default function App() {
+  return <RelayShell />;
+}
 ```
 
-`api-client.ts` exports typed `getCareerDashboard`, opportunity/story/observation mutations, `startRecommendedPractice`, and `startManualPractice`.
+`api-client.ts` exports typed dashboard, opportunity, story, observation, recommended-practice, and manual-practice request functions.
 
 - [ ] **Step 1: Freeze existing behavior with current page tests**
 
@@ -913,21 +944,23 @@ export default function App() { return <RelayShell />; }
 npm test -- src/app/page.test.tsx
 ```
 
-Add missing regression assertions for sign-in/out, onboarding/profile review, generic conversation, hands-on, transcription, results/progress before moving code.
+Before moving code, add any missing regression assertions for sign-in/out, onboarding/profile review, generic conversation, hands-on, transcription, results, and progress.
 
-- [ ] **Step 2: Extract `ApiError` + generic JSON helper to `api-client.ts`**
+- [ ] **Step 2: Extract `ApiError` and the generic JSON helper to `api-client.ts`**
 
-Preserve current 401/error semantics.
+Preserve existing 401 and safe-error semantics.
 
-- [ ] **Step 3: Move current client shell to `relay-shell.tsx` without redesign**
+- [ ] **Step 3: Move the current client shell to `relay-shell.tsx` without redesign**
 
-Keep existing view values/handlers first.
+Keep current view values and handlers for this step.
 
 - [ ] **Step 4: Run GREEN after pure refactor**
 
 ```bash
 npm test -- src/app/page.test.tsx
 ```
+
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -938,7 +971,7 @@ git commit -m "refactor: split Relay client shell"
 
 ---
 
-### Task 9: Home command center + Applications UX
+### Task 9: Home command center and Applications UX
 
 **Files:**
 - Create: `src/app/views/home-view.tsx`
@@ -964,9 +997,9 @@ type HomeViewProps = {
 
 - [ ] **Step 1: Write RED Home tests**
 
-Assert dominant `Start recommended practice`, visible rationale/signals, upcoming applications, honest empty states, story/progress summaries, and readiness-disabled CTA.
+Assert a dominant `Start recommended practice` CTA, visible rationale/signals, upcoming applications, honest empty states, story/progress summaries, and a readiness-disabled CTA when grounded practice cannot start.
 
-- [ ] **Step 2: Implement Home in this order**
+- [ ] **Step 2: Implement Home in this visual order**
 
 ```text
 Recommended practice
@@ -976,25 +1009,27 @@ Story bank
 Progress
 ```
 
-Show format, minutes, rationale, up to three signals, success criteria, primary opportunity.
+Show format, minutes, rationale, up to three signals, success criteria, and primary opportunity.
 
 - [ ] **Step 3: Write RED Applications tests**
 
-Cover create considering/already-applied, edit, transition, schedule, timeline, active/terminal filtering.
+Cover create considering, create already-applied, edit, transition, schedule, timeline, active/terminal filtering.
 
 - [ ] **Step 4: Implement Applications view**
 
-Mobile-first list + selected detail/editor; job description lives in detail; terminal actions explicit; scheduling displays actual `nextInterviewAt` separately from event recorded time.
+Use a mobile-first list plus selected detail/editor. Keep job description in detail. Make terminal actions explicit. Display actual `nextInterviewAt` separately from the event's recorded `occurredAt`.
 
-- [ ] **Step 5: Wire shell to canonical dashboard + mutations**
+- [ ] **Step 5: Wire shell to canonical dashboard and mutations**
 
-After auth/profile load, use `/api/career/dashboard` as Career Brain read model. Add `applications` view. Successful mutations refresh dashboard. Start recommended calls `/api/practice`, stores returned session, clears answer/checkpoint state, navigates to interview.
+After auth/profile load, use `/api/career/dashboard` as the Career Brain read model. Add `applications` view. Successful mutations refresh dashboard. Starting recommended practice calls `/api/practice`, stores the returned session, clears answer/checkpoint state, and navigates to `interview`.
 
 - [ ] **Step 6: Run GREEN**
 
 ```bash
 npm test -- src/app/views/home-view.test.tsx src/app/views/applications-view.test.tsx src/app/page.test.tsx
 ```
+
+Expected: PASS.
 
 - [ ] **Step 7: Commit**
 
@@ -1019,29 +1054,29 @@ git commit -m "feat: add preparation command center"
 
 - [ ] **Step 1: Write RED Stories tests**
 
-Cover create/edit, six-dimension completeness wording, confirm, retire, provenance count, attach profile evidence.
+Cover create/edit, six-dimension completeness wording, confirm, retire, provenance count, and attach profile evidence.
 
 - [ ] **Step 2: Implement Stories view**
 
-Fields mirror Situation, Responsibility/Problem, Actions/Decisions, Alternatives/Tradeoffs, Ownership, Outcome, Lessons, Tags. Present completeness as factual coverage, never answer quality.
+Fields mirror Situation, Responsibility/Problem, Actions/Decisions, Alternatives/Tradeoffs, Ownership, Outcome, Lessons, and Tags. Present completeness as factual coverage, never answer quality.
 
 - [ ] **Step 3: Write RED Coach tests**
 
-Cover corrected effective text, original claim in detail/history, `Why does Relay think this?` evidence, confirm/correct/dismiss, dismissed default filtering, no-observations empty state.
+Cover corrected effective text, original claim in detail/history, `Why does Relay think this?` evidence, confirm/correct/dismiss, dismissed default filtering, and the no-observations empty state.
 
 - [ ] **Step 4: Implement Coach view**
 
-Confidence/importance secondary; no create-observation UI.
+Keep confidence/importance secondary. Do not add a create-observation UI.
 
 - [ ] **Step 5: Write RED Practice tests**
 
-Cover current recommendation, manual focus/format form, optional opportunity, recent plans/sessions, hands-on option.
+Cover current recommendation, manual focus/format form, optional opportunity, recent plans/sessions, and hands-on option.
 
 - [ ] **Step 6: Implement manual Practice**
 
-Human labels map to all `PracticeFormat` values. Submit to `start_manual`; use same `{ plan, session }` navigation as recommended start.
+Human-readable labels map to every `PracticeFormat`. Submit through `start_manual` and use the same `{ plan, session }` navigation path as recommended start.
 
-- [ ] **Step 7: Replace primary nav**
+- [ ] **Step 7: Replace primary navigation**
 
 ```text
 Home
@@ -1052,13 +1087,15 @@ Coach
 Profile
 ```
 
-Progress remains accessible from Home. Interview/Results remain transient. Refresh dashboard after Story/Observation mutations.
+Progress remains reachable from Home. Interview/Results remain transient. Refresh dashboard after Story or Observation mutations.
 
 - [ ] **Step 8: Run GREEN**
 
 ```bash
 npm test -- src/app/views/stories-view.test.tsx src/app/views/coach-view.test.tsx src/app/views/practice-view.test.tsx src/app/page.test.tsx
 ```
+
+Expected: PASS.
 
 - [ ] **Step 9: Commit**
 
@@ -1069,7 +1106,7 @@ git commit -m "feat: add stories coach and manual practice views"
 
 ---
 
-### Task 11: End-to-end Release 2 regression + documentation
+### Task 11: End-to-end Release 2 regression and documentation
 
 **Files:**
 - Create: `src/lib/release2-flow.test.ts`
@@ -1077,18 +1114,18 @@ git commit -m "feat: add stories coach and manual practice views"
 
 - [ ] **Step 1: Add a dedicated integration-style flow test**
 
-`src/lib/release2-flow.test.ts` covers with service/repository mocks:
+`src/lib/release2-flow.test.ts` covers:
 
 ```text
 recommendation
 -> ready PracticePlan
 -> 3-question planned session with plan/opportunity context
--> answer/completion path
--> session complete
--> PracticePlan complete
+-> answers and any persisted follow-up
+-> session completion
+-> PracticePlan completion
 ```
 
-Add separate assertions that generic manual conversation still rejects non-five backbone, legacy null-context session hydrates, and plan bookkeeping failure returns a warning without invalidating completed session evidence.
+Also assert: generic manual conversation rejects a non-five backbone; legacy null-context session hydrates; planned session with an unanswered persisted follow-up cannot explicitly complete; plan bookkeeping failure returns a warning without invalidating completed interview evidence.
 
 - [ ] **Step 2: Run full suite**
 
@@ -1096,12 +1133,16 @@ Add separate assertions that generic manual conversation still rejects non-five 
 npm test
 ```
 
-- [ ] **Step 3: Run lint/build**
+Expected: PASS.
+
+- [ ] **Step 3: Run lint and build**
 
 ```bash
 npm run lint
 npx next build --webpack
 ```
+
+Expected: both succeed.
 
 - [ ] **Step 4: Verify migration against disposable/development Supabase**
 
@@ -1109,9 +1150,9 @@ npx next build --webpack
 supabase db push
 ```
 
-Verify exact generic 5-question behavior, planned 1–5 behavior, transactional conversation/hands-on starts, no double-start, cross-user rejection, and legacy null context.
+Verify exact generic five-question behavior, planned 1–5 behavior, transactional conversation/hands-on starts, no double-start, cross-user rejection, and legacy null context.
 
-- [ ] **Step 5: Smoke-test real authenticated development deployment**
+- [ ] **Step 5: Smoke-test an authenticated development deployment**
 
 ```text
 Home recommendation + rationale
@@ -1148,6 +1189,8 @@ Confirm no job-hunter files/config/secrets changed, no service-role secret reach
 npm test && npm run lint && npx next build --webpack
 ```
 
+Expected: all commands succeed.
+
 - [ ] **Step 9: Commit**
 
 ```bash
@@ -1167,7 +1210,7 @@ Release 2 is complete only when:
 - Stories can be created, edited, confirmed, retired, and shown with factual completeness/provenance.
 - Coach observations can be inspected with evidence and Confirm/Correct/Dismiss works.
 - Recommended/manual practice persists a PracticePlan and links the session.
-- Planned conversation supports 1–5 base questions.
+- Planned conversation supports 1–5 base questions and cannot finish while a persisted follow-up is unanswered.
 - Existing generic conversation remains exact five-question backbone.
 - Hands-on remains functional with plan context.
 - Completed interview evidence survives plan-bookkeeping failure.
