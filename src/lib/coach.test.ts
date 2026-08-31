@@ -1521,6 +1521,121 @@ describe("generatePracticeBlueprint", () => {
     expect(blueprint.maxQuestions).toBeGreaterThan(blueprint.questions.length);
   });
 
+  it("rejects an AI response that exceeds the plan's base question count and falls back instead of silently expanding", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+    // role_prep's base count is 4 (baseQuestionCountFor). This response
+    // returns 5 -- schema-valid on its own (practiceBlueprintDraftSchema
+    // allows up to 5 questions), but it must still be rejected by
+    // validatePracticeBlueprint's over-count check and never silently
+    // accepted as a 5-question role_prep blueprint.
+    const overCountQuestion = (sequence: number) => ({
+      sequence,
+      category: "technical",
+      competencyName: "React architecture",
+      difficulty: "senior",
+      objective: `Probe decision ${sequence}.`,
+      evidenceIds: ["evidence-1"],
+      expectedSignals: ["decision", "trade-off"],
+      missingSignalPrompts: ["Name the trade-off."],
+      rubricCriteria: ["Name the decision.", "Explain the trade-off."],
+      followUpLimit: 1,
+      prompt: `Walk me through decision ${sequence}.`,
+      sourceConfidence: 0.9,
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{
+        content: {
+          parts: [{
+            text: JSON.stringify({
+              status: "grounded",
+              fallbackReason: null,
+              maxFollowUps: 2,
+              maxQuestions: 7,
+              questions: [1, 2, 3, 4, 5].map(overCountQuestion),
+            }),
+          }],
+        },
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    const blueprint = await generatePracticeBlueprint(
+      practiceProfile,
+      blueprintEvidence,
+      practicePlan({ format: "role_prep" }),
+      practiceContext,
+    );
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2); // one attempt, one repair retry, both over-count
+    expect(blueprint.questions).toHaveLength(4);
+    expect(blueprint.status).toBe("limited-grounding");
+  });
+
+  it("accepts a conforming AI response sized to a second (non-role_prep) format's base count", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+    // self_presentation's base count is 2 -- drives the AI path (not the
+    // fallback) for a second format so the count matrix above is not
+    // exclusively exercising buildFallbackPracticeBlueprint.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{
+        content: {
+          parts: [{
+            text: JSON.stringify({
+              status: "grounded",
+              fallbackReason: null,
+              maxFollowUps: 1,
+              maxQuestions: 3,
+              questions: [
+                {
+                  sequence: 1,
+                  category: "introduction",
+                  competencyName: null,
+                  difficulty: "senior",
+                  objective: "Establish recent engineering ownership.",
+                  evidenceIds: [],
+                  expectedSignals: ["role summary", "recent ownership"],
+                  missingSignalPrompts: ["Name the most recent engineering area you owned."],
+                  rubricCriteria: ["Establish the candidate's recent engineering ownership."],
+                  followUpLimit: 0,
+                  prompt: "Give me a concise introduction to yourself.",
+                  sourceConfidence: null,
+                },
+                {
+                  sequence: 2,
+                  category: "experience",
+                  competencyId: "react",
+                  competencyName: "React architecture",
+                  difficulty: "senior",
+                  objective: "Probe the checkout migration ownership and impact.",
+                  evidenceIds: ["evidence-1"],
+                  expectedSignals: ["role", "trade-off", "outcome"],
+                  missingSignalPrompts: ["Name the launch trade-off you accepted."],
+                  rubricCriteria: ["Name the project or work example.", "Describe ownership.", "Explain the outcome."],
+                  followUpLimit: 1,
+                  prompt: "Tell me about the Checkout Platform migration.",
+                  sourceConfidence: 0.94,
+                },
+              ],
+            }),
+          }],
+        },
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    const blueprint = await generatePracticeBlueprint(
+      practiceProfile,
+      blueprintEvidence,
+      practicePlan({ format: "self_presentation" }),
+      practiceContext,
+    );
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(blueprint.status).toBe("grounded");
+    expect(blueprint.questions).toHaveLength(2);
+    expect(blueprint.maxQuestions).toBeGreaterThan(2);
+  });
+
   it("keeps evidence ids traceable to candidate evidence when job-description requirements shape the prompt", async () => {
     vi.stubEnv("GEMINI_API_KEY", "private-test-key");
     vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
