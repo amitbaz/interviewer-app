@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  Competency,
   InterviewBlueprint,
   InterviewSession,
   Opportunity,
@@ -61,6 +62,7 @@ import {
   PracticeServiceError,
   canExplicitlyCompleteConversation,
   completeLinkedPracticePlanBestEffort,
+  loadPracticeInputs,
   loadPracticeOverview,
   startManualPractice,
   startRecommendedPractice,
@@ -212,6 +214,24 @@ function session(overrides: Partial<InterviewSession> = {}): InterviewSession {
     updatedAt: "2026-08-31T09:00:00.000Z",
     practicePlanId: null,
     opportunityId: null,
+    ...overrides,
+  };
+}
+
+function competency(overrides: Partial<Competency> = {}): Competency {
+  return {
+    id: "comp-1",
+    name: "Architecture and system design",
+    relevance: 1,
+    expectedLevel: "senior",
+    estimatedLevel: "senior",
+    confidence: "high",
+    lastPracticedAt: "2026-08-30T10:00:00.000Z",
+    questionCount: 3,
+    averageScore: 8,
+    recentScore: 8,
+    strengths: [],
+    weaknesses: [],
     ...overrides,
   };
 }
@@ -494,6 +514,54 @@ describe("loadPracticeOverview", () => {
     const overview = await loadPracticeOverview(supabase as never, "user-1", now);
 
     expect(overview.recommendation).toEqual(recommendation);
+  });
+});
+
+describe("loadPracticeInputs", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.listOpportunities.mockResolvedValue([]);
+    mocks.listCoachObservations.mockResolvedValue([]);
+    mocks.listCareerStories.mockResolvedValue([]);
+    mocks.listPracticePlans.mockResolvedValue([]);
+  });
+
+  /**
+   * `calculateProgress` (from `src/lib/progress.ts`) is deliberately NOT
+   * mocked in this file, so this drives the real composition at
+   * `loadPracticeInputs`'s `progress: calculateProgress(profile?.competencies
+   * ?? [], sessions)` call site -- the shared loader this dashboard test
+   * exists to cover, per the design/plan's `PracticeInputs` contract. It
+   * must fail if the wrong competencies, the wrong sessions, or a
+   * disconnected/hardcoded `progress` field were threaded through: a wrong
+   * competencies argument changes `strongest.id`/`strongest.averageScore`
+   * (there is exactly one competency, so it is trivially both the
+   * strongest and weakest, and its score flows straight from the fixture);
+   * a wrong sessions argument -- or one not actually reaching
+   * `calculateProgress` -- changes `latestScore`, which only a completed
+   * session with a real `overallScore` can produce.
+   */
+  it("threads the loaded profile's competencies and the loaded sessions through the real calculateProgress call", async () => {
+    mocks.getProfile.mockResolvedValue({ ...profile, competencies: [competency({ id: "comp-1", averageScore: 8 })] });
+    mocks.listRecentSessions.mockResolvedValue([
+      session({ id: "session-1", status: "complete", completedAt: "2026-08-31T10:00:00.000Z", overallScore: 8 }),
+    ]);
+
+    const inputs = await loadPracticeInputs(supabase as never, "user-1");
+
+    expect(inputs.progress.strongest?.id).toBe("comp-1");
+    expect(inputs.progress.strongest?.averageScore).toBe(8);
+    expect(inputs.progress.latestScore).toBe(8);
+  });
+
+  it("computes an empty-but-valid progress snapshot when there is no profile or no completed sessions", async () => {
+    mocks.getProfile.mockResolvedValue(null);
+    mocks.listRecentSessions.mockResolvedValue([]);
+
+    const inputs = await loadPracticeInputs(supabase as never, "user-1");
+
+    expect(inputs.progress.strongest).toBeNull();
+    expect(inputs.progress.latestScore).toBeNull();
   });
 });
 
