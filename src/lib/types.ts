@@ -761,3 +761,21 @@ export type PracticeRecommendationInput = {
   recentPlans: PracticePlan[];
   now: Date;
 };
+
+/**
+ * Career Brain grounding inputs for `generatePracticeBlueprint` in
+ * `src/lib/coach.ts` -- distinct from `PracticeSessionContext`, which links
+ * an already-generated blueprint's session to its plan/opportunity, not the
+ * material used to generate it. `primaryOpportunity`/`supportingOpportunities`
+ * shape what the blueprint probes (job requirements are targets to probe,
+ * never candidate evidence). `observations` and `stories` may include
+ * unreviewed/draft rows -- `generatePracticeBlueprint` itself filters to the
+ * reviewed subset it is allowed to ground on (see that function's
+ * documentation for the exact filter).
+ */
+export type PracticeBlueprintContext = {
+  primaryOpportunity: Opportunity | null;
+  supportingOpportunities: Opportunity[];
+  observations: CoachObservation[];
+  stories: CareerStory[];
+};

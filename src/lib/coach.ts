@@ -7,18 +7,25 @@ import { buildFallbackInterviewBlueprint, validateInterviewBlueprint } from "@/l
 import { MAX_CV_PDF_BYTES } from "@/lib/upload-limits";
 import type {
   BlueprintQuestion,
+  CoachObservation,
   Competency,
+  Difficulty,
   EvidenceItem,
   Evaluation,
   FollowUpDraft,
   HandsOnExercise,
   InterviewBlueprint,
   InterviewSession,
+  Opportunity,
   PlannedQuestion,
+  PracticeBlueprintContext,
+  PracticeFormat,
+  PracticePlan,
   Profile,
   ProfileDraft,
   ProfileReadiness,
   ProfileSource,
+  QuestionCategory,
   GroundedEvaluation,
 } from "@/lib/types";
 
@@ -84,6 +91,22 @@ const blueprintDraftSchema = z.object({
   maxFollowUps: z.number().int().min(0).max(3).default(3),
   maxQuestions: z.number().int().min(5).max(8).default(8),
   questions: z.array(blueprintQuestionDraftSchema).length(5),
+});
+/**
+ * The sibling draft schema to `blueprintDraftSchema` for plan-driven practice
+ * blueprints. A SEPARATE schema, not a relaxation of the generic one:
+ * `generateInterviewBlueprint`'s exact five-question backbone contract stays
+ * untouched (its `questions.length(5)` and `maxQuestions.min(5)` are load
+ * bearing for that generator and must not be loosened). Practice blueprints
+ * carry 1-5 base questions instead, per `assertPracticeConversationBlueprint`
+ * in `src/lib/repositories/interviews.ts`.
+ */
+const practiceBlueprintDraftSchema = z.object({
+  status: z.enum(["grounded", "limited-grounding"]).optional(),
+  fallbackReason: z.string().nullable().optional(),
+  maxFollowUps: z.number().int().min(0).max(3).default(3),
+  maxQuestions: z.number().int().min(1).max(8).default(8),
+  questions: z.array(blueprintQuestionDraftSchema).min(1).max(5),
 });
 
 function roleDescriptor(role: string | null): string {
@@ -867,6 +890,342 @@ export async function generateInterviewBlueprint(
     evidence,
     new Date(createdAt),
   );
+}
+
+/**
+ * The exact base question count for a practice plan's format, per the
+ * release-2 controller ruling: plan-driven conversations support 1-5 base
+ * questions (never the generic five-question backbone). `hands_on` never
+ * calls `generatePracticeBlueprint` -- it starts via `handsOnExercise` and
+ * `createHandsOnPracticeSession` instead -- so its count is 0 and unused.
+ */
+function baseQuestionCountFor(format: PracticeFormat): number {
+  switch (format) {
+    case "self_presentation": return 2;
+    case "role_prep": return 4;
+    case "full_simulation": return 5;
+    case "hands_on": return 0;
+    default: return 3;
+  }
+}
+
+/**
+ * The text to ground a reviewed observation on. A user correction always
+ * supersedes the original AI-authored claim -- mirrors
+ * `effectiveObservationText` in `src/lib/practice-recommendation.ts`,
+ * duplicated locally (like `roleDescriptor`) so this module stays
+ * independent of that one.
+ */
+function effectivePracticeObservationText(observation: CoachObservation): string {
+  return observation.reviewState === "corrected" && observation.userCorrection?.trim()
+    ? observation.userCorrection.trim()
+    : observation.claim.trim();
+}
+
+function practiceOpportunityContext(opportunity: Opportunity | null): Record<string, unknown> | null {
+  if (!opportunity) return null;
+  return { company: opportunity.company, role: opportunity.role, jobDescription: opportunity.jobDescription };
+}
+
+function practiceBlueprintPrompt(
+  profile: Profile,
+  evidence: EvidenceItem[],
+  plan: PracticePlan,
+  context: PracticeBlueprintContext,
+  baseQuestionCount: number,
+  repair: boolean,
+): string {
+  const reviewedObservations = context.observations
+    .filter((observation) => observation.reviewState === "confirmed" || observation.reviewState === "corrected")
+    .map((observation) => ({
+      type: observation.observationType,
+      claim: effectivePracticeObservationText(observation),
+      importance: observation.importance,
+    }));
+  const confirmedStories = context.stories
+    .filter((story) => story.reviewState === "confirmed")
+    .map((story) => ({
+      title: story.title,
+      situation: story.situation,
+      responsibility: story.responsibility,
+      problem: story.problem,
+      actions: story.actions,
+      alternatives: story.alternatives,
+      tradeoffs: story.tradeoffs,
+      ownership: story.ownership,
+      outcome: story.outcome,
+      lessons: story.lessons,
+    }));
+
+  return [
+    "You are planning a practice interview blueprint for one specific practice plan.",
+    "Return only valid JSON.",
+    `Produce exactly ${baseQuestionCount} base question(s) unless the supplied candidate evidence cannot ground that many -- never produce more than ${baseQuestionCount}.`,
+    "Every question must include sequence, category, objective, evidenceIds, expectedSignals, missingSignalPrompts, rubricCriteria, followUpLimit, prompt, difficulty, and optional competencyId/competencyName/sourceConfidence.",
+    "Only reference evidence ids that appear in the supplied evidence below.",
+    "Do not invent projects, technologies, or outcomes.",
+    "Job requirements are targets to probe, not candidate evidence.",
+    "Candidate factual claims must be grounded in supplied evidence or confirmed story facts.",
+    "Do not invent company interview-process facts.",
+    repair ? "The previous response failed validation. Repair it and satisfy every schema field exactly." : "",
+    `Practice plan: ${JSON.stringify({
+      format: plan.format,
+      primaryFocus: plan.primaryFocus,
+      secondaryFocus: plan.secondaryFocus,
+      rationale: plan.rationale,
+      successCriteria: plan.successCriteria,
+    })}`,
+    `Profile: ${JSON.stringify({
+      role: profile.role,
+      seniority: profile.seniority,
+      summary: profile.summary,
+      narrative: profile.narrative,
+      expertise: profile.expertise,
+      characteristics: profile.characteristics,
+    })}`,
+    `Evidence: ${JSON.stringify(evidence)}`,
+    `Primary opportunity: ${JSON.stringify(practiceOpportunityContext(context.primaryOpportunity))}`,
+    `Supporting opportunities: ${JSON.stringify(context.supportingOpportunities.map(practiceOpportunityContext))}`,
+    `Reviewed observations: ${JSON.stringify(reviewedObservations)}`,
+    `Confirmed stories: ${JSON.stringify(confirmedStories)}`,
+  ].filter(Boolean).join("\n");
+}
+
+/**
+ * Ensures an AI-generated practice blueprint stays within the plan's base
+ * question budget and only references candidate-owned evidence. The sibling
+ * validator to `validateInterviewBlueprint` (interview-planner.ts) for
+ * plan-driven practice, not a relaxation of it: unlike the generic backbone,
+ * a practice blueprint may use FEWER than `baseQuestionCount` questions when
+ * grounding is thin, but must never exceed it, and its categories are not
+ * fixed to a specific slot order.
+ */
+function validatePracticeBlueprint(
+  blueprint: InterviewBlueprint,
+  evidence: EvidenceItem[],
+  baseQuestionCount: number,
+): InterviewBlueprint {
+  if (blueprint.questions.length < 1 || blueprint.questions.length > baseQuestionCount) {
+    throw new Error(`Practice blueprint must contain between one and ${baseQuestionCount} base questions.`);
+  }
+  const knownEvidenceIds = new Set(evidence.map((item) => item.id));
+  blueprint.questions.forEach((question, index) => {
+    if (question.sequence !== index + 1 || question.isFollowUp) {
+      throw new Error("Practice blueprint questions must be contiguous base questions.");
+    }
+    if (!question.objective.trim()) throw new Error("Practice blueprint questions need an objective.");
+    if (!question.prompt.trim()) throw new Error("Practice blueprint questions need prompt text.");
+    if (!question.expectedSignals.length) throw new Error("Practice blueprint questions need expected signals.");
+    if (!question.missingSignalPrompts.length) throw new Error("Practice blueprint questions need missing-signal prompts.");
+    if (!question.rubricCriteria?.length) throw new Error("Practice blueprint questions need scoring criteria.");
+    for (const evidenceId of question.evidenceIds) {
+      if (!knownEvidenceIds.has(evidenceId)) {
+        throw new Error(`Practice blueprint references unknown evidence ids: ${evidenceId}.`);
+      }
+    }
+  });
+  // Ruling R5: maxQuestions must leave follow-up headroom above the base
+  // question count. The Task 2 migration clamps the persisted ceiling with
+  // `greatest(v_count, least(8, max_questions))`, a floor -- a blueprint
+  // whose maxQuestions equals its base count would make
+  // `record_conversation_turn` refuse every follow-up.
+  if (blueprint.maxQuestions <= blueprint.questions.length) {
+    throw new Error("Practice blueprint must leave follow-up headroom above its base question count.");
+  }
+  return blueprint;
+}
+
+/**
+ * Recomputes the top-level follow-up budget so ruling R5 holds regardless of
+ * what the model (or the deterministic fallback) proposed: `maxFollowUps` is
+ * clamped to at least 1 (never 0, which would leave no headroom) and at most
+ * 3, and `maxQuestions` is derived from it rather than trusted verbatim.
+ */
+function finalizePracticeBlueprint(blueprint: InterviewBlueprint): InterviewBlueprint {
+  const maxFollowUps = Math.max(1, Math.min(3, blueprint.maxFollowUps));
+  const maxQuestions = Math.min(8, blueprint.questions.length + maxFollowUps);
+  return { ...blueprint, maxFollowUps, maxQuestions };
+}
+
+const practiceFallbackCategoryOrder: QuestionCategory[] = ["introduction", "experience", "technical", "architecture", "behavioral"];
+
+function practiceDifficulty(seniority: string | null): Difficulty {
+  const value = (seniority ?? "").toLowerCase();
+  if (/staff|principal|lead|advanced/.test(value)) return "advanced";
+  if (/senior/.test(value)) return "senior";
+  if (/junior|entry|graduate|foundational/.test(value)) return "foundational";
+  return "intermediate";
+}
+
+function fallbackPracticeSignals(category: QuestionCategory): string[] {
+  if (category === "introduction") return ["role summary", "recent ownership"];
+  if (category === "technical") return ["decision", "trade-off", "constraint"];
+  if (category === "architecture") return ["requirements", "constraints", "approach"];
+  if (category === "behavioral") return ["collaboration", "decision", "impact"];
+  return ["role", "decision", "impact"];
+}
+
+function fallbackPracticeMissingSignalPrompts(category: QuestionCategory, subject: string): string[] {
+  if (category === "introduction") return [`Name the recent engineering area you owned in ${subject}.`];
+  if (category === "technical") return ["What option did you reject and why?"];
+  if (category === "architecture") return ["Which requirement or constraint changed the design?"];
+  if (category === "behavioral") return ["Who did you need alignment from and how did you get it?"];
+  return ["Name the measurable outcome or impact."];
+}
+
+function fallbackPracticeRubricCriteria(category: QuestionCategory, subject: string): string[] {
+  if (category === "introduction") {
+    return [
+      "Establish the candidate's recent engineering ownership.",
+      `Keep the summary grounded in ${subject}.`,
+    ];
+  }
+  if (category === "technical") {
+    return [
+      `Name the technical decision being discussed in ${subject}.`,
+      "Explain the constraint or rejected alternative.",
+      "Describe the trade-off and result.",
+    ];
+  }
+  if (category === "architecture") {
+    return [
+      `Explain the requirements or constraints that shaped ${subject}.`,
+      "Describe the system-level decision or architecture choice.",
+      "State the outcome or reliability impact.",
+    ];
+  }
+  if (category === "behavioral") {
+    return [
+      `Name the collaboration challenge around ${subject}.`,
+      "Describe how the team aligned on the decision.",
+      "State what changed because of the collaboration.",
+    ];
+  }
+  return [
+    `Name the project or work example in ${subject}.`,
+    "Describe the candidate's role and ownership.",
+    "Explain the decision, trade-off, and outcome.",
+  ];
+}
+
+function fallbackPracticePrompt(category: QuestionCategory, subject: string, plan: PracticePlan, role: string | null): string {
+  if (category === "introduction") return `Give me a concise introduction to yourself and the ${roleDescriptor(role)} work relevant to ${plan.primaryFocus}.`;
+  if (category === "technical") return `Walk me through a technical decision involving ${subject}, focused on ${plan.primaryFocus}. What trade-offs did you consider?`;
+  if (category === "architecture") return `Design an approach involving ${subject} that addresses ${plan.primaryFocus}. Start with the requirements you would clarify.`;
+  if (category === "behavioral") return `Tell me about a collaboration challenge related to ${subject}, connected to ${plan.primaryFocus}. How did you make progress?`;
+  return `Tell me about ${subject}, in the context of ${plan.primaryFocus}. What was your role and impact?`;
+}
+
+/**
+ * Builds a deterministic fallback practice blueprint when the model response
+ * is absent or invalid, mirroring `buildFallbackInterviewBlueprint`'s
+ * approach for the generic backbone. Uses exactly `baseQuestionCount`
+ * questions (a leading slice of the same category order as the generic
+ * backbone), grounds each non-introduction question in candidate evidence
+ * (round-robin over the supplied items) when evidence exists, and is
+ * explicitly marked limited grounding.
+ */
+function buildFallbackPracticeBlueprint(
+  profile: Profile,
+  evidence: EvidenceItem[],
+  plan: PracticePlan,
+  baseQuestionCount: number,
+  createdAt: string,
+  fallbackReason = "Gemini returned invalid practice blueprint JSON after one repair attempt.",
+): InterviewBlueprint {
+  const categoriesForCount = practiceFallbackCategoryOrder.slice(0, baseQuestionCount);
+  const rankedEvidence = [...evidence].sort((left, right) => right.confidence - left.confidence);
+  const difficulty = practiceDifficulty(profile.seniority);
+
+  const questions: BlueprintQuestion[] = categoriesForCount.map((category, index) => {
+    const sequence = index + 1;
+    const item = category === "introduction" || !rankedEvidence.length
+      ? null
+      : rankedEvidence[index % rankedEvidence.length];
+    const subject = item?.projectOrEmployer ?? plan.primaryFocus;
+    return {
+      id: `practice-blueprint-question-${sequence}`,
+      sequence,
+      category,
+      competencyId: null,
+      competencyName: plan.primaryFocus,
+      difficulty,
+      isFollowUp: false,
+      prompt: fallbackPracticePrompt(category, subject, plan, profile.role),
+      answer: null,
+      createdAt,
+      objective: category === "introduction"
+        ? `Establish recent engineering ownership relevant to ${plan.primaryFocus}.`
+        : `Probe ${plan.primaryFocus} using ${subject}.`,
+      evidenceIds: item ? [item.id] : [],
+      expectedSignals: fallbackPracticeSignals(category),
+      missingSignalPrompts: fallbackPracticeMissingSignalPrompts(category, subject),
+      rubricCriteria: fallbackPracticeRubricCriteria(category, subject),
+      followUpLimit: category === "introduction" ? 0 : 1,
+      sourceConfidence: item?.confidence ?? null,
+    };
+  });
+
+  return finalizePracticeBlueprint({
+    status: "limited-grounding",
+    fallbackReason,
+    maxFollowUps: 3,
+    maxQuestions: 8,
+    createdAt,
+    questions,
+  });
+}
+
+/**
+ * Generates a practice-plan-specific interview blueprint sized and focused
+ * for `plan.format` -- the sibling generator to `generateInterviewBlueprint`
+ * for plan-driven practice, not a replacement for it (that generator's exact
+ * five-question backbone is untouched). Retries once on malformed or
+ * unsupported model output, then falls back to a deterministic
+ * limited-grounding plan built from `evidence` alone.
+ *
+ * Inputs: `profile` and `evidence` ground candidate factual claims;
+ * `plan` supplies the format, focus, and success criteria that size and aim
+ * the blueprint (see `baseQuestionCountFor`); `context` supplies the
+ * opportunities that shape (never prove) what gets probed, plus the reviewed
+ * observations and confirmed stories the blueprint may additionally ground
+ * on. Only `confirmed`/`corrected` observations and `confirmed` stories
+ * reach the prompt; a `corrected` observation's `userCorrection` is used in
+ * place of its original `claim`.
+ *
+ * Side effects: none beyond the outbound Gemini request. Failure behavior:
+ * never throws -- an unavailable or persistently invalid model response
+ * always resolves to the deterministic fallback blueprint.
+ *
+ * Invariant (ruling R5): the returned blueprint always has
+ * `maxQuestions > questions.length`, so a plan-driven session started from
+ * it can always record at least one follow-up (see `finalizePracticeBlueprint`).
+ */
+export async function generatePracticeBlueprint(
+  profile: Profile,
+  evidence: EvidenceItem[],
+  plan: PracticePlan,
+  context: PracticeBlueprintContext,
+): Promise<InterviewBlueprint> {
+  const createdAt = new Date().toISOString();
+  const baseQuestionCount = baseQuestionCountFor(plan.format);
+
+  for (const repair of [false, true]) {
+    const result = await modelJson(
+      "practice blueprint",
+      practiceBlueprintPrompt(profile, evidence, plan, context, baseQuestionCount, repair),
+      practiceBlueprintDraftSchema,
+    );
+    if (!result) continue;
+    try {
+      const finalized = finalizePracticeBlueprint(normalizeBlueprint(result, createdAt));
+      return validatePracticeBlueprint(finalized, evidence, baseQuestionCount);
+    } catch {
+      continue;
+    }
+  }
+
+  return buildFallbackPracticeBlueprint(profile, evidence, plan, baseQuestionCount, createdAt);
 }
 
 function hasConcreteWorkAnchor(item: EvidenceItem): boolean {
