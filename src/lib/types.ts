@@ -83,7 +83,15 @@ export type BlueprintQuestion = PlannedQuestion & {
   sourceConfidence: number | null;
 };
 
-/** The five-question interview plan generated before the first answer is collected. */
+/**
+ * The interview plan generated before the first answer is collected.
+ * Reused by two separate contracts, not renamed for either: generic
+ * interviews carry the exact five-question backbone (enforced by
+ * `assertConversationPlan` in `src/lib/repositories/interviews.ts`), while
+ * planned practice sessions carry 1-5 base questions (enforced by
+ * `assertPracticeConversationBlueprint`, the sibling validator used by the
+ * `PracticeSessionContext`-driven start RPCs).
+ */
 export type InterviewBlueprint = {
   status: BlueprintStatus;
   fallbackReason: string | null;
@@ -277,6 +285,19 @@ export type InterviewSession = {
  */
 export type SessionCareerContext = {
   practicePlanId: string | null;
+  opportunityId: string | null;
+};
+
+/**
+ * The plan (and optional opportunity) context passed to a planned practice
+ * session's atomic start RPC -- `createSessionWithPracticeBlueprint` and
+ * `createHandsOnPracticeSession` in `src/lib/repositories/interviews.ts`.
+ * Unlike `SessionCareerContext` (used to link an already-existing session,
+ * where both fields may be null), `practicePlanId` here is always the plan
+ * being started and can never be null.
+ */
+export type PracticeSessionContext = {
+  practicePlanId: string;
   opportunityId: string | null;
 };
 
