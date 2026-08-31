@@ -1,0 +1,161 @@
+# Career Brain Release 2 — Execution Handoff
+
+**Branch:** `codex/career-brain-release-2`
+**Plan:** `docs/superpowers/plans/2026-08-31-career-brain-release-2-relay-rework.md`
+**Spec:** `docs/superpowers/specs/2026-08-31-career-brain-release-2-relay-rework-design.md`
+**Status as of 2026-08-31:** Tasks 1–5 of 11 complete and reviewed. **Task 6 is the resume point.**
+
+Paused because the executing session was approaching a usage limit. No work is half-finished; the
+working tree was clean at the last commit.
+
+## Verification state at `c7acf2a`
+
+```bash
+npm install
+npm test                    # 323 passing, 0 failing
+npm run lint                # clean
+npx tsc --noEmit            # clean
+npx next build --webpack    # clean
+```
+
+Baseline before this branch was 215 tests. Everything added since is on the branch.
+
+## Commits (oldest first)
+
+| Commit | Task | Subject |
+|---|---|---|
+| `e5074b5` | 1 | feat: add baseline practice recommendation |
+| `ebf1fa6` | 2 | feat: add planned practice session starts |
+| `fa640f7` | 3 | feat: generate plan-specific practice blueprints |
+| `0403075` | 3 fix | test: cover AI-path base-count rejection for practice blueprints |
+| `a4fb2b5` | 4 | feat: orchestrate persisted recommended practice |
+| `6e7f269` | 4 fix | fix: bound practice plan listing and guard failed-plan compensation |
+| `9620241` | 5 | feat: add Career Brain dashboard read model |
+| `2f54cc3` | 5 fix | fix: dedupe dashboard observation-text and input-loading logic |
+| `c7acf2a` | 5 fix | test: cover loadPracticeInputs' progress composition |
+
+Tasks 1–5 each passed an independent code review. Tasks 3, 4, and 5 required fix rounds; all
+findings were addressed and re-reviewed. No Critical findings were ever raised.
+
+## Remaining work
+
+Tasks 6–11 of the plan, unstarted:
+
+6. Application lifecycle API (`/api/opportunities`)
+7. Story and coach-memory review APIs + deterministic story completeness
+8. Extract typed Relay client shell (`page.tsx` → `relay-shell.tsx` + `api-client.ts`)
+9. Home command center and Applications UX
+10. Stories, Coach, and manual Practice UX
+11. End-to-end regression, README, final verification
+
+Tasks 8–10 are the largest: splitting a ~45 KB `page.tsx` and adding five view components.
+
+## Outstanding action for the human: verify the migration (ruling R1)
+
+`supabase/migrations/202608310001_planned_practice_sessions.sql` has **never been executed**. It was
+verified only by SQL desk-check against the existing migrations, plus TypeScript repository tests.
+
+The Supabase CLI is linked from the main checkout, not from a worktree. You do **not** need to merge
+the branch to test the migration — pull just that one file into the main checkout:
+
+```bash
+cd /Users/amitbaz/interviewer-app       # the main checkout, where supabase is linked
+git checkout codex/career-brain-release-2 -- supabase/migrations/202608310001_planned_practice_sessions.sql
+supabase db push                        # against a disposable/development project first
+```
+
+Then verify these invariants, which static review could not settle:
+
+- the OLD `create_conversation_session_with_blueprint` still rejects a three-question blueprint
+- the NEW `create_planned_conversation_session_with_blueprint` accepts 1, 3, and 5 base questions and rejects 0 and 6
+- both new RPCs reject a plan or opportunity belonging to another user
+- both new RPCs reject an opportunity not linked to the plan, and honor a `primary` link
+- both atomically set session context AND flip the plan to `started`
+- a second start of the same plan fails
+- legacy sessions with null `practice_plan_id`/`opportunity_id` still hydrate
+
+One item is genuinely open: nothing pins the JS `p_blueprint` payload key names against the SQL
+`jsonb_to_recordset` field list. A field-name mismatch would only appear at runtime.
+
+Also unverified: the `P0002` → 404 and `22023` → 409 SQLSTATE mapping in `/api/practice` is asserted
+only against a mocked `RepositoryError`. If PostgREST surfaces those differently, those cases degrade
+to 500 with a user-safe message — a UX gap, not a safety one.
+
+## Decisions made during execution (rulings)
+
+These were judgment calls made without the user present. Revisit any you disagree with.
+
+- **R1** — Do not run `supabase db push` or smoke-test a deployed environment from the agent session;
+  external side effect on a shared resource. *Cost if wrong:* SQL defects survive until the human runs it.
+- **R2** — Task 1 implements the spec §5.3 observation-type→format mapping that the plan abbreviated
+  (`story_gap`→`story_work`; `answer_habit`/`delivery_pattern`→`technical_communication`;
+  `knowledge_gap`/`weakness`→`targeted_drill`; else `targeted_drill`). *Cost:* one extra branch + test.
+- **R3** — `canExplicitlyCompleteConversation` lives in `src/lib/practice-service.ts`, imported by the
+  interview route. The plan named both files without assigning the export. *Cost:* a one-line move.
+- **R4** — Task 4 EXTENDED the existing `src/app/api/interview/route.test.ts`; the plan said "Create"
+  but the file already existed with the passing suite. *Cost:* none, strictly safer.
+- **R5** — Practice blueprints set `maxQuestions = min(8, baseCount + maxFollowUps)`, never
+  `maxQuestions === baseCount`. The migration's clamp is a FLOOR, not headroom, so equal values would
+  make `record_conversation_turn` refuse every follow-up and silently void the rule that a planned
+  conversation cannot complete while a follow-up is unanswered. *Cost:* one or two more follow-ups
+  than intended.
+- **R6** — Orchestration always passes the plan's primary opportunity id. Both RPCs validate the
+  primary match only when the id is non-null. *Cost if wrong:* planned sessions lose role context.
+- **R7** — `practicePlanWarning` is always emitted as `string | null`, never omitted, so Tasks 8/9
+  cannot trip over "absent means fine". *Cost:* one always-present null field on two responses.
+- **R8** — Tasks 4 and 5 were authorized to edit files outside their plan file lists
+  (`practice-plans.test.ts`; `practice-service.ts` and `practice-recommendation.ts`), because those
+  lists were forcing duplicated logic. *Cost:* extra files in two commits, all additive.
+
+## Deferred minor findings — triage before merge
+
+Recorded by reviewers, not fixed. The final whole-branch review (Task 11) should triage these.
+
+**Task 1** — `Date.parse` used without a `Number.isNaN` guard in `compareOpportunityUrgency` and
+`pickInterviewingOpportunity`, unlike `pickNearTermInterview`. · Weakness-priority ternary duplicated in
+`buildProgressWeaknessRecommendation`. · `isClearlyBehavioral` is a keyword heuristic standing in for a
+missing data-model field — confirm with the design owner before Release 3 builds on it.
+
+**Task 2** — *(recommended before merge)* `assertPracticeConversationBlueprint`'s rejection branches have
+zero negative-path coverage; the `isFollowUp` rule is a stated spec requirement and TypeScript is the only
+layer enforcing it. · *(recommended before merge)* RPC tests don't pin the `p_blueprint.questions[0]` key
+names — the one part of the unverified-SQL risk a cheap test could close. · Test double always returns
+`kind: "conversation"`, including for the hands-on test. · ~40 lines of ownership/authorization checks are
+duplicated verbatim between the two RPCs; a fix applied to one copy only is a silent security divergence. ·
+`question.category` is inserted unvalidated and has no DB check constraint, while `difficulty` does.
+
+**Task 3** — `validatePracticeBlueprint` omits the generic validator's "General objective:" rule. · Fallback
+evidence-to-question mapping is a round-robin stand-in for `interview-planner.ts`'s keyword scoring.
+
+**Task 4** — Unmapped `RepositoryError` codes fall to a generic 500 body while `practice-service.ts` asserts
+the opposite contract for the same class. · 401s are logged at `console.error`, which will bury real errors. ·
+The route-level follow-up reject test doesn't discriminate the planned vs generic rule (the unit test does). ·
+`deliverPractice` takes the whole `PracticeInputs` but needs three fields. · `GET /api/practice` now caps at
+20 plans with no cursor for older ones.
+
+**Task 5** — Career-story evidence display sets both `label` and `summary` to the story title. ·
+Per-observation evidence resolution isn't globally batched (N observations → up to 4N queries).
+
+## Two bugs the review gate caught
+
+Worth knowing, because they shape how much rigor the remaining tasks deserve:
+
+1. **`markPlanFailed` could corrupt a good plan.** If the session-start RPC committed but the response read
+   then failed, the catch marked the plan `failed` while a live session pointed at it — `updatePracticePlan`
+   applied status unconditionally. Fixed with an atomic conditional update guarded on `status = 'ready'`.
+2. **A duplicated helper had already drifted.** `effectiveObservationText` existed in two modules; one
+   trimmed the claim, the other didn't. A whitespace-padded claim would make Home display one thing while
+   the recommender matched on another, for the same user. No test caught it — every fixture was
+   whitespace-clean. Fixed by exporting one implementation.
+
+## Notes for whoever resumes
+
+- The detailed per-task ledger and implementer/reviewer reports live in
+  `.superpowers/sdd/2026-08-31-career-brain-release-2-relay-rework/` in the executing worktree. That
+  directory is **git-ignored** — it does not travel with this branch. This file is the durable record.
+- The plan was executed with the `superpowers:subagent-driven-development` workflow: one implementer
+  subagent per task, an independent reviewer per task, then fix rounds with scoped re-reviews. That costs
+  roughly three agent runs per task. Tasks 8–10 are the most expensive remaining work; batching 6+7 and
+  9+10 into single dispatches, and reviewing only the API auth surface, the `page.tsx` refactor, and the
+  final whole-branch pass, would cut the remaining cost substantially.
+- Do not start implementation on `main`.
