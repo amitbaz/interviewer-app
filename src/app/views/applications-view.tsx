@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import type {
   CreateOpportunityRequest,
   OpportunityTransitionOptions,
@@ -26,6 +26,8 @@ export type ApplicationsViewProps = {
   onTransition: (opportunityId: string, toStatus: OpportunityStatus, options?: OpportunityTransitionOptions) => Promise<Opportunity>;
   onScheduleInterview: (opportunityId: string, interviewAt: string, options?: ScheduleOpportunityInterviewOptions) => Promise<Opportunity>;
   onAddNote: (opportunityId: string, note: string) => Promise<OpportunityEvent>;
+  /** Loads one opportunity's real, persisted, append-only event history (its timeline). Never fabricated client-side. */
+  onLoadEvents: (opportunityId: string) => Promise<OpportunityEvent[]>;
 };
 
 /** Lifecycle states whose outcome is settled -- shown only under the "Terminal" filter. */
@@ -57,6 +59,24 @@ function formatDateTime(iso: string): string {
   return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
+/** Human-readable summary of one persisted `OpportunityEvent`, covering every `OpportunityEventType`. */
+function describeEvent(event: OpportunityEvent): string {
+  switch (event.eventType) {
+    case "created":
+      return "Application created";
+    case "status_changed":
+      return event.fromStatus ? `Status changed from ${event.fromStatus} to ${event.toStatus}` : `Status set to ${event.toStatus}`;
+    case "interview_scheduled":
+      return "Interview scheduled";
+    case "interview_completed":
+      return "Interview completed";
+    case "source_updated":
+      return "Source details updated";
+    case "note":
+      return event.note ?? "Note";
+  }
+}
+
 const inputClass = "mt-1 w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none focus:border-[var(--pine)]";
 const labelClass = "block text-sm font-semibold";
 const primaryButtonClass = "rounded-full bg-[var(--pine)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50";
@@ -73,7 +93,7 @@ const secondaryButtonClass = "rounded-full border border-[var(--line)] px-4 py-2
  * `occurredAt` (when the note was recorded) are rendered as distinct facts
  * in the timeline -- never conflated, per the release's binding UX ruling.
  */
-export function ApplicationsView({ opportunities, busy, onCreate, onUpdate, onTransition, onScheduleInterview, onAddNote }: ApplicationsViewProps) {
+export function ApplicationsView({ opportunities, busy, onCreate, onUpdate, onTransition, onScheduleInterview, onAddNote, onLoadEvents }: ApplicationsViewProps) {
   const [filter, setFilter] = useState<ListFilter>("active");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -87,13 +107,31 @@ export function ApplicationsView({ opportunities, busy, onCreate, onUpdate, onTr
   const [editDraft, setEditDraft] = useState<EditDraft | null>(null);
   const [interviewAt, setInterviewAt] = useState("");
   const [noteText, setNoteText] = useState("");
-  const [sessionEvents, setSessionEvents] = useState<Record<string, OpportunityEvent[]>>({});
+  const [events, setEvents] = useState<OpportunityEvent[]>([]);
+  const [eventsError, setEventsError] = useState<string | null>(null);
 
   const filtered = useMemo(
     () => opportunities.filter((item) => (filter === "terminal") === TERMINAL_STATUSES.has(item.status)),
     [opportunities, filter],
   );
   const selected = selectedId ? opportunities.find((item) => item.id === selectedId) ?? null : null;
+
+  // Loads the real, persisted event history whenever the selected opportunity
+  // changes -- never fabricated client-side (see `onLoadEvents` doc comment).
+  // Every `setEvents`/`setEventsError` call here happens inside the promise's
+  // `then`/`catch`, never synchronously in the effect body: `selectOpportunity`
+  // below clears stale events immediately on selection instead, so this never
+  // needs to call setState outside the async continuation.
+  useEffect(() => {
+    if (!selectedId) return;
+    let active = true;
+    onLoadEvents(selectedId).then((loaded) => {
+      if (active) { setEvents(loaded); setEventsError(null); }
+    }).catch((caught) => {
+      if (active) setEventsError(caught instanceof Error ? caught.message : "Could not load this application's history.");
+    });
+    return () => { active = false; };
+  }, [selectedId, onLoadEvents]);
 
   function selectOpportunity(opportunity: Opportunity) {
     setSelectedId(opportunity.id);
@@ -102,6 +140,8 @@ export function ApplicationsView({ opportunities, busy, onCreate, onUpdate, onTr
     setError(null);
     setInterviewAt("");
     setNoteText("");
+    setEvents([]);
+    setEventsError(null);
   }
 
   async function submitCreate(event: FormEvent) {
@@ -169,12 +209,12 @@ export function ApplicationsView({ opportunities, busy, onCreate, onUpdate, onTr
     if (!selected || !noteText.trim()) return;
     setError(null);
     try {
-      const savedEvent = await onAddNote(selected.id, noteText.trim());
-      setSessionEvents((current) => ({
-        ...current,
-        [selected.id]: [savedEvent, ...(current[selected.id] ?? [])],
-      }));
+      await onAddNote(selected.id, noteText.trim());
       setNoteText("");
+      // Re-fetch the real persisted history rather than fabricating a local
+      // entry -- the server assigns the note's id and its authoritative `occurredAt`.
+      const refreshed = await onLoadEvents(selected.id);
+      setEvents(refreshed);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not save that note.");
     }
@@ -309,8 +349,13 @@ export function ApplicationsView({ opportunities, busy, onCreate, onUpdate, onTr
                     <li>Created {formatDateTime(selected.createdAt)}</li>
                     {selected.appliedAt && <li>Applied {formatDateTime(selected.appliedAt)}</li>}
                     {selected.nextInterviewAt && <li className="font-semibold text-[#38502e]">Next interview {formatDateTime(selected.nextInterviewAt)}</li>}
-                    {(sessionEvents[selected.id] ?? []).map((event) => (
-                      <li key={event.id}>{event.note} <span className="text-xs">({formatDateTime(event.occurredAt)})</span></li>
+                  </ul>
+                  <h4 className="mt-4 text-xs font-semibold uppercase tracking-[.1em] text-[var(--ink-muted)]">History</h4>
+                  {eventsError && <p role="alert" className="mt-2 text-sm text-[#8e3226]">{eventsError}</p>}
+                  <ul className="mt-2 space-y-2 text-sm leading-6 text-[var(--ink-muted)]">
+                    {events.length === 0 && !eventsError && <li>No history recorded yet.</li>}
+                    {events.map((event) => (
+                      <li key={event.id}>{describeEvent(event)} <span className="text-xs">({formatDateTime(event.occurredAt)})</span></li>
                     ))}
                   </ul>
                   <form onSubmit={submitNote} className="mt-4 space-y-3">

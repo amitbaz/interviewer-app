@@ -110,6 +110,18 @@ export async function createOpportunity(input: CreateOpportunityRequest): Promis
 }
 
 /**
+ * Loads one opportunity's append-only event history (its timeline), most
+ * recent first, from `GET /api/opportunities?opportunityId=...`. Scoped
+ * server-side to the authenticated caller -- there is no way to pass a
+ * different owner's id. Deliberately per-opportunity, fetched only when a
+ * detail view opens, rather than joined onto every opportunity in the list
+ * response.
+ */
+export async function fetchOpportunityEvents(opportunityId: string): Promise<OpportunityEvent[]> {
+  return (await api<{ events: OpportunityEvent[] }>(`${OPPORTUNITIES_URL}?opportunityId=${encodeURIComponent(opportunityId)}`)).events;
+}
+
+/**
  * Updates descriptive fields only. An omitted field is left alone and an
  * explicit `null` clears it, so callers must not send `null` for a field they
  * simply are not editing. Lifecycle fields (`status`, `nextInterviewAt`) are

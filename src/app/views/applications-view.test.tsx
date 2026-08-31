@@ -9,6 +9,7 @@ type ApplicationsViewMocks = {
   onTransition: Mock;
   onScheduleInterview: Mock;
   onAddNote: Mock;
+  onLoadEvents: Mock;
 };
 
 function opportunity(overrides: Partial<Opportunity> = {}): Opportunity {
@@ -60,6 +61,7 @@ function renderApplications(opportunities: Opportunity[], overrides: Partial<App
     onTransition: vi.fn().mockResolvedValue(opportunity()),
     onScheduleInterview: vi.fn().mockResolvedValue(opportunity()),
     onAddNote: vi.fn().mockResolvedValue(opportunityEvent()),
+    onLoadEvents: vi.fn().mockResolvedValue([]),
   };
   const effective = { ...defaults, ...overrides };
   const view = render(<ApplicationsView opportunities={opportunities} busy={false} {...effective} />);
@@ -161,20 +163,59 @@ describe("ApplicationsView", () => {
     expect(await screen.findByText(/Next interview/)).toBeInTheDocument();
   });
 
-  it("adds a note that appears in the timeline with its own recorded time, separate from the next interview date", async () => {
-    const withInterview = opportunity({ nextInterviewAt: "2026-09-10T14:00:00.000Z" });
-    const { onAddNote } = renderApplications([withInterview], {
-      onAddNote: vi.fn().mockResolvedValue(opportunityEvent({ note: "Recruiter confirmed the loop.", occurredAt: "2026-09-01T09:00:00.000Z" })),
+  it("loads and renders the opportunity's real persisted event history when it is selected", async () => {
+    const statusChanged = opportunityEvent({
+      id: "event-status",
+      eventType: "status_changed",
+      fromStatus: "considering",
+      toStatus: "applied",
+      note: null,
+      occurredAt: "2026-08-20T09:00:00.000Z",
+    });
+    const { onLoadEvents } = renderApplications([opportunity()], {
+      onLoadEvents: vi.fn().mockResolvedValue([statusChanged]),
     });
 
     fireEvent.click(screen.getByRole("button", { name: /Northwind.*Staff Engineer/ }));
+
+    await waitFor(() => expect(onLoadEvents).toHaveBeenCalledWith("opp-1"));
+    const timeline = screen.getByRole("region", { name: "Timeline" });
+    expect(await within(timeline).findByText(/considering/)).toBeInTheDocument();
+    expect(within(timeline).getByText(/applied/)).toBeInTheDocument();
+  });
+
+  it("shows an honest empty state in the timeline when no history has been recorded", async () => {
+    renderApplications([opportunity()], { onLoadEvents: vi.fn().mockResolvedValue([]) });
+
+    fireEvent.click(screen.getByRole("button", { name: /Northwind.*Staff Engineer/ }));
+
+    const timeline = screen.getByRole("region", { name: "Timeline" });
+    expect(await within(timeline).findByText(/no history/i)).toBeInTheDocument();
+  });
+
+  it("adds a note and refreshes the timeline with the server's persisted event, showing nextInterviewAt as a distinct fact", async () => {
+    const withInterview = opportunity({ nextInterviewAt: "2026-09-10T14:00:00.000Z" });
+    const savedEvent = opportunityEvent({ note: "Recruiter confirmed the loop.", occurredAt: "2026-09-01T09:00:00.000Z" });
+    const onLoadEvents = vi.fn()
+      .mockResolvedValueOnce([]) // the load triggered by selecting the opportunity
+      .mockResolvedValueOnce([savedEvent]); // the refetch triggered by a successful note save
+    const { onAddNote } = renderApplications([withInterview], {
+      onLoadEvents,
+      onAddNote: vi.fn().mockResolvedValue(savedEvent),
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Northwind.*Staff Engineer/ }));
+    await waitFor(() => expect(onLoadEvents).toHaveBeenCalledTimes(1));
+
     fireEvent.change(screen.getByLabelText("Add a note"), { target: { value: "Recruiter confirmed the loop." } });
     fireEvent.click(screen.getByRole("button", { name: "Save note" }));
 
     await waitFor(() => expect(onAddNote).toHaveBeenCalledWith("opp-1", "Recruiter confirmed the loop."));
+    // The note is not fabricated locally -- the view re-fetches the real persisted history.
+    await waitFor(() => expect(onLoadEvents).toHaveBeenCalledTimes(2));
 
     const timeline = screen.getByRole("region", { name: "Timeline" });
-    expect(within(timeline).getByText("Recruiter confirmed the loop.")).toBeInTheDocument();
+    expect(await within(timeline).findByText("Recruiter confirmed the loop.")).toBeInTheDocument();
     // The interview date itself is shown as a distinct fact, not as when the note was recorded.
     expect(within(timeline).getByText(/Next interview/)).toBeInTheDocument();
   });

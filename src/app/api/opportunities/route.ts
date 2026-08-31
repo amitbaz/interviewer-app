@@ -5,6 +5,7 @@ import {
   createOpportunity,
   isOpportunityStatus,
   listOpportunities,
+  listOpportunityEvents,
   scheduleOpportunityInterview,
   transitionOpportunity,
   updateOpportunityDetails,
@@ -16,12 +17,32 @@ import type { CreateOpportunityInput, Opportunity, OpportunityEvent, Opportunity
 export const runtime = "nodejs";
 
 /**
- * Returns the authenticated caller's opportunities (the UI's "Applications"
- * list; see design section 8.1), most recently updated first. Read-only.
+ * Two reads in one handler, distinguished by the `opportunityId` query
+ * parameter -- distinct response shapes, never conflated:
+ *
+ * - No `opportunityId`: the authenticated caller's opportunities (the UI's
+ *   "Applications" list; see design section 8.1), most recently updated
+ *   first -- `{ opportunities }`.
+ * - `opportunityId` present: that one opportunity's append-only event
+ *   history (its "timeline"), most recent first -- `{ events }`. Scoped to
+ *   the authenticated caller's id from `requireUser()`, never a
+ *   request-supplied one, so a foreign `opportunityId` resolves to an empty
+ *   history rather than leaking another user's events (see
+ *   `listOpportunityEvents` in `src/lib/repositories/opportunities.ts`).
+ *   Deliberately per-opportunity rather than joined onto the list response:
+ *   the opportunity list is unbounded, and fetching every opportunity's full
+ *   history on every list load would be an N+1 across the whole board.
+ *
+ * Both are read-only.
  */
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const { supabase, user } = await requireUser();
+    const opportunityId = new URL(request.url).searchParams.get("opportunityId");
+    if (opportunityId) {
+      const events = await listOpportunityEvents(supabase, user.id, opportunityId);
+      return NextResponse.json({ events });
+    }
     const opportunities = await listOpportunities(supabase, user.id);
     return NextResponse.json({ opportunities });
   } catch (error) {

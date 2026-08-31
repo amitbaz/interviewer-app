@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   transitionOpportunity: vi.fn(),
   scheduleOpportunityInterview: vi.fn(),
   listOpportunities: vi.fn(),
+  listOpportunityEvents: vi.fn(),
   addOpportunityNote: vi.fn(),
 }));
 
@@ -22,6 +23,7 @@ vi.mock("@/lib/repositories/opportunities", async () => {
     transitionOpportunity: mocks.transitionOpportunity,
     scheduleOpportunityInterview: mocks.scheduleOpportunityInterview,
     listOpportunities: mocks.listOpportunities,
+    listOpportunityEvents: mocks.listOpportunityEvents,
     addOpportunityNote: mocks.addOpportunityNote,
   };
 });
@@ -69,31 +71,71 @@ function post(body: unknown) {
   return POST(new Request("http://localhost/api/opportunities", { method: "POST", body: JSON.stringify(body) }));
 }
 
+function get(query = "") {
+  return GET(new Request(`http://localhost/api/opportunities${query}`));
+}
+
 describe("GET /api/opportunities", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.requireUser.mockResolvedValue({ supabase: { client: true }, user: { id: "user-1" } });
   });
 
-  it("returns the caller's opportunities", async () => {
+  it("returns the caller's opportunities when no opportunityId is given", async () => {
     mocks.listOpportunities.mockResolvedValue([opportunity]);
 
-    const response = await GET();
+    const response = await get();
     const body = await response.json();
 
     expect(response.status).toBe(200);
     expect(body).toEqual({ opportunities: [opportunity] });
     expect(mocks.listOpportunities).toHaveBeenCalledWith(expect.anything(), "user-1");
+    expect(mocks.listOpportunityEvents).not.toHaveBeenCalled();
   });
 
   it("returns 401 without loading opportunities when authentication is absent", async () => {
     mocks.requireUser.mockRejectedValue(new Error("UNAUTHENTICATED"));
 
-    const response = await GET();
+    const response = await get();
 
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ error: "Sign in to continue." });
     expect(mocks.listOpportunities).not.toHaveBeenCalled();
+  });
+
+  describe("with an opportunityId query parameter", () => {
+    it("returns that opportunity's append-only event history instead of the opportunity list", async () => {
+      mocks.listOpportunityEvents.mockResolvedValue([event]);
+
+      const response = await get("?opportunityId=opp-1");
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body).toEqual({ events: [event] });
+      expect(mocks.listOpportunityEvents).toHaveBeenCalledWith(expect.anything(), "user-1", "opp-1");
+      expect(mocks.listOpportunities).not.toHaveBeenCalled();
+    });
+
+    it("scopes the query to the authenticated caller, ignoring any other id on the request", async () => {
+      mocks.listOpportunityEvents.mockResolvedValue([]);
+
+      const response = await get("?opportunityId=opp-1&userId=someone-elses-id");
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body).toEqual({ events: [] });
+      // The authenticated session's id ("user-1"), never a request-supplied one.
+      expect(mocks.listOpportunityEvents).toHaveBeenCalledWith(expect.anything(), "user-1", "opp-1");
+    });
+
+    it("returns 401 without loading events when authentication is absent", async () => {
+      mocks.requireUser.mockRejectedValue(new Error("UNAUTHENTICATED"));
+
+      const response = await get("?opportunityId=opp-1");
+
+      expect(response.status).toBe(401);
+      expect(mocks.listOpportunityEvents).not.toHaveBeenCalled();
+    });
   });
 });
 
@@ -384,7 +426,7 @@ describe("POST /api/opportunities", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     mocks.listOpportunities.mockRejectedValue(new Error("db exploded"));
 
-    const response = await GET();
+    const response = await get();
 
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: "Could not complete your opportunity request." });
