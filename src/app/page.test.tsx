@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CareerDashboard, Competency, InterviewSession, Opportunity, PlannedQuestion, PracticeRecommendation, Profile, ProgressSnapshot } from "@/lib/types";
+import type { CareerDashboard, CareerStorySummary, CoachObservationSummary, Competency, InterviewSession, Opportunity, PlannedQuestion, PracticePlan, PracticeRecommendation, Profile, ProgressSnapshot } from "@/lib/types";
 import App from "@/app/page";
 import { ResultsFeedbackCards } from "@/app/results-feedback-cards";
 
@@ -271,6 +271,18 @@ function mockCoachData(options: {
       } satisfies Partial<Response>;
     }
 
+    // Stories and Coach are dedicated detail views with their own read
+    // models, fetched alongside the dashboard at bootstrap (see
+    // `loadCareerData` in relay-shell.tsx). Callers that only care about
+    // progress/home/applications don't need to know about these -- default
+    // to empty so this helper's existing callers keep working unmodified.
+    if (url === "/api/stories") {
+      return { ok: true, status: 200, json: async () => ({ stories: [] }) } satisfies Partial<Response>;
+    }
+    if (url === "/api/observations") {
+      return { ok: true, status: 200, json: async () => ({ active: [], history: [] }) } satisfies Partial<Response>;
+    }
+
     throw new Error(`Unexpected request: ${url}`);
   });
 
@@ -286,8 +298,10 @@ async function renderProgressView(options: {
   mockCoachData(options);
   render(<App />);
 
+  // "progress" is not a primary nav tab (task-10 brief step 7) -- it stays
+  // reachable from Home's "Open progress" button instead.
   await screen.findByRole("heading", { name: "Ready when you are." });
-  fireEvent.click(screen.getByRole("button", { name: "progress" }));
+  fireEvent.click(screen.getByRole("button", { name: "Open progress" }));
   await screen.findByRole("heading", { name: "Practice with a memory." });
 }
 
@@ -319,15 +333,29 @@ type RouteResponse = { ok?: boolean; status?: number; body: unknown };
 type RouteHandler = (init: RequestInit | undefined) => RouteResponse;
 
 /**
+ * The shell bootstraps `GET /api/stories` and `GET /api/observations`
+ * alongside the dashboard (see `loadCareerData` in relay-shell.tsx). Callers
+ * of `mockRoutes` that don't care about Stories/Coach content don't have to
+ * know that -- these defaults answer both with empty read models, and any
+ * caller that DOES care overrides them by supplying its own handler for the
+ * same path in `routes`.
+ */
+const DEFAULT_ROUTES: Record<string, RouteHandler> = {
+  "/api/stories": () => ({ body: { stories: [] } }),
+  "/api/observations": () => ({ body: { active: [], history: [] } }),
+};
+
+/**
  * Stubs `fetch` with a per-path handler map so interaction tests can drive the
  * shell's real request/response cycle instead of only its first paint. Each
  * handler receives the `RequestInit`, so one path can answer both its GET read
  * model and its POST actions.
  */
 function mockRoutes(routes: Record<string, RouteHandler>) {
+  const effectiveRoutes = { ...DEFAULT_ROUTES, ...routes };
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.pathname : input.url;
-    const handler = routes[url];
+    const handler = effectiveRoutes[url];
     if (!handler) throw new Error(`Unexpected request: ${url}`);
     const { ok = true, status = 200, body } = handler(init);
     return { ok, status, json: async () => body } satisfies Partial<Response>;
@@ -405,20 +433,58 @@ function activeHandsOnSession(overrides: Partial<InterviewSession> = {}): Interv
   });
 }
 
+/** A plausible `POST /api/practice` `start_manual` response's plan half -- these tests only assert on the returned `session`. */
+function startedPracticePlan(format: "targeted_drill" | "hands_on"): PracticePlan {
+  return {
+    id: "plan-started",
+    userId: "user-1",
+    status: "started",
+    primaryFocus: "Practice focus",
+    secondaryFocus: null,
+    rationale: "You chose this practice focus yourself.",
+    format,
+    estimatedMinutes: null,
+    successCriteria: [],
+    priorityScore: null,
+    priorityFactors: {},
+    generationError: null,
+    completedAt: null,
+    createdAt: "2026-08-29T10:00:00.000Z",
+    updatedAt: "2026-08-29T10:00:00.000Z",
+    opportunities: [],
+  };
+}
+
 /**
  * Drives the shell from home into an active interview so answer, checkpoint,
  * and transcription assertions all start from the same place. Home's own CTA
  * starts the server-recommended practice, not an ad-hoc mixed interview, so
- * this goes through the Practice view's manual start actions instead.
+ * this goes through Practice view's manual-start form/hands-on option
+ * instead (design section 4.5) -- both resolve through `POST /api/practice`
+ * `start_manual`, which this helper stubs itself so callers only need to
+ * supply routes for whatever happens AFTER the session starts (`respond`,
+ * `checkpoint`, `complete`, `/api/transcribe`).
  */
 async function startInterviewFrom(mode: "conversation" | "hands-on", started: InterviewSession, routes: Record<string, RouteHandler>) {
-  const fetchMock = mockRoutes(routes);
+  const fetchMock = mockRoutes({
+    ...routes,
+    "/api/practice": (init) => {
+      const body = requestBody(init);
+      if (body.action !== "start_manual") throw new Error(`Unexpected /api/practice action in this test: ${body.action}`);
+      return { body: { plan: startedPracticePlan(mode === "hands-on" ? "hands_on" : "targeted_drill"), session: started } };
+    },
+  });
   render(<App />);
 
   await screen.findByRole("heading", { name: "Ready when you are." });
   fireEvent.click(screen.getByRole("button", { name: "practice" }));
   await screen.findByRole("heading", { name: "Choose deliberate practice." });
-  fireEvent.click(screen.getByRole("button", { name: mode === "hands-on" ? "Start hands-on" : "Start now" }));
+  if (mode === "hands-on") {
+    fireEvent.click(screen.getByRole("button", { name: "Start hands-on practice" }));
+  } else {
+    fireEvent.change(screen.getByLabelText("Focus"), { target: { value: "Practice focus" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start practice" }));
+  }
   await screen.findByRole("heading", {
     name: started.kind === "hands-on" ? "Build, narrate, adapt." : "Stay in the conversation.",
   });
@@ -660,19 +726,23 @@ describe("App home view", () => {
     expect(await screen.findByRole("heading", { name: "Applications" })).toBeInTheDocument();
   });
 
-  // The shell wires Home's onOpenStories/onOpenCoach to navigate("stories")/navigate("coach").
-  // Task 10 owns what those views render (both are intentionally empty for now, per R20), so
-  // this only proves the navigation happened -- Home's own content unmounting is the signal --
-  // not what replaces it.
-  it.each([
-    ["Open story bank", "stories"],
-    ["Open coach", "coach"],
-  ])("navigates away from Home when %s is clicked", async (buttonName) => {
+  // The shell wires Home's onOpenStories/onOpenCoach to navigate("stories")/navigate("coach"),
+  // which render StoriesView/CoachView (Task 10). This proves both the navigation AND that a
+  // real view -- not a dead target -- replaces Home's content.
+  it("navigates to Stories with real content when Open story bank is clicked", async () => {
     await renderHomeView({ progress: emptyProgress() });
 
-    fireEvent.click(screen.getByRole("button", { name: buttonName }));
+    fireEvent.click(screen.getByRole("button", { name: "Open story bank" }));
 
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Start recommended practice" })).not.toBeInTheDocument());
+    expect(await screen.findByRole("heading", { name: "Story bank" })).toBeInTheDocument();
+  });
+
+  it("navigates to Coach with real content when Open coach is clicked", async () => {
+    await renderHomeView({ progress: emptyProgress() });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open coach" }));
+
+    expect(await screen.findByRole("heading", { name: "Coach" })).toBeInTheDocument();
   });
 });
 
@@ -724,8 +794,133 @@ describe("App applications view", () => {
   });
 });
 
+describe("App stories view", () => {
+  /**
+   * Drives a Stories mutation through the *real* shell so `handleCreateStory`'s
+   * refresh wiring is actually exercised: R18/R9 (task-10 brief) require a
+   * dedicated `GET /api/stories` re-fetch, distinct from `refreshDashboard`.
+   * The stories route tracks its own GET call count and only starts
+   * returning the created story from its second GET onward, so the new
+   * story appearing in the list can only mean the shell re-fetched
+   * `/api/stories` after the mutation succeeded.
+   */
+  it("creates a story through the real shell and refreshes the stories list", async () => {
+    const created: CareerStorySummary = {
+      id: "story-new",
+      userId: "user-1",
+      title: "Checkout migration",
+      situation: null,
+      responsibility: null,
+      problem: null,
+      actions: null,
+      alternatives: null,
+      tradeoffs: null,
+      ownership: null,
+      outcome: null,
+      lessons: null,
+      tags: [],
+      completeness: 0,
+      reviewState: "draft",
+      confirmedAt: null,
+      createdAt: "2026-09-01T10:00:00.000Z",
+      updatedAt: "2026-09-01T10:00:00.000Z",
+      evidenceCount: 0,
+    };
+    let storiesCalls = 0;
+    mockRoutes({
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/stories": (init) => {
+        if (init?.method !== "POST") {
+          storiesCalls += 1;
+          return { body: { stories: storiesCalls > 1 ? [created] : [] } };
+        }
+        const body = requestBody(init);
+        if (body.action === "create") return { body: { story: created } };
+        throw new Error(`Unexpected /api/stories action in this test: ${body.action}`);
+      },
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Ready when you are." });
+    fireEvent.click(screen.getByRole("button", { name: "stories" }));
+    await screen.findByRole("heading", { name: "Story bank" });
+
+    expect(storiesCalls).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "New story" }));
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Checkout migration" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save story" }));
+
+    expect(await screen.findByRole("heading", { name: "Checkout migration" })).toBeInTheDocument();
+    expect(storiesCalls).toBe(2);
+  });
+});
+
+describe("App coach view", () => {
+  /**
+   * Drives a dismiss through the *real* shell so `handleDismissObservation`'s
+   * refresh wiring is exercised: the observations route tracks its own GET
+   * call count and only starts returning the dismissed split from its second
+   * GET onward, so the observation moving from Active to History can only
+   * mean the shell re-fetched `/api/observations` after the mutation
+   * succeeded -- not that the view re-sorted its own stale props.
+   */
+  it("dismisses an observation through the real shell and moves it to history", async () => {
+    const active: CoachObservationSummary = {
+      id: "obs-1",
+      userId: "user-1",
+      observationType: "delivery_pattern",
+      claim: "You skip tradeoffs when explaining technical decisions.",
+      confidence: 0.7,
+      importance: 0.6,
+      trend: "unresolved",
+      reviewState: "unreviewed",
+      userCorrection: null,
+      firstSeenAt: "2026-08-10T10:00:00.000Z",
+      lastSeenAt: "2026-08-20T10:00:00.000Z",
+      confirmedAt: null,
+      correctedAt: null,
+      dismissedAt: null,
+      createdAt: "2026-08-10T10:00:00.000Z",
+      updatedAt: "2026-08-20T10:00:00.000Z",
+      effectiveText: "You skip tradeoffs when explaining technical decisions.",
+      evidence: [],
+    };
+    const dismissed: CoachObservationSummary = { ...active, reviewState: "dismissed", dismissedAt: "2026-09-01T10:00:00.000Z" };
+    let observationsCalls = 0;
+    mockRoutes({
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/observations": (init) => {
+        if (init?.method !== "POST") {
+          observationsCalls += 1;
+          return { body: observationsCalls > 1 ? { active: [], history: [dismissed] } : { active: [active], history: [] } };
+        }
+        const body = requestBody(init);
+        if (body.action === "dismiss") return { body: { observation: dismissed } };
+        throw new Error(`Unexpected /api/observations action in this test: ${body.action}`);
+      },
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Ready when you are." });
+    fireEvent.click(screen.getByRole("button", { name: "coach" }));
+    await screen.findByRole("heading", { name: "Coach" });
+
+    expect(observationsCalls).toBe(1);
+    const activeSection = screen.getByRole("region", { name: "Active observations" });
+    expect(within(activeSection).getByText("You skip tradeoffs when explaining technical decisions.")).toBeInTheDocument();
+    fireEvent.click(within(activeSection).getByRole("button", { name: "Dismiss" }));
+
+    await waitFor(() => expect(observationsCalls).toBe(2));
+    const historySection = await screen.findByRole("region", { name: "Observation history" });
+    expect(within(historySection).getByText("You skip tradeoffs when explaining technical decisions.")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Active observations" })).queryByText("You skip tradeoffs when explaining technical decisions.")).not.toBeInTheDocument();
+  });
+});
+
 describe("App practice view", () => {
-  it("renders a single grounded start action that respects the readiness gate", async () => {
+  it("respects the readiness gate on the recommended-practice action", async () => {
     await renderPracticeView({
       progress: {
         readiness: null,
@@ -744,10 +939,39 @@ describe("App practice view", () => {
       }),
     });
 
-    const startButtons = screen.getAllByRole("button", { name: "Start now" });
-    expect(startButtons).toHaveLength(1);
-    expect(startButtons[0]).toBeDisabled();
-    expect(screen.getByText("Add the missing source detail in your profile before Relay starts a grounded interview.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start recommended practice" })).toBeDisabled();
+    expect(screen.getByText("Add two concrete engineering projects or work examples to your profile before Relay can start grounded practice.")).toBeInTheDocument();
+  });
+
+  /**
+   * Drives a manual-practice start through the *real* shell (not
+   * PracticeView's own isolated tests, which mock every callback) so
+   * `handleStartManualPractice`'s `POST /api/practice` `start_manual` request
+   * and its `{ plan, session }` -> `navigate("interview")` wiring in
+   * relay-shell.tsx are actually exercised.
+   */
+  it("starts manual practice through the real shell and opens the interview", async () => {
+    const started = activeConversationSession();
+    mockRoutes({
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/practice": (init) => {
+        const body = requestBody(init);
+        if (body.action !== "start_manual") throw new Error(`Unexpected /api/practice action in this test: ${body.action}`);
+        return { body: { plan: startedPracticePlan("targeted_drill"), session: started } };
+      },
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Ready when you are." });
+    fireEvent.click(screen.getByRole("button", { name: "practice" }));
+    await screen.findByRole("heading", { name: "Choose deliberate practice." });
+
+    fireEvent.change(screen.getByLabelText("Focus"), { target: { value: "System design tradeoffs" } });
+    fireEvent.change(screen.getByLabelText("Format"), { target: { value: "story_work" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start practice" }));
+
+    await screen.findByRole("heading", { name: "Stay in the conversation." });
   });
 });
 
@@ -1161,11 +1385,10 @@ describe("App conversation interview", () => {
     const fetchMock = await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
       "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
-      "/api/interview": () => ({ body: { session: started } }),
     });
 
-    const startCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "POST");
-    expect(requestBody(startCall?.[1] as RequestInit)).toEqual({ action: "start", mode: "conversation" });
+    const startCall = fetchMock.mock.calls.find(([url, init]) => url === "/api/practice" && (init as RequestInit | undefined)?.method === "POST");
+    expect(requestBody(startCall?.[1] as RequestInit)).toMatchObject({ action: "start_manual", primaryFocus: "Practice focus" });
     expect(screen.getByText("Mixed interview · 0 of 1 answered")).toBeInTheDocument();
     expect(screen.getByText("How would you phase a large React migration?")).toBeInTheDocument();
     expect(screen.getByText("Grounded question")).toBeInTheDocument();
@@ -1184,7 +1407,7 @@ describe("App conversation interview", () => {
     const fetchMock = await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
       "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
-      "/api/interview": (init) => requestBody(init).action === "start" ? { body: { session: started } } : { body: { session: answered } },
+      "/api/interview": () => ({ body: { session: answered } }),
     });
 
     const composer = screen.getByPlaceholderText("Answer as if you were in the room…");
@@ -1208,9 +1431,7 @@ describe("App conversation interview", () => {
     await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
       "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [completed], emptyProgress()) }),
-      "/api/interview": (init) => requestBody(init).action === "start"
-        ? { body: { session: started } }
-        : { body: { session: completed, profile: profile() } },
+      "/api/interview": () => ({ body: { session: completed, profile: profile() } }),
     });
 
     fireEvent.change(screen.getByPlaceholderText("Answer as if you were in the room…"), { target: { value: "Phase by route." } });
@@ -1226,9 +1447,7 @@ describe("App conversation interview", () => {
     await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
       "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
-      "/api/interview": (init) => requestBody(init).action === "start"
-        ? { body: { session: started } }
-        : { ok: false, status: 500, body: { error: "The coach is unavailable." } },
+      "/api/interview": () => ({ ok: false, status: 500, body: { error: "The coach is unavailable." } }),
     });
 
     fireEvent.change(screen.getByPlaceholderText("Answer as if you were in the room…"), { target: { value: "Phase by route." } });
@@ -1245,11 +1464,10 @@ describe("App hands-on interview", () => {
     const fetchMock = await startInterviewFrom("hands-on", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
       "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
-      "/api/interview": () => ({ body: { session: started } }),
     });
 
-    const startCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "POST");
-    expect(requestBody(startCall?.[1] as RequestInit)).toEqual({ action: "start", mode: "hands-on" });
+    const startCall = fetchMock.mock.calls.find(([url, init]) => url === "/api/practice" && (init as RequestInit | undefined)?.method === "POST");
+    expect(requestBody(startCall?.[1] as RequestInit)).toMatchObject({ action: "start_manual", format: "hands_on" });
     expect(screen.getByRole("heading", { name: "Accessible product search" })).toBeInTheDocument();
     expect(screen.getByText("Debounce the query")).toBeInTheDocument();
     expect(screen.getByLabelText("TypeScript code workspace")).toHaveValue("export function ProductSearch() {}");
@@ -1272,7 +1490,7 @@ describe("App hands-on interview", () => {
     const fetchMock = await startInterviewFrom("hands-on", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
       "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
-      "/api/interview": (init) => requestBody(init).action === "start" ? { body: { session: started } } : { body: { session: withCheckpoint } },
+      "/api/interview": () => ({ body: { session: withCheckpoint } }),
     });
 
     const note = screen.getByPlaceholderText("For example: I am cancelling in-flight searches and will add keyboard state next…");
@@ -1334,7 +1552,6 @@ describe("App answer transcription", () => {
     await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
       "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
-      "/api/interview": () => ({ body: { session: started } }),
       "/api/transcribe": () => ({ body: { transcript: "I would phase the migration by route." } }),
     });
 
@@ -1353,7 +1570,6 @@ describe("App answer transcription", () => {
     await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
       "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
-      "/api/interview": () => ({ body: { session: started } }),
       "/api/transcribe": () => ({ ok: false, status: 500, body: { error: "Could not transcribe recording." } }),
     });
 
@@ -1369,7 +1585,6 @@ describe("App answer transcription", () => {
     await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
       "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
-      "/api/interview": () => ({ body: { session: started } }),
     });
 
     fireEvent.click(screen.getByRole("button", { name: "● Record answer" }));

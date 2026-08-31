@@ -23,7 +23,9 @@ import type {
   CareerStory,
   CareerStoryDraftFields,
   CareerStoryEvidence,
+  CareerStorySummary,
   CoachObservation,
+  CoachObservationSummary,
   CreateOpportunityInput,
   InterviewSession,
   Opportunity,
@@ -169,6 +171,18 @@ export async function addOpportunityNote(opportunityId: string, note: string): P
 const STORIES_URL = "/api/stories";
 
 /**
+ * Loads every career story the authenticated caller owns, retired ones
+ * included, most recently updated first, from `GET /api/stories`. The route
+ * deliberately does not filter by review state -- design section 4.3
+ * requires retirement to preserve the row and its provenance -- so the
+ * Stories view is responsible for filtering to draft/confirmed for its
+ * default list.
+ */
+export async function fetchCareerStories(): Promise<CareerStorySummary[]> {
+  return (await api<{ stories: CareerStorySummary[] }>(STORIES_URL)).stories;
+}
+
+/**
  * The nine narrative fields of a story draft. On update an omitted field is
  * left untouched while an explicit `null` clears it — the distinction the
  * route relies on when it recomputes completeness against untouched fields.
@@ -224,6 +238,22 @@ export async function attachCareerStoryProfileEvidence(
 // --- Coach observations -----------------------------------------------------
 
 const OBSERVATIONS_URL = "/api/observations";
+
+/**
+ * The Coach view's full review queue, split exactly as `GET /api/observations`
+ * returns it: `history` holds the dismissed observations, `active` holds
+ * every other one. `dashboard.observations` (the Home-oriented read model)
+ * already excludes dismissed rows, but carries no history at all -- this is
+ * the only source for it.
+ */
+export type ObservationsOverview = {
+  active: CoachObservationSummary[];
+  history: CoachObservationSummary[];
+};
+
+export async function fetchObservations(): Promise<ObservationsOverview> {
+  return api<ObservationsOverview>(OBSERVATIONS_URL);
+}
 
 /**
  * Reviewing is the only write the browser can make to coach memory: Release 2
