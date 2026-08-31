@@ -51,8 +51,19 @@ function practicePlanStatus(value: unknown): PracticePlanStatus {
   return practicePlanStatuses.includes(value as PracticePlanStatus) ? value as PracticePlanStatus : "draft";
 }
 
+/**
+ * Whether `value` is one of the practice formats the `practice_plans.format`
+ * check constraint accepts. Exported so callers that accept a format from
+ * outside the server -- `startManualPractice` in `src/lib/practice-service.ts`
+ * -- validate against this single list instead of duplicating it and drifting
+ * from the database constraint.
+ */
+export function isPracticeFormat(value: unknown): value is PracticeFormat {
+  return practiceFormats.includes(value as PracticeFormat);
+}
+
 function practiceFormat(value: unknown): PracticeFormat {
-  return practiceFormats.includes(value as PracticeFormat) ? value as PracticeFormat : "targeted_drill";
+  return isPracticeFormat(value) ? value : "targeted_drill";
 }
 
 function practicePlanOpportunityRelevance(value: unknown): PracticePlanOpportunityRelevance {
