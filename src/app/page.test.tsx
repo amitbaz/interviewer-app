@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Competency, InterviewSession, PlannedQuestion, Profile, ProgressSnapshot } from "@/lib/types";
+import type { CareerDashboard, Competency, InterviewSession, PlannedQuestion, PracticeRecommendation, Profile, ProgressSnapshot } from "@/lib/types";
 import App from "@/app/page";
 import { ResultsFeedbackCards } from "@/app/results-feedback-cards";
 
@@ -178,10 +178,51 @@ function session(overrides: Partial<InterviewSession> = {}): InterviewSession {
   };
 }
 
+/** The baseline "no urgent signals" recommendation `recommendPractice` returns for an empty/quiet account. */
+function fallbackRecommendation(): PracticeRecommendation {
+  return {
+    format: "full_simulation",
+    primaryFocus: "Run a full mock interview simulation",
+    secondaryFocus: null,
+    rationale: "There's no urgent opportunity, reviewed observation, or progress signal driving practice right now, so a full simulation keeps every competency fresh.",
+    estimatedMinutes: 30,
+    successCriteria: [
+      "Complete a full mock interview across the core competencies.",
+      "Receive scored feedback on every answer.",
+    ],
+    primaryOpportunityId: null,
+    supportingOpportunityIds: [],
+    signals: [{ kind: "fallback", label: "general readiness", detail: "no urgent signals right now" }],
+  };
+}
+
+/** The `GET /api/career/dashboard` payload shape -- the shell's canonical read model once a profile exists. */
+function dashboardPayload(
+  profilePayload: Profile,
+  sessionsPayload: InterviewSession[],
+  progressPayload: ProgressSnapshot,
+  overrides: Partial<CareerDashboard> = {},
+): CareerDashboard {
+  return {
+    profile: profilePayload,
+    coachMode: "demo",
+    progress: progressPayload,
+    recentSessions: sessionsPayload,
+    opportunities: [],
+    upcomingOpportunities: [],
+    observations: [],
+    stories: [],
+    recentPracticePlans: [],
+    recommendation: fallbackRecommendation(),
+    ...overrides,
+  };
+}
+
 function mockCoachData(options: {
   profile?: Profile;
   progress: ProgressSnapshot;
   sessions?: InterviewSession[];
+  dashboardOverrides?: Partial<CareerDashboard>;
 }) {
   const profilePayload = options.profile ?? profile();
   const sessionsPayload = options.sessions ?? [];
@@ -196,11 +237,11 @@ function mockCoachData(options: {
       } satisfies Partial<Response>;
     }
 
-    if (url === "/api/interview") {
+    if (url === "/api/career/dashboard") {
       return {
         ok: true,
         status: 200,
-        json: async () => ({ sessions: sessionsPayload, progress: options.progress }),
+        json: async () => dashboardPayload(profilePayload, sessionsPayload, options.progress, options.dashboardOverrides),
       } satisfies Partial<Response>;
     }
 
@@ -340,14 +381,18 @@ function activeHandsOnSession(overrides: Partial<InterviewSession> = {}): Interv
 
 /**
  * Drives the shell from home into an active interview so answer, checkpoint,
- * and transcription assertions all start from the same place.
+ * and transcription assertions all start from the same place. Home's own CTA
+ * starts the server-recommended practice, not an ad-hoc mixed interview, so
+ * this goes through the Practice view's manual start actions instead.
  */
-async function startInterviewFrom(startButton: string, started: InterviewSession, routes: Record<string, RouteHandler>) {
+async function startInterviewFrom(mode: "conversation" | "hands-on", started: InterviewSession, routes: Record<string, RouteHandler>) {
   const fetchMock = mockRoutes(routes);
   render(<App />);
 
   await screen.findByRole("heading", { name: "Ready when you are." });
-  fireEvent.click(screen.getByRole("button", { name: startButton }));
+  fireEvent.click(screen.getByRole("button", { name: "practice" }));
+  await screen.findByRole("heading", { name: "Choose deliberate practice." });
+  fireEvent.click(screen.getByRole("button", { name: mode === "hands-on" ? "Start hands-on" : "Start now" }));
   await screen.findByRole("heading", {
     name: started.kind === "hands-on" ? "Build, narrate, adapt." : "Stay in the conversation.",
   });
@@ -558,7 +603,7 @@ describe("App profile view", () => {
 });
 
 describe("App home view", () => {
-  it("blocks grounded interview start when the profile readiness gate is failing", async () => {
+  it("blocks the recommended-practice CTA when the profile readiness gate is failing", async () => {
     await renderHomeView({
       progress: {
         readiness: null,
@@ -577,8 +622,31 @@ describe("App home view", () => {
       }),
     });
 
-    expect(screen.getByRole("button", { name: "Start interview" })).toBeDisabled();
-    expect(screen.getByText("Add the missing source detail in your profile before Relay starts a grounded interview.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start recommended practice" })).toBeDisabled();
+    expect(screen.getByText(/two concrete engineering projects or work examples/)).toBeInTheDocument();
+  });
+
+  it("navigates to Applications when its open-affordance button is clicked", async () => {
+    await renderHomeView({ progress: emptyProgress() });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open applications" }));
+
+    expect(await screen.findByRole("heading", { name: "Applications" })).toBeInTheDocument();
+  });
+
+  // The shell wires Home's onOpenStories/onOpenCoach to navigate("stories")/navigate("coach").
+  // Task 10 owns what those views render (both are intentionally empty for now, per R20), so
+  // this only proves the navigation happened -- Home's own content unmounting is the signal --
+  // not what replaces it.
+  it.each([
+    ["Open story bank", "stories"],
+    ["Open coach", "coach"],
+  ])("navigates away from Home when %s is clicked", async (buttonName) => {
+    await renderHomeView({ progress: emptyProgress() });
+
+    fireEvent.click(screen.getByRole("button", { name: buttonName }));
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Start recommended practice" })).not.toBeInTheDocument());
   });
 });
 
@@ -908,7 +976,7 @@ describe("App authentication shell", () => {
   it("signs out back to the sign-in screen", async () => {
     mockRoutes({
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/interview": () => ({ body: { sessions: [], progress: emptyProgress() } }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
     });
 
     render(<App />);
@@ -922,7 +990,6 @@ describe("App authentication shell", () => {
   it("returns to the sign-in screen when coach data comes back unauthenticated", async () => {
     mockRoutes({
       "/api/profile": () => ({ ok: false, status: 401, body: { error: "Sign in to continue." } }),
-      "/api/interview": () => ({ ok: false, status: 401, body: { error: "Sign in to continue." } }),
     });
 
     render(<App />);
@@ -940,7 +1007,7 @@ describe("App onboarding and profile review", () => {
       "/api/profile": (init) => init?.method
         ? { body: { profile: created, demoMode: false } }
         : { body: { profile: null, demoMode: false } },
-      "/api/interview": () => ({ body: { sessions: [], progress: emptyProgress() } }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(created, [], emptyProgress()) }),
     });
 
     render(<App />);
@@ -967,7 +1034,6 @@ describe("App onboarding and profile review", () => {
       "/api/profile": (init) => init?.method
         ? { ok: false, status: 500, body: { error: "Could not read that CV." } }
         : { body: { profile: null, demoMode: false } },
-      "/api/interview": () => ({ body: { sessions: [], progress: emptyProgress() } }),
     });
 
     render(<App />);
@@ -988,7 +1054,7 @@ describe("App onboarding and profile review", () => {
       "/api/profile": (init) => init?.method
         ? { body: { profile: created, demoMode: false } }
         : { body: { profile: null, demoMode: false } },
-      "/api/interview": () => ({ body: { sessions: [], progress: emptyProgress() } }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(created, [], emptyProgress()) }),
     });
 
     render(<App />);
@@ -1018,11 +1084,10 @@ describe("App onboarding and profile review", () => {
 describe("App conversation interview", () => {
   it("starts a grounded conversation and renders the interviewer message", async () => {
     const started = activeConversationSession();
-    const fetchMock = await startInterviewFrom("Start interview", started, {
+    const fetchMock = await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/interview": (init) => init?.method === "POST"
-        ? { body: { session: started } }
-        : { body: { sessions: [], progress: emptyProgress() } },
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/interview": () => ({ body: { session: started } }),
     });
 
     const startCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "POST");
@@ -1042,12 +1107,10 @@ describe("App conversation interview", () => {
         { id: "question-1:answer", role: "candidate", content: "Phase by route.", createdAt: "2026-08-29T10:05:00.000Z" },
       ],
     });
-    const fetchMock = await startInterviewFrom("Start interview", started, {
+    const fetchMock = await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/interview": (init) => {
-        if (init?.method !== "POST") return { body: { sessions: [], progress: emptyProgress() } };
-        return requestBody(init).action === "start" ? { body: { session: started } } : { body: { session: answered } };
-      },
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/interview": (init) => requestBody(init).action === "start" ? { body: { session: started } } : { body: { session: answered } },
     });
 
     const composer = screen.getByPlaceholderText("Answer as if you were in the room…");
@@ -1068,14 +1131,12 @@ describe("App conversation interview", () => {
   it("shows the results view once the interview completes", async () => {
     const started = activeConversationSession();
     const completed = session({ id: "session-active", overallScore: 7.5, resultSummary: { summary: "Strong migration reasoning." } });
-    await startInterviewFrom("Start interview", started, {
+    await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/interview": (init) => {
-        if (init?.method !== "POST") return { body: { sessions: [completed], progress: emptyProgress() } };
-        return requestBody(init).action === "start"
-          ? { body: { session: started } }
-          : { body: { session: completed, profile: profile() } };
-      },
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [completed], emptyProgress()) }),
+      "/api/interview": (init) => requestBody(init).action === "start"
+        ? { body: { session: started } }
+        : { body: { session: completed, profile: profile() } },
     });
 
     fireEvent.change(screen.getByPlaceholderText("Answer as if you were in the room…"), { target: { value: "Phase by route." } });
@@ -1088,14 +1149,12 @@ describe("App conversation interview", () => {
 
   it("reports a failed answer without clearing the composer", async () => {
     const started = activeConversationSession();
-    await startInterviewFrom("Start interview", started, {
+    await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/interview": (init) => {
-        if (init?.method !== "POST") return { body: { sessions: [], progress: emptyProgress() } };
-        return requestBody(init).action === "start"
-          ? { body: { session: started } }
-          : { ok: false, status: 500, body: { error: "The coach is unavailable." } };
-      },
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/interview": (init) => requestBody(init).action === "start"
+        ? { body: { session: started } }
+        : { ok: false, status: 500, body: { error: "The coach is unavailable." } },
     });
 
     fireEvent.change(screen.getByPlaceholderText("Answer as if you were in the room…"), { target: { value: "Phase by route." } });
@@ -1109,11 +1168,10 @@ describe("App conversation interview", () => {
 describe("App hands-on interview", () => {
   it("opens the exercise brief with the starter code loaded into the workspace", async () => {
     const started = activeHandsOnSession();
-    const fetchMock = await startInterviewFrom("Hands-on interview", started, {
+    const fetchMock = await startInterviewFrom("hands-on", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/interview": (init) => init?.method === "POST"
-        ? { body: { session: started } }
-        : { body: { sessions: [], progress: emptyProgress() } },
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/interview": () => ({ body: { session: started } }),
     });
 
     const startCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "POST");
@@ -1137,12 +1195,10 @@ describe("App hands-on interview", () => {
         },
       ],
     });
-    const fetchMock = await startInterviewFrom("Hands-on interview", started, {
+    const fetchMock = await startInterviewFrom("hands-on", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/interview": (init) => {
-        if (init?.method !== "POST") return { body: { sessions: [], progress: emptyProgress() } };
-        return requestBody(init).action === "start" ? { body: { session: started } } : { body: { session: withCheckpoint } };
-      },
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/interview": (init) => requestBody(init).action === "start" ? { body: { session: started } } : { body: { session: withCheckpoint } },
     });
 
     const note = screen.getByPlaceholderText("For example: I am cancelling in-flight searches and will add keyboard state next…");
@@ -1201,11 +1257,10 @@ describe("App answer transcription", () => {
   it("appends the transcript of a recorded answer to the composer", async () => {
     const { track } = stubMicrophone();
     const started = activeConversationSession();
-    await startInterviewFrom("Start interview", started, {
+    await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/interview": (init) => init?.method === "POST"
-        ? { body: { session: started } }
-        : { body: { sessions: [], progress: emptyProgress() } },
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/interview": () => ({ body: { session: started } }),
       "/api/transcribe": () => ({ body: { transcript: "I would phase the migration by route." } }),
     });
 
@@ -1221,11 +1276,10 @@ describe("App answer transcription", () => {
   it("reports a failed transcription and leaves the composer untouched", async () => {
     stubMicrophone();
     const started = activeConversationSession();
-    await startInterviewFrom("Start interview", started, {
+    await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/interview": (init) => init?.method === "POST"
-        ? { body: { session: started } }
-        : { body: { sessions: [], progress: emptyProgress() } },
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/interview": () => ({ body: { session: started } }),
       "/api/transcribe": () => ({ ok: false, status: 500, body: { error: "Could not transcribe recording." } }),
     });
 
@@ -1238,11 +1292,10 @@ describe("App answer transcription", () => {
 
   it("explains that recording is unavailable when the browser has no MediaRecorder", async () => {
     const started = activeConversationSession();
-    await startInterviewFrom("Start interview", started, {
+    await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/interview": (init) => init?.method === "POST"
-        ? { body: { session: started } }
-        : { body: { sessions: [], progress: emptyProgress() } },
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/interview": () => ({ body: { session: started } }),
     });
 
     fireEvent.click(screen.getByRole("button", { name: "● Record answer" }));

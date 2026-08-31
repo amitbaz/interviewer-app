@@ -1,17 +1,46 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { ApiError, api } from "@/app/api-client";
+import {
+  ApiError,
+  api,
+  addOpportunityNote,
+  createOpportunity,
+  fetchCareerDashboard,
+  scheduleOpportunityInterview,
+  startRecommendedPractice,
+  transitionOpportunity,
+  updateOpportunity,
+  type CreateOpportunityRequest,
+  type OpportunityTransitionOptions,
+  type ScheduleOpportunityInterviewOptions,
+} from "@/app/api-client";
 import { ResultsFeedbackCards } from "@/app/results-feedback-cards";
-import type { EvidenceItem, HandsOnExercise, InterviewSession, Profile, ProgressSnapshot } from "@/lib/types";
+import { ApplicationsView } from "@/app/views/applications-view";
+import { HomeView } from "@/app/views/home-view";
+import type {
+  CareerDashboard,
+  EvidenceItem,
+  HandsOnExercise,
+  InterviewSession,
+  Opportunity,
+  OpportunityEvent,
+  OpportunityStatus,
+  Profile,
+  ProgressSnapshot,
+  UpdateOpportunityDetailsInput,
+} from "@/lib/types";
 import { progressViewModel } from "@/app/progress-view-model";
 import { createBrowserSupabaseClient } from "@/lib/supabase/client";
 import { MAX_CV_PDF_BYTES } from "@/lib/upload-limits";
 
-type View = "home" | "onboarding" | "profile-review" | "interview" | "results" | "progress" | "profile" | "practice";
+// "stories" and "coach" are reachable now (Home's onOpenStories/onOpenCoach
+// navigate to them, per R20) but intentionally render nothing until Task 10
+// builds them -- see the empty render cases below.
+type View = "home" | "onboarding" | "profile-review" | "interview" | "results" | "progress" | "profile" | "practice" | "applications" | "stories" | "coach";
 type InterviewMode = "conversation" | "hands-on";
 type AuthState = "loading" | "signed-out" | "signed-in";
-const nav: View[] = ["home", "practice", "progress", "profile"];
+const nav: View[] = ["home", "applications", "practice", "progress", "profile"];
 function startViewTransition(update: () => void) {
   const documentWithTransition = document as Document & { startViewTransition?: (callback: () => void) => void };
   if (documentWithTransition.startViewTransition) {
@@ -21,25 +50,31 @@ function startViewTransition(update: () => void) {
   update();
 }
 
-type CoachData = {
+type CareerData = {
   profile: Profile | null;
   demoMode: boolean;
-  sessions: InterviewSession[];
-  progress: ProgressSnapshot;
+  /** The full Career Brain dashboard, or null when the caller has no profile yet (onboarding). */
+  dashboard: CareerDashboard | null;
 };
 
-async function loadCoachData(): Promise<CoachData> {
-  const [profileResult, sessionsResult] = await Promise.all([
-    api<{ profile: Profile | null; demoMode: boolean }>("/api/profile"),
-    api<{ sessions: InterviewSession[]; progress: ProgressSnapshot }>("/api/interview"),
-  ]);
-
-  return {
-    profile: profileResult.profile,
-    demoMode: profileResult.demoMode,
-    sessions: sessionsResult.sessions,
-    progress: sessionsResult.progress,
-  };
+/**
+ * Loads the shell's post-auth data. `/api/profile` decides the onboarding
+ * vs. home branch (and carries `demoMode`, which reflects process
+ * configuration rather than Career Brain data); when a profile exists,
+ * `/api/career/dashboard` -- the single canonical Career Brain read model --
+ * is fetched for progress, sessions, opportunities, observations, stories,
+ * and the current practice recommendation. Replaces the old `loadCoachData`,
+ * which read progress/sessions from `GET /api/interview`; that endpoint is
+ * still used for interview actions (`POST /api/interview`), just no longer
+ * for the shell's bootstrapping read model.
+ */
+async function loadCareerData(): Promise<CareerData> {
+  const profileResult = await api<{ profile: Profile | null; demoMode: boolean }>("/api/profile");
+  if (!profileResult.profile) {
+    return { profile: null, demoMode: profileResult.demoMode, dashboard: null };
+  }
+  const dashboard = await fetchCareerDashboard();
+  return { profile: dashboard.profile, demoMode: profileResult.demoMode, dashboard };
 }
 
 function progressTrendLabel(trend: ProgressSnapshot["trend"]): string | null {
@@ -108,6 +143,7 @@ function evidenceSummary(item: EvidenceItem): string {
  */
 export function RelayShell() {
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [dashboard, setDashboard] = useState<CareerDashboard | null>(null);
   const [session, setSession] = useState<InterviewSession | null>(null);
   const [sessions, setSessions] = useState<InterviewSession[]>([]);
   const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
@@ -156,18 +192,19 @@ export function RelayShell() {
   useEffect(() => {
     if (authState !== "signed-in") return;
     let active = true;
-    loadCoachData().then((coachData) => {
+    loadCareerData().then((careerData) => {
       if (!active) return;
-      setProfile(coachData.profile);
-      setDemoMode(coachData.demoMode);
-      setSessions(coachData.sessions);
-      setProgress(coachData.progress);
-      setView(coachData.profile ? "home" : "onboarding");
+      setProfile(careerData.profile);
+      setDemoMode(careerData.demoMode);
+      setDashboard(careerData.dashboard);
+      setSessions(careerData.dashboard?.recentSessions ?? []);
+      setProgress(careerData.dashboard?.progress ?? null);
+      setView(careerData.profile ? "home" : "onboarding");
       setCoachDataLoading(false);
     }).catch((caught) => {
       if (!active) return;
       if (caught instanceof ApiError && caught.status === 401) {
-        setProfile(null); setProgress(null); setSession(null); setSessions([]); setView("onboarding"); setAuthState("signed-out"); setCoachDataLoading(false);
+        setProfile(null); setProgress(null); setSession(null); setSessions([]); setDashboard(null); setView("onboarding"); setAuthState("signed-out"); setCoachDataLoading(false);
         return;
       }
       setError(caught instanceof Error ? caught.message : "Could not open your coach data.");
@@ -176,8 +213,27 @@ export function RelayShell() {
     return () => { active = false; };
   }, [authState]);
 
+  /**
+   * Re-fetches the canonical Career Brain dashboard after a mutation
+   * (interview completion, an opportunity change) and mirrors it into the
+   * shell's flat `profile`/`sessions`/`progress` state so every view stays
+   * consistent with a single source of truth.
+   */
+  async function refreshDashboard(): Promise<CareerDashboard | null> {
+    try {
+      const next = await fetchCareerDashboard();
+      setProfile(next.profile);
+      setDashboard(next);
+      setSessions(next.recentSessions);
+      setProgress(next.progress);
+      return next;
+    } catch (caught) {
+      handleRequestError(caught, "Could not refresh your dashboard.");
+      return null;
+    }
+  }
+
   const { hasEvidence, readiness, weakest } = progressViewModel(progress);
-  const complete = sessions.find((item) => item.status === "complete");
   const handsOn = session?.kind === "hands-on";
   const exercise = handsOn ? session?.exercise as HandsOnExercise : null;
   const sessionSummary = session ? String(session.resultSummary.summary ?? "Complete a few questions to receive personalized feedback.") : "";
@@ -241,7 +297,10 @@ export function RelayShell() {
     try {
       const expertise = draftExpertise.split(",").map((item) => item.trim()).filter(Boolean);
       const result = await api<{ profile: Profile; demoMode: boolean }>("/api/profile", { method: "PUT", body: JSON.stringify({ profile: { role: draftRole, seniority: draftSeniority, narrative: draftNarrative, expertise } }) });
-      setProfile(result.profile); setDemoMode(result.demoMode); navigate("home");
+      setProfile(result.profile); setDemoMode(result.demoMode);
+      // A brand-new account's initial load never fetched the dashboard (no profile existed yet) -- confirming here is the first moment one exists, so Home needs it loaded before navigating.
+      await refreshDashboard();
+      navigate("home");
     } catch (caught) { handleRequestError(caught, "Could not save profile."); } finally { setBusy(false); }
   }
   async function startInterview(mode: InterviewMode = "conversation") {
@@ -251,17 +310,67 @@ export function RelayShell() {
       persistSession(result.session); setAnswer(""); setCheckpointNote(""); setCode((result.session.exercise as Partial<HandsOnExercise>).starterCode ?? ""); navigate("interview");
     } catch (caught) { handleRequestError(caught, "Could not start interview."); } finally { setBusy(false); }
   }
+  /** Home's dominant CTA. The recommendation is recomputed server-side on start, never replayed from what's on screen. */
+  async function handleStartRecommended() {
+    setBusy(true); setError("");
+    try {
+      const { session: startedSession } = await startRecommendedPractice();
+      persistSession(startedSession); setAnswer(""); setCheckpointNote(""); setCode((startedSession.exercise as Partial<HandsOnExercise>).starterCode ?? ""); navigate("interview");
+    } catch (caught) { handleRequestError(caught, "Could not start recommended practice."); } finally { setBusy(false); }
+  }
+  // --- Applications mutations -------------------------------------------
+  // Each wraps one api-client call, refreshes the dashboard on success so
+  // Home and Applications both reflect the change, and rethrows on failure
+  // so ApplicationsView's local handler can keep its form open instead of
+  // silently discarding the user's edits.
+  async function handleCreateOpportunity(input: CreateOpportunityRequest): Promise<Opportunity> {
+    setBusy(true); setError("");
+    try {
+      const created = await createOpportunity(input);
+      await refreshDashboard();
+      return created;
+    } catch (caught) { handleRequestError(caught, "Could not add that application."); throw caught; } finally { setBusy(false); }
+  }
+  async function handleUpdateOpportunity(opportunityId: string, input: UpdateOpportunityDetailsInput): Promise<Opportunity> {
+    setBusy(true); setError("");
+    try {
+      const updated = await updateOpportunity(opportunityId, input);
+      await refreshDashboard();
+      return updated;
+    } catch (caught) { handleRequestError(caught, "Could not save those changes."); throw caught; } finally { setBusy(false); }
+  }
+  async function handleTransitionOpportunity(opportunityId: string, toStatus: OpportunityStatus, options?: OpportunityTransitionOptions): Promise<Opportunity> {
+    setBusy(true); setError("");
+    try {
+      const transitioned = await transitionOpportunity(opportunityId, toStatus, options);
+      await refreshDashboard();
+      return transitioned;
+    } catch (caught) { handleRequestError(caught, "Could not update that application's status."); throw caught; } finally { setBusy(false); }
+  }
+  async function handleScheduleOpportunityInterview(opportunityId: string, interviewAt: string, options?: ScheduleOpportunityInterviewOptions): Promise<Opportunity> {
+    setBusy(true); setError("");
+    try {
+      const scheduled = await scheduleOpportunityInterview(opportunityId, interviewAt, options);
+      await refreshDashboard();
+      return scheduled;
+    } catch (caught) { handleRequestError(caught, "Could not schedule that interview."); throw caught; } finally { setBusy(false); }
+  }
+  async function handleAddOpportunityNote(opportunityId: string, note: string): Promise<OpportunityEvent> {
+    setBusy(true); setError("");
+    try {
+      const event = await addOpportunityNote(opportunityId, note);
+      await refreshDashboard();
+      return event;
+    } catch (caught) { handleRequestError(caught, "Could not save that note."); throw caught; } finally { setBusy(false); }
+  }
   async function sendAnswer(event: FormEvent) {
     event.preventDefault(); if (!session || !answer.trim()) return; setBusy(true); setError("");
     try {
       const result = await api<{ session: InterviewSession; profile?: Profile }>("/api/interview", { method: "POST", body: JSON.stringify({ action: "respond", sessionId: session.id, answer }) });
       setAnswer(""); persistSession(result.session);
       if (result.session.status === "complete" && result.profile) {
-        const coachData = await loadCoachData();
-        setProfile(coachData.profile ?? result.profile);
-        setDemoMode(coachData.demoMode);
-        setSessions(coachData.sessions);
-        setProgress(coachData.progress);
+        const refreshed = await refreshDashboard();
+        if (!refreshed) setProfile(result.profile);
         navigate("results");
       }
     } catch (caught) { handleRequestError(caught, "Could not send answer."); } finally { setBusy(false); }
@@ -313,11 +422,8 @@ export function RelayShell() {
     try {
       const result = await api<{ session: InterviewSession; profile: Profile }>("/api/interview", { method: "POST", body: JSON.stringify({ action: "complete", sessionId: session.id }) });
       persistSession(result.session);
-      const coachData = await loadCoachData();
-      setProfile(coachData.profile ?? result.profile);
-      setDemoMode(coachData.demoMode);
-      setSessions(coachData.sessions);
-      setProgress(coachData.progress);
+      const refreshed = await refreshDashboard();
+      if (!refreshed) setProfile(result.profile);
       navigate("results");
     } catch (caught) { handleRequestError(caught, "Could not finish interview."); } finally { setBusy(false); }
   }
@@ -399,7 +505,11 @@ export function RelayShell() {
     {view === "onboarding" && <section className="mx-auto w-full max-w-3xl py-6 md:py-14"><p className="mb-4 text-sm font-semibold uppercase tracking-[.18em] text-[#5d7567]">Your personal interview coach</p><h1 className="max-w-2xl text-4xl font-semibold tracking-[-.04em] md:text-6xl">Make your next interview feel familiar.</h1><p className="mt-5 max-w-xl text-lg leading-8 text-[var(--ink-muted)]">Start with the facts of your career. Relay turns them into focused practice, not a generic question bank.</p><form onSubmit={createProfile} className="mt-10 space-y-5 rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-5 shadow-[0_12px_32px_rgba(27,42,34,.06)] md:p-8"><label className="block text-sm font-semibold">Upload your CV <span className="font-normal text-[var(--ink-muted)]">(PDF, optional)</span><input accept="application/pdf" type="file" onChange={(event) => setCvPdf(event.target.files?.[0] ?? null)} className="mt-2 block w-full rounded-xl border border-[var(--line)] bg-white p-3 text-sm" />{cvPdf && <span className="mt-2 block text-xs font-normal text-[#38502e]">{cvPdf.name} will be read with Gemini.</span>}</label><label className="block text-sm font-semibold">Paste your CV or LinkedIn-style summary <span className="font-normal text-[var(--ink-muted)]">{cvPdf ? "(optional when a PDF is selected)" : ""}</span><textarea required={!cvPdf} value={cvText} onChange={(event) => setCvText(event.target.value)} placeholder="Senior Frontend Engineer · React · TypeScript · achievements…" className="mt-2 min-h-52 w-full rounded-2xl border border-[var(--line)] bg-white p-4 text-sm leading-6 outline-none focus:border-[var(--pine)]" /></label><label className="block text-sm font-semibold">Career narrative <span className="font-normal text-[var(--ink-muted)]">(optional)</span><textarea value={coverLetter} onChange={(event) => setCoverLetter(event.target.value)} placeholder="What kind of role are you moving toward?" className="mt-2 min-h-28 w-full rounded-2xl border border-[var(--line)] bg-white p-4 text-sm leading-6 outline-none focus:border-[var(--pine)]" /></label><button disabled={busy} className="rounded-full bg-[var(--pine)] px-5 py-3 text-sm font-semibold text-white disabled:opacity-50">{busy ? cvPdf ? "Reading CV…" : "Building profile…" : "Create my profile"}</button></form></section>}
     {profile && view === "profile-review" && <section className="mx-auto w-full max-w-3xl py-6 md:py-14"><p className="text-sm font-semibold uppercase tracking-[.18em] text-[#5d7567]">Profile review</p><h1 className="mt-3 text-4xl font-semibold tracking-[-.04em]">Make the coach accurate.</h1><p className="mt-4 max-w-2xl leading-7 text-[var(--ink-muted)]">Relay will use this profile to choose questions and practice focus. Correct anything that is off before you begin.</p><form onSubmit={confirmProfile} className="mt-8 space-y-5 rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-5 md:p-8"><div className="grid gap-5 md:grid-cols-2"><label className="block text-sm font-semibold">Role<input required value={draftRole} onChange={(event) => setDraftRole(event.target.value)} className="mt-2 w-full rounded-xl border border-[var(--line)] bg-white px-3 py-3 text-sm outline-none focus:border-[var(--pine)]" /></label><label className="block text-sm font-semibold">Seniority<input required value={draftSeniority} onChange={(event) => setDraftSeniority(event.target.value)} className="mt-2 w-full rounded-xl border border-[var(--line)] bg-white px-3 py-3 text-sm outline-none focus:border-[var(--pine)]" /></label></div><label className="block text-sm font-semibold">Professional narrative<textarea required value={draftNarrative} onChange={(event) => setDraftNarrative(event.target.value)} className="mt-2 min-h-32 w-full rounded-xl border border-[var(--line)] bg-white p-3 text-sm leading-6 outline-none focus:border-[var(--pine)]" /></label><label className="block text-sm font-semibold">Primary expertise <span className="font-normal text-[var(--ink-muted)]">(comma separated)</span><textarea required value={draftExpertise} onChange={(event) => setDraftExpertise(event.target.value)} className="mt-2 min-h-24 w-full rounded-xl border border-[var(--line)] bg-white p-3 text-sm leading-6 outline-none focus:border-[var(--pine)]" /></label><div className="flex flex-wrap gap-3"><button disabled={busy} className="rounded-full bg-[var(--pine)] px-5 py-3 text-sm font-semibold text-white disabled:opacity-50">{busy ? "Saving…" : "Confirm profile"}</button><button type="button" onClick={() => { setCvText(profile.source.cvText); setCoverLetter(profile.source.coverLetter); navigate("onboarding"); }} className="rounded-full border border-[var(--line)] px-5 py-3 text-sm font-semibold">Edit source text</button></div></form></section>}
     {profile && view !== "onboarding" && view !== "profile-review" && <div className="flex flex-1 flex-col gap-7 md:flex-row"><aside className="order-2 flex shrink-0 gap-1 overflow-auto rounded-2xl border border-[var(--line)] bg-[var(--paper)] p-2 md:order-1 md:w-44 md:flex-col md:self-start">{nav.map((item) => <button key={item} onClick={() => navigate(item)} className={`rounded-xl px-3 py-2.5 text-left text-sm capitalize ${view === item ? "bg-[var(--pine)] text-white" : "text-[var(--ink-muted)] hover:bg-[#eef0ea]"}`}>{item}</button>)}</aside><section className="order-1 min-w-0 flex-1 md:order-2">
-      {view === "home" && <><p className="text-sm text-[var(--ink-muted)]">Welcome back</p><h1 className="mt-1 text-4xl font-semibold tracking-[-.04em]">Ready when you are.</h1><div className="mt-7 grid gap-5 lg:grid-cols-[1.25fr_.75fr]"><article className="rounded-3xl bg-[var(--pine)] p-6 text-white md:p-8"><p className="text-sm text-[#c8d7cf]">Interview readiness</p>{hasEvidence && readiness !== null ? <strong className="mt-2 block text-6xl tracking-[-.06em]">{readiness}<span className="ml-2 text-2xl text-[#c8d7cf]">/ 100</span></strong> : <h2 className="mt-2 text-3xl font-semibold tracking-[-.04em]">Not enough data yet</h2>}<p className="mt-5 max-w-md leading-6 text-[#dbe7df]">{hasEvidence ? "A coaching signal based on your completed practice—not a hiring prediction." : "Your first mixed interview establishes a baseline across technical, architecture, and communication skills."}</p>{profileReadinessNote && <p className="mt-4 max-w-md text-sm leading-6 text-[#dbe7df]">{profileReadinessNote}</p>}{groundedInterviewBlocked && <p className="mt-4 max-w-md text-sm leading-6 text-[#dbe7df]">Add the missing source detail in your profile before Relay starts a grounded interview.</p>}<div className="mt-7 flex flex-wrap gap-3"><button onClick={() => startInterview()} disabled={busy || groundedInterviewBlocked} className="rounded-full bg-[var(--lime)] px-5 py-3 text-sm font-semibold text-[#18281f] disabled:opacity-50">{busy ? "Preparing…" : "Start interview"}</button><button onClick={() => startInterview("hands-on")} disabled={busy} className="rounded-full border border-[#8da79c] px-5 py-3 text-sm font-semibold text-white">Hands-on interview</button></div></article>{hasEvidence && weakest ? <article className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><p className="text-sm font-semibold text-[var(--ink-muted)]">Recommended focus</p><h2 className="mt-3 text-2xl font-semibold">{weakest.name}</h2><p className="mt-3 leading-6 text-[var(--ink-muted)]">{weakest.weaknesses[0] ?? "Practice this area to strengthen your next interview."}</p><button onClick={() => navigate("practice")} className="mt-6 text-sm font-semibold text-[var(--pine)]">Practice this →</button></article> : <article className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><p className="text-sm font-semibold text-[var(--ink-muted)]">What happens next</p><h2 className="mt-3 text-2xl font-semibold">Build your baseline.</h2><p className="mt-3 leading-6 text-[var(--ink-muted)]">Answer the five-question backbone and any useful follow-ups, then Relay can make a grounded recommendation.</p></article>}</div><article className="mt-7 rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><p className="text-sm font-semibold text-[var(--ink-muted)]">Your last session</p><h2 className="mt-1 text-xl font-semibold">{complete && complete.overallScore !== null ? `${complete.overallScore}/10 overall signal` : "No completed interviews yet"}</h2><p className="mt-4 leading-6 text-[var(--ink-muted)]">{complete?.resultSummary.summary ? String(complete.resultSummary.summary) : "Your first mixed interview establishes a starting point across technical, architecture, and communication skills."}</p></article></>}
+      {view === "home" && dashboard && <><p className="text-sm text-[var(--ink-muted)]">Welcome back</p><h1 className="mt-1 text-4xl font-semibold tracking-[-.04em]">Ready when you are.</h1><div className="mt-7"><HomeView dashboard={dashboard} busy={busy} onStartRecommended={handleStartRecommended} onOpenApplications={() => navigate("applications")} onOpenStories={() => navigate("stories")} onOpenCoach={() => navigate("coach")} onOpenProgress={() => navigate("progress")} /></div></>}
+      {/* Task 10 fills these render cases (Stories, Coach); intentionally empty for now per R20 -- this is sequencing, not omission. */}
+      {view === "stories" && null}
+      {view === "coach" && null}
+      {view === "applications" && <ApplicationsView opportunities={dashboard?.opportunities ?? []} busy={busy} onCreate={handleCreateOpportunity} onUpdate={handleUpdateOpportunity} onTransition={handleTransitionOpportunity} onScheduleInterview={handleScheduleOpportunityInterview} onAddNote={handleAddOpportunityNote} />}
       {view === "interview" && session && !handsOn && <><div className="flex items-start justify-between gap-4"><div><p className="text-sm text-[var(--ink-muted)]">Mixed interview · {answeredQuestions} of {session.questions.length} answered</p><h1 className="mt-1 text-3xl font-semibold tracking-[-.04em]">Stay in the conversation.</h1></div><button onClick={finishInterview} disabled={busy || answeredQuestions < 5} className="rounded-full border border-[var(--line)] px-4 py-2 text-sm font-semibold disabled:opacity-40">Finish</button></div>{session.blueprint?.status === "limited-grounding" && <article className="mt-6 rounded-3xl border border-[#e4c9a0] bg-[#fff6eb] p-5 text-[#8e5e20]"><p className="text-sm font-semibold uppercase tracking-[.14em]">Limited grounding</p><p className="mt-2 leading-6">{session.blueprint.fallbackReason ?? "This session used a constrained fallback blueprint, so the questions are broader than the source evidence would normally allow."}</p></article>}<div className="mt-6 space-y-4">{session.messages.map((message) => renderConversationMessage(message))}</div><form onSubmit={sendAnswer} className="sticky bottom-3 mt-5 rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-3 shadow-[0_10px_30px_rgba(25,41,33,.1)]"><textarea value={answer} onChange={(event) => setAnswer(event.target.value)} disabled={busy} placeholder="Answer as if you were in the room…" className="min-h-28 w-full resize-none bg-transparent p-3 text-sm leading-6 outline-none" /><div className="flex items-center justify-between gap-3 border-t border-[var(--line)] px-2 pt-3"><button type="button" onClick={toggleRecording} disabled={busy} className={`rounded-full px-3 py-2 text-xs font-semibold ${isRecording ? "bg-[#fff0ed] text-[#8e3226]" : "bg-[#eef3e7] text-[#38502e]"}`}>{isRecording ? "■ Stop & transcribe" : "● Record answer"}</button><span className="text-xs text-[var(--ink-muted)]">Edit the transcript before sending.</span><button disabled={busy || !answer.trim()} className="rounded-full bg-[var(--pine)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{busy ? "Thinking…" : "Send answer"}</button></div></form></>}
       {view === "interview" && session && handsOn && <><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-sm text-[var(--ink-muted)]">Hands-on technical interview · React + TypeScript · {exercise?.durationMinutes} minutes</p><h1 className="mt-1 text-3xl font-semibold tracking-[-.04em]">Build, narrate, adapt.</h1></div><button onClick={finishInterview} disabled={busy || !session.checkpoints.length} className="rounded-full border border-[var(--line)] px-4 py-2 text-sm font-semibold disabled:opacity-40">Finish &amp; review</button></div><div className="mt-6 grid gap-5 xl:grid-cols-[.8fr_1.2fr]"><aside className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><p className="text-sm font-semibold text-[var(--ink-muted)]">Your brief</p><h2 className="mt-2 text-2xl font-semibold">{exercise?.title}</h2><p className="mt-4 leading-7 text-[var(--ink-muted)]">{exercise?.briefing}</p><h3 className="mt-6 text-sm font-semibold uppercase tracking-[.12em] text-[var(--ink-muted)]">Requirements</h3><ul className="mt-3 space-y-3 text-sm leading-6 text-[var(--ink-muted)]">{exercise?.requirements.map((requirement) => <li key={requirement} className="flex gap-2"><span className="text-[var(--pine)]">•</span>{requirement}</li>)}</ul><p className="mt-6 rounded-xl bg-[#eef3e7] p-3 text-sm leading-6 text-[#38502e]">Think aloud at each checkpoint. The interviewer can challenge your approach, but will not write the solution for you.</p></aside><div><label className="block text-sm font-semibold">Workspace<textarea aria-label="TypeScript code workspace" spellCheck={false} value={code} onChange={(event) => setCode(event.target.value)} disabled={busy} className="mt-2 min-h-[31rem] w-full resize-y rounded-2xl border border-[#1d332b] bg-[#13241e] p-5 font-mono text-sm leading-6 text-[#e7f2e6] outline-none focus:border-[var(--lime)]" /></label><form onSubmit={saveCheckpoint} className="mt-4 rounded-2xl border border-[var(--line)] bg-[var(--paper)] p-4"><label className="block text-sm font-semibold">What are you doing and why?<textarea value={checkpointNote} onChange={(event) => setCheckpointNote(event.target.value)} disabled={busy} placeholder="For example: I am cancelling in-flight searches and will add keyboard state next…" className="mt-2 min-h-24 w-full resize-none rounded-xl border border-[var(--line)] bg-white p-3 text-sm leading-6 outline-none focus:border-[var(--pine)]" /></label><div className="mt-3 flex items-center justify-between gap-3"><span className="text-xs text-[var(--ink-muted)]">{session.checkpoints.length} checkpoint{session.checkpoints.length === 1 ? "" : "s"} saved</span><button disabled={busy || !code.trim() || !checkpointNote.trim()} className="rounded-full bg-[var(--pine)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{busy ? "Interviewer is reviewing…" : "Save checkpoint"}</button></div></form></div></div><div className="mt-6 space-y-3">{session.messages.map((message) => <article key={message.id} className={`max-w-3xl rounded-2xl p-4 text-sm leading-6 ${message.role === "interviewer" ? "border border-[var(--line)] bg-[var(--paper)]" : "bg-[#dff0d4]"}`}><p className="mb-1 text-xs font-semibold uppercase tracking-[.14em] text-[var(--ink-muted)]">{message.role === "interviewer" ? "Interviewer" : "Your checkpoint"}</p>{message.content}</article>)}</div></>}
       {view === "results" && session && <><p className="text-sm text-[var(--ink-muted)]">{handsOn ? "Hands-on interview complete" : "Interview complete"}</p><h1 className="mt-1 text-4xl font-semibold tracking-[-.04em]">{handsOn ? "A realistic technical signal." : "A useful baseline."}</h1>{session.blueprint?.status === "limited-grounding" && <article className="mt-7 rounded-3xl border border-[#e4c9a0] bg-[#fff6eb] p-5 text-[#8e5e20]"><p className="text-sm font-semibold uppercase tracking-[.14em]">Limited grounding</p><p className="mt-2 leading-6">{session.blueprint.fallbackReason ?? "This session used a constrained fallback blueprint, so the feedback may be broader than a fully grounded session."}</p></article>}<article className="mt-7 rounded-3xl bg-[var(--pine)] p-7 text-white"><p className="text-sm text-[#c8d7cf]">Overall coaching signal</p><strong className="mt-2 block text-6xl tracking-[-.06em]">{session.overallScore}<span className="ml-2 text-2xl text-[#c8d7cf]">/ 10</span></strong><p className="mt-5 max-w-2xl leading-7 text-[#dbe7df]">{sessionSummary}</p></article><ResultsFeedbackCards session={session} evidence={profile?.evidence} /><button onClick={() => startInterview(handsOn ? "hands-on" : "conversation")} disabled={busy} className="mt-7 rounded-full bg-[var(--pine)] px-5 py-3 text-sm font-semibold text-white">Start another {handsOn ? "hands-on interview" : "interview"}</button></>}
