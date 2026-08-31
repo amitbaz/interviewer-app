@@ -54,21 +54,36 @@ const eventRow = (overrides: Row = {}): Row => ({
   ...overrides,
 });
 
-/** A single reusable chainable stub covering select/update/eq/order/maybeSingle. */
-function tableStub(result: RpcResult) {
+/**
+ * A single reusable chainable stub covering select/update/eq/order/maybeSingle.
+ * When given a `capture`, every `[field, value]` pair passed to `.eq(...)`
+ * on this builder is recorded, in call order, so tests can assert the
+ * actual scoping used -- not just that `.eq` was called some number of
+ * times. (An `.eq` stub that unconditionally returns `builder` can never
+ * fail a scoping assertion, which is the defect this capture exists to
+ * catch -- see `src/lib/repositories/practice-plans.test.ts`.)
+ */
+function tableStub(result: RpcResult, capture?: { eq?: Array<[string, unknown]> }) {
   const builder: Record<string, unknown> = {
     select: () => builder,
     update: () => builder,
-    eq: () => builder,
+    eq: (field: string, value: unknown) => {
+      if (capture) (capture.eq ??= []).push([field, value]);
+      return builder;
+    },
     order: async () => result,
     maybeSingle: async () => result,
   };
   return builder;
 }
 
-function clientWithRow(row: Row | null, rpcResult: RpcResult = { data: null, error: null }) {
+function clientWithRow(
+  row: Row | null,
+  rpcResult: RpcResult = { data: null, error: null },
+  capture?: { eq?: Array<[string, unknown]> },
+) {
   const rpc = vi.fn(async () => rpcResult);
-  const from = vi.fn(() => tableStub({ data: row, error: null }));
+  const from = vi.fn(() => tableStub({ data: row, error: null }, capture));
   return { rpc, from, supabase: { rpc, from } };
 }
 
@@ -180,7 +195,10 @@ describe("opportunities repository", () => {
       "2026-09-03T10:00:00.000Z",
     );
 
-    expect(rpc).toHaveBeenCalledWith("schedule_opportunity_interview", expect.any(Object));
+    expect(rpc).toHaveBeenCalledWith("schedule_opportunity_interview", expect.objectContaining({
+      p_opportunity_id: "opp-1",
+      p_interview_at: "2026-09-03T10:00:00.000Z",
+    }));
   });
 
   it("reloads the opportunity after scheduling an interview", async () => {
@@ -196,12 +214,16 @@ describe("opportunities repository", () => {
   });
 
   it("loads a single owned opportunity scoped by user id", async () => {
-    const { from, supabase } = clientWithRow(opportunityRow());
+    const capture: { eq?: Array<[string, unknown]> } = {};
+    const { from, supabase } = clientWithRow(opportunityRow(), { data: null, error: null }, capture);
 
     const opportunity = await getOpportunity(supabase as never, "user-1", "opp-1");
 
     expect(from).toHaveBeenCalledWith("opportunities");
     expect(opportunity?.company).toBe("Example");
+    // Must be scoped by BOTH the opportunity id and the requesting user id --
+    // an `.eq` stub that swallows its arguments could never fail this.
+    expect(capture.eq).toEqual([["id", "opp-1"], ["user_id", "user-1"]]);
   });
 
   it("returns null when the opportunity is not found", async () => {
@@ -212,12 +234,16 @@ describe("opportunities repository", () => {
     expect(opportunity).toBeNull();
   });
 
-  it("lists opportunities mapped from snake_case rows", async () => {
+  it("lists opportunities mapped from snake_case rows, scoped by user id", async () => {
+    const capture: { eq?: Array<[string, unknown]> } = {};
     const rpc = vi.fn();
     const from = vi.fn(() => {
       const builder: Record<string, unknown> = {
         select: () => builder,
-        eq: () => builder,
+        eq: (field: string, value: unknown) => {
+          (capture.eq ??= []).push([field, value]);
+          return builder;
+        },
         order: async () => ({ data: [opportunityRow(), opportunityRow({ id: "opp-2" })], error: null }),
       };
       return builder;
@@ -227,10 +253,14 @@ describe("opportunities repository", () => {
 
     expect(opportunities).toHaveLength(2);
     expect(opportunities[0]).toEqual(expect.objectContaining({ id: "opp-1", company: "Example" }));
+    // Must be scoped by the requesting user id -- an `.eq` stub that
+    // swallows its arguments could never fail this.
+    expect(capture.eq).toEqual([["user_id", "user-1"]]);
   });
 
-  it("updates descriptive opportunity details without touching lifecycle fields", async () => {
+  it("updates descriptive opportunity details without touching lifecycle fields, scoped by user id", async () => {
     let capturedPatch: Row | undefined;
+    const capture: { eq?: Array<[string, unknown]> } = {};
     const rpc = vi.fn();
     const from = vi.fn(() => {
       const builder: Record<string, unknown> = {
@@ -238,7 +268,10 @@ describe("opportunities repository", () => {
           capturedPatch = patch;
           return builder;
         },
-        eq: () => builder,
+        eq: (field: string, value: unknown) => {
+          (capture.eq ??= []).push([field, value]);
+          return builder;
+        },
         select: () => builder,
         maybeSingle: async () => ({ data: opportunityRow({ notes: "Updated notes" }), error: null }),
       };
@@ -254,14 +287,21 @@ describe("opportunities repository", () => {
     expect(capturedPatch).not.toHaveProperty("status");
     expect(capturedPatch).not.toHaveProperty("applied_at");
     expect(capturedPatch).not.toHaveProperty("next_interview_at");
+    // Must be scoped by BOTH the opportunity id and the requesting user id --
+    // an `.eq` stub that swallows its arguments could never fail this.
+    expect(capture.eq).toEqual([["id", "opp-1"], ["user_id", "user-1"]]);
   });
 
-  it("lists an opportunity's append-only event history", async () => {
+  it("lists an opportunity's append-only event history, scoped by user id", async () => {
+    const capture: { eq?: Array<[string, unknown]> } = {};
     const rpc = vi.fn();
     const from = vi.fn(() => {
       const builder: Record<string, unknown> = {
         select: () => builder,
-        eq: () => builder,
+        eq: (field: string, value: unknown) => {
+          (capture.eq ??= []).push([field, value]);
+          return builder;
+        },
         order: async () => ({ data: [eventRow()], error: null }),
       };
       return builder;
@@ -275,5 +315,8 @@ describe("opportunities repository", () => {
       eventType: "created",
       toStatus: "considering",
     })]);
+    // Must be scoped by BOTH the requesting user id and the opportunity id --
+    // an `.eq` stub that swallows its arguments could never fail this.
+    expect(capture.eq).toEqual([["user_id", "user-1"], ["opportunity_id", "opp-1"]]);
   });
 });

@@ -1146,6 +1146,30 @@ describe("linkSessionCareerContext", () => {
     expect(planOpportunitiesCapture.eq).toEqual([["user_id", "user-1"], ["practice_plan_id", "plan-1"]]);
   });
 
+  it("links a session to a non-primary opportunity when the plan has associated opportunities but no primary designation", async () => {
+    // Spec section 17.5 case 5's "if one exists" branch: when a plan has no
+    // `primary` link at all, `linkSessionCareerContext` only needs the
+    // requested opportunity to be associated with the plan -- there is no
+    // primary to match against.
+    const supabase = careerContextSupabase({
+      sessionRow: legacyRow({ practice_plan_id: "plan-1", opportunity_id: "opp-2" }),
+      planRow: { id: "plan-1", user_id: "user-1" },
+      opportunityRow: { id: "opp-2", user_id: "user-1" },
+      planOpportunityRows: [
+        { user_id: "user-1", practice_plan_id: "plan-1", opportunity_id: "opp-1", relevance: "supporting" },
+        { user_id: "user-1", practice_plan_id: "plan-1", opportunity_id: "opp-2", relevance: "supporting" },
+      ],
+    });
+
+    const session = await linkSessionCareerContext(supabase as never, "user-1", "session-legacy", {
+      practicePlanId: "plan-1",
+      opportunityId: "opp-2",
+    });
+
+    expect(session.practicePlanId).toBe("plan-1");
+    expect(session.opportunityId).toBe("opp-2");
+  });
+
   it("links a session to only a practice plan, without requiring any opportunity association check", async () => {
     const supabase = careerContextSupabase({
       sessionRow: legacyRow({ practice_plan_id: "plan-1" }),

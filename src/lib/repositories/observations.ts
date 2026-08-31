@@ -124,7 +124,15 @@ function observationEvidenceColumns(source: ObservationEvidenceSource): Row {
   if (source.kind === "profile_evidence") columns.profile_evidence_id = source.profileEvidenceId;
   else if (source.kind === "question_evaluation") columns.question_evaluation_id = source.questionEvaluationId;
   else if (source.kind === "career_story") columns.career_story_id = source.careerStoryId;
-  else columns.opportunity_event_id = source.opportunityEventId;
+  else if (source.kind === "opportunity_event") columns.opportunity_event_id = source.opportunityEventId;
+  else {
+    // Exhaustiveness guard: if `ObservationEvidenceSource` (spec §8.2
+    // anticipates further evidence-source kinds) ever grows a fifth variant
+    // without a branch here, this assignment fails to compile instead of
+    // silently writing `opportunity_event_id` for the wrong source.
+    const exhaustive: never = source;
+    throw new RepositoryError(`Unknown observation evidence source kind: ${JSON.stringify(exhaustive)}`, "INVALID_EVIDENCE_SOURCE");
+  }
   return columns;
 }
 
@@ -136,6 +144,17 @@ function observationEvidenceColumns(source: ObservationEvidenceSource): Row {
  * prior one. The original `claim` column is never included in this patch:
  * a correction is recorded separately in `user_correction`, and `claim`
  * stays untouched for every review state, including `corrected`.
+ *
+ * INTENTIONAL DATA LOSS: the `confirmed` and `dismissed` branches also set
+ * `user_correction: null`, clearing the correction TEXT itself, not just
+ * `corrected_at`. This is deliberate, not a bug -- a correction is scoped
+ * to the `corrected` review state, so once the user moves an observation to
+ * `confirmed` or `dismissed`, the prior correction text is discarded and
+ * unrecoverable through this table. Retaining it alongside a `confirmed`/
+ * `dismissed` state would leave correction text attached with nothing
+ * indicating whether it still applies. Durable correction history (e.g. for
+ * a user who corrects, then reconsiders) belongs in an append-only review
+ * log, which spec §8.1 leaves to Release 3's reconciliation rules.
  */
 function reviewColumns(review: CoachObservationReview): Row {
   const now = new Date().toISOString();

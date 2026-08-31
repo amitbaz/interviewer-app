@@ -219,6 +219,13 @@ export async function transitionOpportunity(
  * atomically, via the `schedule_opportunity_interview` RPC. The RPC also
  * moves a `considering`/`applied` opportunity into `interviewing`; it never
  * moves an `offer`, `rejected`, `withdrawn`, or `closed` opportunity back.
+ *
+ * NOTE: `options?.occurredAt` is accepted but silently ignored here -- the
+ * `schedule_opportunity_interview` SQL function has no `p_occurred_at`
+ * parameter, this call site does not pass one, and the RPC hardcodes the
+ * appended event's `occurred_at` to `now()`. Callers supplying `occurredAt`
+ * get no error and no effect; only `note`/`metadata` reach the RPC. Compare
+ * {@link transitionOpportunity}, whose RPC does accept `p_occurred_at`.
  */
 export async function scheduleOpportunityInterview(
   supabase: SupabaseClient,

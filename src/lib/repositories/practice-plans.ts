@@ -255,6 +255,20 @@ export async function updatePracticePlan(
  * previously-valid links are not restored. Callers must validate every
  * `opportunityId` (same user, still existing) before calling, rather than
  * relying on this function to roll back a partial failure.
+ *
+ * SESSION HAZARD -- NOT RE-VALIDATED: `linkSessionCareerContext` (see
+ * `src/lib/repositories/interviews.ts`) validates, at link time, that a
+ * session's opportunity is one the plan serves and, if the plan has a
+ * primary opportunity, that it matches that primary (design doc section
+ * 10). This function replaces a plan's link set with no awareness of
+ * sessions already pointing at it, and does not re-run that check. A
+ * session linked while its link set was valid can therefore be left
+ * holding `(practice_plan_id, opportunity_id)` where the opportunity is no
+ * longer associated with the plan, or where a different opportunity is now
+ * primary -- exactly the state `linkSessionCareerContext` refuses to
+ * create at link time. Nothing else re-validates existing sessions when
+ * this function runs, and the database does not catch it either
+ * (deliberately, per spec section 10).
  */
 export async function setPracticePlanOpportunities(
   supabase: SupabaseClient,
