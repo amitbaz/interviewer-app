@@ -451,6 +451,25 @@ export type CareerStory = {
 };
 
 /**
+ * The nine free-text fields a career story is drafted with. Passed to
+ * `careerStoryCompleteness` (`src/lib/career-story.ts`), which maps them
+ * onto six factual dimensions to score how much of the story is filled in
+ * -- see that function's doc comment for the exact mapping.
+ */
+export type CareerStoryDraftFields = Pick<
+  CareerStory,
+  | "situation"
+  | "responsibility"
+  | "problem"
+  | "actions"
+  | "alternatives"
+  | "tradeoffs"
+  | "ownership"
+  | "outcome"
+  | "lessons"
+>;
+
+/**
  * Typed provenance link from a career story to the durable evidence that
  * backs it. Exactly one source is set, enforced in the database with
  * `check (num_nonnulls(profile_evidence_id, interview_question_id) = 1)`.
