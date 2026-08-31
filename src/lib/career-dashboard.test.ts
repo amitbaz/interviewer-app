@@ -7,40 +7,28 @@ import type {
   PracticePlan,
   PracticeRecommendation,
   Profile,
+  ProgressSnapshot,
 } from "@/lib/types";
+import type { PracticeInputs } from "@/lib/practice-service";
 
 const mocks = vi.hoisted(() => ({
-  getProfile: vi.fn(),
-  listOpportunities: vi.fn(),
-  listCoachObservations: vi.fn(),
-  listObservationEvidence: vi.fn(),
-  listCareerStories: vi.fn(),
-  listCareerStoryEvidence: vi.fn(),
-  listRecentSessions: vi.fn(),
-  listPracticePlans: vi.fn(),
+  loadPracticeInputs: vi.fn(),
   recommendPractice: vi.fn(),
+  listObservationEvidence: vi.fn(),
+  listCareerStoryEvidence: vi.fn(),
   resolveObservationEvidence: vi.fn(),
 }));
 
-vi.mock("@/lib/repositories/profile", async () => {
-  const actual = await vi.importActual<typeof import("@/lib/repositories/profile")>("@/lib/repositories/profile");
-  return { ...actual, getProfile: mocks.getProfile };
+vi.mock("@/lib/practice-service", () => ({ loadPracticeInputs: mocks.loadPracticeInputs }));
+// `effectiveObservationText` is kept REAL (not mocked) here -- this suite's whole point is to
+// verify `loadCareerDashboard` uses the single shared implementation, trimming included, rather
+// than a second copy that could (and, before this fix, did) drift from it.
+vi.mock("@/lib/practice-recommendation", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/practice-recommendation")>("@/lib/practice-recommendation");
+  return { ...actual, recommendPractice: mocks.recommendPractice };
 });
-vi.mock("@/lib/repositories/opportunities", () => ({ listOpportunities: mocks.listOpportunities }));
-vi.mock("@/lib/repositories/observations", () => ({
-  listCoachObservations: mocks.listCoachObservations,
-  listObservationEvidence: mocks.listObservationEvidence,
-}));
-vi.mock("@/lib/repositories/stories", () => ({
-  listCareerStories: mocks.listCareerStories,
-  listCareerStoryEvidence: mocks.listCareerStoryEvidence,
-}));
-vi.mock("@/lib/repositories/interviews", () => ({ listRecentSessions: mocks.listRecentSessions }));
-vi.mock("@/lib/repositories/practice-plans", async () => {
-  const actual = await vi.importActual<typeof import("@/lib/repositories/practice-plans")>("@/lib/repositories/practice-plans");
-  return { ...actual, listPracticePlans: mocks.listPracticePlans };
-});
-vi.mock("@/lib/practice-recommendation", () => ({ recommendPractice: mocks.recommendPractice }));
+vi.mock("@/lib/repositories/observations", () => ({ listObservationEvidence: mocks.listObservationEvidence }));
+vi.mock("@/lib/repositories/stories", () => ({ listCareerStoryEvidence: mocks.listCareerStoryEvidence }));
 vi.mock("@/lib/coach-memory", () => ({ resolveObservationEvidence: mocks.resolveObservationEvidence }));
 
 import { CareerDashboardError, loadCareerDashboard } from "@/lib/career-dashboard";
@@ -61,6 +49,16 @@ const profile: Profile = {
   readiness: { ready: true, missing: [] },
   createdAt: "2026-08-29T10:00:00.000Z",
   updatedAt: "2026-08-29T10:00:00.000Z",
+};
+
+const progress: ProgressSnapshot = {
+  readiness: 62,
+  latestScore: 7.5,
+  trend: "stable",
+  recentScores: [7.5],
+  strongest: null,
+  weakest: null,
+  recurringWeaknesses: [],
 };
 
 function opportunity(id: string, overrides: Partial<Opportunity> = {}): Opportunity {
@@ -157,6 +155,19 @@ function plan(overrides: Partial<PracticePlan> = {}): PracticePlan {
   };
 }
 
+function practiceInputs(overrides: Partial<PracticeInputs> = {}): PracticeInputs {
+  return {
+    profile,
+    opportunities: [],
+    observations: [],
+    stories: [],
+    sessions: [],
+    plans: [],
+    progress,
+    ...overrides,
+  };
+}
+
 const recommendation: PracticeRecommendation = {
   format: "full_simulation",
   primaryFocus: "Run a full mock interview simulation",
@@ -174,16 +185,16 @@ const supabase = { client: true };
 describe("loadCareerDashboard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.getProfile.mockResolvedValue(profile);
-    mocks.listOpportunities.mockResolvedValue([]);
-    mocks.listCoachObservations.mockResolvedValue([]);
-    mocks.listObservationEvidence.mockResolvedValue([]);
-    mocks.listCareerStories.mockResolvedValue([]);
-    mocks.listCareerStoryEvidence.mockResolvedValue([]);
-    mocks.listRecentSessions.mockResolvedValue([]);
-    mocks.listPracticePlans.mockResolvedValue([]);
+    mocks.loadPracticeInputs.mockResolvedValue(practiceInputs());
     mocks.recommendPractice.mockReturnValue(recommendation);
+    mocks.listObservationEvidence.mockResolvedValue([]);
+    mocks.listCareerStoryEvidence.mockResolvedValue([]);
     mocks.resolveObservationEvidence.mockResolvedValue([]);
+  });
+
+  it("loads inputs through the shared practice-service loader for the given user", async () => {
+    await loadCareerDashboard(supabase as never, "user-1", now, "demo");
+    expect(mocks.loadPracticeInputs).toHaveBeenCalledWith(supabase, "user-1");
   });
 
   it("produces a valid dashboard for a brand-new account with every Career Brain table empty", async () => {
@@ -204,19 +215,21 @@ describe("loadCareerDashboard", () => {
     expect(dashboard.coachMode).toBe("live");
   });
 
-  it("rejects when the caller has no profile yet, without touching any other repository", async () => {
-    mocks.getProfile.mockResolvedValue(null);
+  it("rejects when the caller has no profile yet, without resolving any observation/story evidence", async () => {
+    mocks.loadPracticeInputs.mockResolvedValue(practiceInputs({ profile: null }));
 
     await expect(loadCareerDashboard(supabase as never, "user-1", now, "demo")).rejects.toThrow(CareerDashboardError);
     await expect(loadCareerDashboard(supabase as never, "user-1", now, "demo")).rejects.toMatchObject({
       code: "PROFILE_REQUIRED",
     });
+    expect(mocks.listObservationEvidence).not.toHaveBeenCalled();
+    expect(mocks.listCareerStoryEvidence).not.toHaveBeenCalled();
   });
 
   it("excludes dismissed observations and never lets them drive evidence resolution", async () => {
     const kept = observation({ id: "obs-kept", reviewState: "confirmed" });
     const dismissed = observation({ id: "obs-dismissed", reviewState: "dismissed", dismissedAt: "2026-08-30T12:00:00.000Z" });
-    mocks.listCoachObservations.mockResolvedValue([kept, dismissed]);
+    mocks.loadPracticeInputs.mockResolvedValue(practiceInputs({ observations: [kept, dismissed] }));
 
     const dashboard = await loadCareerDashboard(supabase as never, "user-1", now, "demo");
 
@@ -229,7 +242,7 @@ describe("loadCareerDashboard", () => {
   it("keeps unreviewed observations visible but still passes the full raw list to the recommendation selector", async () => {
     const unreviewed = observation({ id: "obs-unreviewed", reviewState: "unreviewed" });
     const dismissed = observation({ id: "obs-dismissed", reviewState: "dismissed" });
-    mocks.listCoachObservations.mockResolvedValue([unreviewed, dismissed]);
+    mocks.loadPracticeInputs.mockResolvedValue(practiceInputs({ observations: [unreviewed, dismissed] }));
 
     const dashboard = await loadCareerDashboard(supabase as never, "user-1", now, "demo");
 
@@ -241,24 +254,29 @@ describe("loadCareerDashboard", () => {
     }));
   });
 
-  it("exposes a corrected observation's user correction as effectiveText while keeping the original claim", async () => {
+  it("exposes a corrected observation's trimmed user correction as effectiveText while keeping the original, untrimmed claim", async () => {
+    // Regression test: `effectiveText` must come from the same
+    // `effectiveObservationText` `recommendPractice` uses internally
+    // (via `src/lib/practice-recommendation.ts`), including its trimming --
+    // a previously duplicated, untrimmed copy in this module disagreed with
+    // it for any claim/correction with leading or trailing whitespace.
     const corrected = observation({
       id: "obs-corrected",
       reviewState: "corrected",
-      claim: "You skip tradeoffs.",
-      userCorrection: "I do mention tradeoffs, just briefly.",
+      claim: "  You skip tradeoffs.  ",
+      userCorrection: "  I do mention tradeoffs, just briefly.  ",
     });
-    mocks.listCoachObservations.mockResolvedValue([corrected]);
+    mocks.loadPracticeInputs.mockResolvedValue(practiceInputs({ observations: [corrected] }));
 
     const dashboard = await loadCareerDashboard(supabase as never, "user-1", now, "demo");
 
-    expect(dashboard.observations[0].claim).toBe("You skip tradeoffs.");
+    expect(dashboard.observations[0].claim).toBe("  You skip tradeoffs.  ");
     expect(dashboard.observations[0].effectiveText).toBe("I do mention tradeoffs, just briefly.");
   });
 
-  it("falls back to the original claim as effectiveText for unreviewed/confirmed observations", async () => {
-    const confirmed = observation({ id: "obs-confirmed", reviewState: "confirmed", claim: "You skip tradeoffs." });
-    mocks.listCoachObservations.mockResolvedValue([confirmed]);
+  it("falls back to the trimmed original claim as effectiveText for unreviewed/confirmed observations", async () => {
+    const confirmed = observation({ id: "obs-confirmed", reviewState: "confirmed", claim: "  You skip tradeoffs.  " });
+    mocks.loadPracticeInputs.mockResolvedValue(practiceInputs({ observations: [confirmed] }));
 
     const dashboard = await loadCareerDashboard(supabase as never, "user-1", now, "demo");
 
@@ -281,7 +299,7 @@ describe("loadCareerDashboard", () => {
       createdAt: "2026-08-30T10:00:00.000Z",
     }];
     const resolvedDisplay = { kind: "profile_evidence" as const, label: "Acme", summary: "Led the migration.", role: "supporting" as const, reason: null };
-    mocks.listCoachObservations.mockResolvedValue([kept]);
+    mocks.loadPracticeInputs.mockResolvedValue(practiceInputs({ observations: [kept] }));
     mocks.listObservationEvidence.mockResolvedValue(evidenceRows);
     mocks.resolveObservationEvidence.mockResolvedValue([resolvedDisplay]);
 
@@ -292,7 +310,7 @@ describe("loadCareerDashboard", () => {
   });
 
   it("adds evidenceCount to each career story summary", async () => {
-    mocks.listCareerStories.mockResolvedValue([story({ id: "story-1" })]);
+    mocks.loadPracticeInputs.mockResolvedValue(practiceInputs({ stories: [story({ id: "story-1" })] }));
     mocks.listCareerStoryEvidence.mockResolvedValue([{ id: "e1" }, { id: "e2" }]);
 
     const dashboard = await loadCareerDashboard(supabase as never, "user-1", now, "demo");
@@ -305,7 +323,7 @@ describe("loadCareerDashboard", () => {
     const none = opportunity("opp-none", { nextInterviewAt: null });
     const soon = opportunity("opp-soon", { nextInterviewAt: "2026-09-02T09:00:00.000Z" });
     const later = opportunity("opp-later", { nextInterviewAt: "2026-09-10T09:00:00.000Z" });
-    mocks.listOpportunities.mockResolvedValue([later, past, none, soon]);
+    mocks.loadPracticeInputs.mockResolvedValue(practiceInputs({ opportunities: [later, past, none, soon] }));
 
     const dashboard = await loadCareerDashboard(supabase as never, "user-1", now, "demo");
 
@@ -313,34 +331,17 @@ describe("loadCareerDashboard", () => {
     expect(dashboard.upcomingOpportunities.map((item) => item.id)).toEqual(["opp-soon", "opp-later"]);
   });
 
-  it("computes progress from the caller's competencies and completed sessions", async () => {
-    const withCompetencies: Profile = {
-      ...profile,
-      competencies: [{
-        id: "comp-1",
-        name: "Architecture",
-        relevance: 1,
-        expectedLevel: "senior",
-        estimatedLevel: "senior",
-        confidence: "high",
-        lastPracticedAt: "2026-08-30T10:00:00.000Z",
-        questionCount: 3,
-        averageScore: 8,
-        recentScore: 8,
-        strengths: [],
-        weaknesses: [],
-      }],
-    };
-    mocks.getProfile.mockResolvedValue(withCompetencies);
+  it("passes the progress snapshot from loadPracticeInputs straight through, uncomputed here", async () => {
+    mocks.loadPracticeInputs.mockResolvedValue(practiceInputs({ progress }));
 
     const dashboard = await loadCareerDashboard(supabase as never, "user-1", now, "demo");
 
-    expect(dashboard.progress.strongest?.id).toBe("comp-1");
+    expect(dashboard.progress).toBe(progress);
   });
 
   it("passes recentPracticePlans and recentSessions straight through, and forwards now to the recommendation selector", async () => {
     const plans = [plan({ id: "plan-1" })];
-    mocks.listPracticePlans.mockResolvedValue(plans);
+    mocks.loadPracticeInputs.mockResolvedValue(practiceInputs({ plans }));
 
     const dashboard = await loadCareerDashboard(supabase as never, "user-1", now, "demo");
 

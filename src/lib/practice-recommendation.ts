@@ -39,12 +39,18 @@ function isTerminal(status: OpportunityStatus): boolean {
 }
 
 /**
- * The text to show for a reviewed observation. A user correction always
- * supersedes the original AI-authored claim for display purposes -- the
- * `claim` field itself is never overwritten in storage (see
- * `CoachObservation.claim`).
+ * The text to show for an observation. A user correction always supersedes
+ * the original AI-authored claim for display purposes -- the `claim` field
+ * itself is never overwritten in storage (see `CoachObservation.claim`).
+ * Exported because this rule is the single source of truth for observation
+ * display text: `loadCareerDashboard` in `src/lib/career-dashboard.ts`
+ * computes `CoachObservationSummary.effectiveText` with this same function
+ * rather than a second copy, so the dashboard's displayed text and this
+ * selector's own internal matching (see `isClearlyBehavioral` and
+ * `buildReviewedObservationRecommendation` below) can never disagree for the
+ * same observation.
  */
-function effectiveObservationText(item: CoachObservation): string {
+export function effectiveObservationText(item: CoachObservation): string {
   return item.reviewState === "corrected" && item.userCorrection?.trim()
     ? item.userCorrection.trim()
     : item.claim.trim();

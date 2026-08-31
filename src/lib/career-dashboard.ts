@@ -2,14 +2,10 @@ import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { resolveObservationEvidence } from "@/lib/coach-memory";
-import { recommendPractice } from "@/lib/practice-recommendation";
-import { calculateProgress } from "@/lib/progress";
-import { listRecentSessions } from "@/lib/repositories/interviews";
-import { listCoachObservations, listObservationEvidence } from "@/lib/repositories/observations";
-import { listOpportunities } from "@/lib/repositories/opportunities";
-import { listPracticePlans } from "@/lib/repositories/practice-plans";
-import { getProfile } from "@/lib/repositories/profile";
-import { listCareerStories, listCareerStoryEvidence } from "@/lib/repositories/stories";
+import { effectiveObservationText, recommendPractice } from "@/lib/practice-recommendation";
+import { loadPracticeInputs } from "@/lib/practice-service";
+import { listObservationEvidence } from "@/lib/repositories/observations";
+import { listCareerStoryEvidence } from "@/lib/repositories/stories";
 import type {
   CareerDashboard,
   CareerStory,
@@ -40,19 +36,6 @@ function isDisplayableObservation(observation: CoachObservation): boolean {
   return observation.reviewState !== "dismissed";
 }
 
-/**
- * The text to show for an observation: the user's correction when they have
- * reviewed and corrected it, otherwise the original claim. Mirrors
- * `effectiveObservationText` in `src/lib/practice-recommendation.ts` --
- * duplicated rather than imported because that function is private to its
- * module and this rule is small and stable enough not to warrant exporting it.
- */
-function effectiveObservationText(observation: CoachObservation): string {
-  return observation.reviewState === "corrected" && observation.userCorrection?.trim()
-    ? observation.userCorrection.trim()
-    : observation.claim;
-}
-
 async function summarizeObservation(
   supabase: SupabaseClient,
   userId: string,
@@ -81,18 +64,19 @@ function upcomingOpportunities(opportunities: Opportunity[], now: Date): Opportu
 
 /**
  * Builds the single canonical Career Brain dashboard read model for
- * `userId`. Composes existing repositories and `recommendPractice` --
- * AGGREGATION ONLY, never persistence: this issues no writes, so it is safe
- * to call on every `GET /api/career/dashboard` request without creating or
- * reconciling any Career Brain row (Release 2 does not auto-reconcile coach
- * observations).
+ * `userId`. Composes `loadPracticeInputs` (the same profile/opportunities/
+ * observations/stories/sessions/plans loader `src/lib/practice-service.ts`
+ * uses for the Practice view, so both views load and compute progress
+ * identically) with `recommendPractice` -- AGGREGATION ONLY, never
+ * persistence: this issues no writes, so it is safe to call on every
+ * `GET /api/career/dashboard` request without creating or reconciling any
+ * Career Brain row (Release 2 does not auto-reconcile coach observations).
  *
- * Loads every top-level repository in parallel, then resolves each
- * non-dismissed observation's evidence and each story's evidence count in
- * parallel as a second wave (each of those needs the first wave's rows
- * first). `now` is never read from the clock here -- it is threaded
- * straight through to `recommendPractice`, matching that selector's own
- * determinism contract.
+ * Resolves each non-dismissed observation's evidence and each story's
+ * evidence count in parallel, after `loadPracticeInputs` resolves (each of
+ * those needs its rows first). `now` is never read from the clock here -- it
+ * is threaded straight through to `recommendPractice`, matching that
+ * selector's own determinism contract.
  *
  * Throws {@link CareerDashboardError} with code `PROFILE_REQUIRED` when the
  * caller has no profile yet; every other empty Career Brain table (no
@@ -105,46 +89,38 @@ export async function loadCareerDashboard(
   now: Date,
   coachMode: "demo" | "live",
 ): Promise<CareerDashboard> {
-  const [profile, opportunities, observations, stories, recentSessions, recentPracticePlans] = await Promise.all([
-    getProfile(supabase, userId),
-    listOpportunities(supabase, userId),
-    listCoachObservations(supabase, userId),
-    listCareerStories(supabase, userId),
-    listRecentSessions(supabase, userId),
-    listPracticePlans(supabase, userId),
-  ]);
-
-  if (!profile) throw new CareerDashboardError("Create your profile first.", "PROFILE_REQUIRED");
-
-  const progress = calculateProgress(profile.competencies, recentSessions);
+  const inputs = await loadPracticeInputs(supabase, userId);
+  if (!inputs.profile) throw new CareerDashboardError("Create your profile first.", "PROFILE_REQUIRED");
 
   const [observationSummaries, storySummaries] = await Promise.all([
     Promise.all(
-      observations.filter(isDisplayableObservation).map((observation) => summarizeObservation(supabase, userId, observation)),
+      inputs.observations
+        .filter(isDisplayableObservation)
+        .map((observation) => summarizeObservation(supabase, userId, observation)),
     ),
-    Promise.all(stories.map((story) => summarizeStory(supabase, userId, story))),
+    Promise.all(inputs.stories.map((story) => summarizeStory(supabase, userId, story))),
   ]);
 
   const recommendation = recommendPractice({
-    opportunities,
-    observations,
-    stories,
-    progress,
-    recentSessions,
-    recentPlans: recentPracticePlans,
+    opportunities: inputs.opportunities,
+    observations: inputs.observations,
+    stories: inputs.stories,
+    progress: inputs.progress,
+    recentSessions: inputs.sessions,
+    recentPlans: inputs.plans,
     now,
   });
 
   return {
-    profile,
+    profile: inputs.profile,
     coachMode,
-    progress,
-    recentSessions,
-    opportunities,
-    upcomingOpportunities: upcomingOpportunities(opportunities, now),
+    progress: inputs.progress,
+    recentSessions: inputs.sessions,
+    opportunities: inputs.opportunities,
+    upcomingOpportunities: upcomingOpportunities(inputs.opportunities, now),
     observations: observationSummaries,
     stories: storySummaries,
-    recentPracticePlans,
+    recentPracticePlans: inputs.plans,
     recommendation,
   };
 }

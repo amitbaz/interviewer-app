@@ -86,8 +86,15 @@ export type PracticeOverview = {
   plans: PracticePlan[];
 };
 
-/** Everything the deterministic selector and the blueprint generator need, loaded once per request. */
-type PracticeInputs = {
+/**
+ * Everything the deterministic selector and the blueprint generator need,
+ * loaded once per request. Exported so other Career Brain read models that
+ * need the same six repository calls plus the same `calculateProgress` call
+ * -- currently `loadCareerDashboard` in `src/lib/career-dashboard.ts` --
+ * reuse `loadPracticeInputs` instead of maintaining a second copy of the
+ * loading logic that could silently drift from this one.
+ */
+export type PracticeInputs = {
   profile: Profile | null;
   opportunities: Opportunity[];
   observations: CoachObservation[];
@@ -131,7 +138,15 @@ function userSafeGenerationFailure(error: unknown): string {
     : "Could not prepare this practice session. Start it again to retry.";
 }
 
-async function loadPracticeInputs(supabase: SupabaseClient, userId: string): Promise<PracticeInputs> {
+/**
+ * Loads the profile, opportunities, coach observations, career stories,
+ * recent sessions, and recent practice plans a request needs, plus the
+ * progress snapshot derived from them, in one call. Every other Career Brain
+ * read model that needs this same combination should call this rather than
+ * re-issuing the six repository calls itself -- see the note on
+ * {@link PracticeInputs}.
+ */
+export async function loadPracticeInputs(supabase: SupabaseClient, userId: string): Promise<PracticeInputs> {
   const [profile, opportunities, observations, stories, sessions, plans] = await Promise.all([
     getProfile(supabase, userId),
     listOpportunities(supabase, userId),
