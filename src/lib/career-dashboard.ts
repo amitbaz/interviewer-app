@@ -20,7 +20,7 @@ import type {
  * finished profile onboarding yet. `CareerDashboard.profile` is
  * non-nullable by contract -- the client shell only ever routes to Home
  * once a profile exists, sending brand-new accounts to onboarding instead
- * (see `src/app/page.tsx`'s `setView(coachData.profile ? "home" : "onboarding")`)
+ * (see `src/app/relay-shell.tsx`'s `setView(coachData.profile ? "home" : "onboarding")`)
  * -- so a missing profile here is a genuine invalid-state error, not a
  * normal empty-account case like zero opportunities or stories.
  */

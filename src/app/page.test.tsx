@@ -5,13 +5,15 @@ import App from "@/app/page";
 import { ResultsFeedbackCards } from "@/app/results-feedback-cards";
 
 const getUser = vi.fn();
+const signInWithOAuth = vi.fn();
+const signOut = vi.fn();
 
 vi.mock("@/lib/supabase/client", () => ({
   createBrowserSupabaseClient: () => ({
     auth: {
       getUser,
-      signInWithOAuth: vi.fn(),
-      signOut: vi.fn(),
+      signInWithOAuth,
+      signOut,
     },
   }),
 }));
@@ -246,8 +248,117 @@ async function renderPracticeView(options: {
   await screen.findByRole("heading", { name: "Choose deliberate practice." });
 }
 
+type RouteResponse = { ok?: boolean; status?: number; body: unknown };
+type RouteHandler = (init: RequestInit | undefined) => RouteResponse;
+
+/**
+ * Stubs `fetch` with a per-path handler map so interaction tests can drive the
+ * shell's real request/response cycle instead of only its first paint. Each
+ * handler receives the `RequestInit`, so one path can answer both its GET read
+ * model and its POST actions.
+ */
+function mockRoutes(routes: Record<string, RouteHandler>) {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.pathname : input.url;
+    const handler = routes[url];
+    if (!handler) throw new Error(`Unexpected request: ${url}`);
+    const { ok = true, status = 200, body } = handler(init);
+    return { ok, status, json: async () => body } satisfies Partial<Response>;
+  });
+
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+function requestBody(init: RequestInit | undefined): Record<string, unknown> {
+  return JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+}
+
+function emptyProgress(): ProgressSnapshot {
+  return {
+    readiness: null,
+    latestScore: null,
+    trend: null,
+    recentScores: [],
+    strongest: null,
+    weakest: null,
+    recurringWeaknesses: [],
+  };
+}
+
+/** The shape `/api/interview` returns for a freshly started conversation: one open question, no evaluations. */
+function activeConversationSession(): InterviewSession {
+  return session({
+    id: "session-active",
+    status: "active",
+    completedAt: null,
+    overallScore: null,
+    resultSummary: {},
+    evaluations: [],
+    questions: [question(1, "How would you phase a large React migration?", "", "react-architecture", "React architecture")],
+    messages: [
+      {
+        id: "question-1:prompt",
+        role: "interviewer",
+        content: "How would you phase a large React migration?",
+        createdAt: "2026-08-29T10:00:00.000Z",
+      },
+    ],
+  });
+}
+
+/** The shape `/api/interview` returns for a freshly started hands-on exercise. */
+function activeHandsOnSession(overrides: Partial<InterviewSession> = {}): InterviewSession {
+  return session({
+    id: "session-hands-on",
+    kind: "hands-on",
+    status: "active",
+    completedAt: null,
+    overallScore: null,
+    resultSummary: {},
+    evaluations: [],
+    questions: [],
+    exercise: {
+      title: "Accessible product search",
+      durationMinutes: 60,
+      briefing: "Build an accessible product search over a large catalog.",
+      requirements: ["Debounce the query", "Keep keyboard focus stable"],
+      starterCode: "export function ProductSearch() {}",
+      interviewerOpening: "Talk me through your plan before you type.",
+    },
+    messages: [
+      {
+        id: "opening",
+        role: "interviewer",
+        content: "Talk me through your plan before you type.",
+        createdAt: "2026-08-29T10:00:00.000Z",
+      },
+    ],
+    ...overrides,
+  });
+}
+
+/**
+ * Drives the shell from home into an active interview so answer, checkpoint,
+ * and transcription assertions all start from the same place.
+ */
+async function startInterviewFrom(startButton: string, started: InterviewSession, routes: Record<string, RouteHandler>) {
+  const fetchMock = mockRoutes(routes);
+  render(<App />);
+
+  await screen.findByRole("heading", { name: "Ready when you are." });
+  fireEvent.click(screen.getByRole("button", { name: startButton }));
+  await screen.findByRole("heading", {
+    name: started.kind === "hands-on" ? "Build, narrate, adapt." : "Stay in the conversation.",
+  });
+
+  return fetchMock;
+}
+
 beforeEach(() => {
   getUser.mockResolvedValue({ data: { user: { id: "user-1" } }, error: null });
+  signInWithOAuth.mockResolvedValue({ error: null });
+  signOut.mockResolvedValue({ error: null });
 });
 
 afterEach(() => {
@@ -754,5 +865,389 @@ describe("ResultsFeedbackCards", () => {
     expect(region.id).toBe(controls);
     expect(region).toHaveAttribute("aria-labelledby", toggle.id);
     expect(region.parentElement?.style.viewTransitionName).toBe("evaluation-card-question-question-1-0");
+  });
+});
+
+describe("App authentication shell", () => {
+  it("shows the sign-in screen while nobody is signed in", async () => {
+    getUser.mockResolvedValue({ data: { user: null }, error: null });
+    mockRoutes({});
+
+    render(<App />);
+    expect(screen.getByText("Checking your sign-in…")).toBeInTheDocument();
+
+    expect(await screen.findByRole("heading", { name: "Practice with your own career context." })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Continue with Google" })).toBeInTheDocument();
+  });
+
+  it("starts Google OAuth from the sign-in screen", async () => {
+    getUser.mockResolvedValue({ data: { user: null }, error: null });
+    mockRoutes({});
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Continue with Google" }));
+
+    await waitFor(() => expect(signInWithOAuth).toHaveBeenCalledWith({
+      provider: "google",
+      options: { redirectTo: `${window.location.origin}/auth/callback` },
+    }));
+  });
+
+  it("surfaces a failed sign-in without leaving the sign-in screen", async () => {
+    getUser.mockResolvedValue({ data: { user: null }, error: null });
+    signInWithOAuth.mockResolvedValue({ error: new Error("Google rejected the request.") });
+    mockRoutes({});
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Continue with Google" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Google rejected the request.");
+    expect(screen.getByRole("button", { name: "Continue with Google" })).toBeInTheDocument();
+  });
+
+  it("signs out back to the sign-in screen", async () => {
+    mockRoutes({
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/interview": () => ({ body: { sessions: [], progress: emptyProgress() } }),
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Ready when you are." });
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+
+    await waitFor(() => expect(signOut).toHaveBeenCalled());
+    expect(await screen.findByRole("button", { name: "Continue with Google" })).toBeInTheDocument();
+  });
+
+  it("returns to the sign-in screen when coach data comes back unauthenticated", async () => {
+    mockRoutes({
+      "/api/profile": () => ({ ok: false, status: 401, body: { error: "Sign in to continue." } }),
+      "/api/interview": () => ({ ok: false, status: 401, body: { error: "Sign in to continue." } }),
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "Continue with Google" })).toBeInTheDocument();
+    // A 401 signs the shell out silently; it never shows the raw request error.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+});
+
+describe("App onboarding and profile review", () => {
+  it("creates a profile from pasted CV text and opens profile review", async () => {
+    const created = profile();
+    const fetchMock = mockRoutes({
+      "/api/profile": (init) => init?.method
+        ? { body: { profile: created, demoMode: false } }
+        : { body: { profile: null, demoMode: false } },
+      "/api/interview": () => ({ body: { sessions: [], progress: emptyProgress() } }),
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Make your next interview feel familiar." });
+
+    fireEvent.change(screen.getByPlaceholderText("Senior Frontend Engineer · React · TypeScript · achievements…"), {
+      target: { value: "Senior frontend engineer with checkout migration experience." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create my profile" }));
+
+    await screen.findByRole("heading", { name: "Make the coach accurate." });
+    const createCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "POST");
+    expect(requestBody(createCall?.[1] as RequestInit)).toEqual({
+      cvText: "Senior frontend engineer with checkout migration experience.",
+      coverLetter: "",
+    });
+    // The review form is seeded from the returned profile, not left blank.
+    expect(screen.getByDisplayValue("Senior Frontend Engineer")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("React, TypeScript")).toBeInTheDocument();
+  });
+
+  it("reports a failed profile creation instead of advancing to review", async () => {
+    mockRoutes({
+      "/api/profile": (init) => init?.method
+        ? { ok: false, status: 500, body: { error: "Could not read that CV." } }
+        : { body: { profile: null, demoMode: false } },
+      "/api/interview": () => ({ body: { sessions: [], progress: emptyProgress() } }),
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Make your next interview feel familiar." });
+
+    fireEvent.change(screen.getByPlaceholderText("Senior Frontend Engineer · React · TypeScript · achievements…"), {
+      target: { value: "Frontend engineer" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create my profile" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not read that CV.");
+    expect(screen.queryByRole("heading", { name: "Make the coach accurate." })).not.toBeInTheDocument();
+  });
+
+  it("confirms an edited profile and lands on home", async () => {
+    const created = profile();
+    const fetchMock = mockRoutes({
+      "/api/profile": (init) => init?.method
+        ? { body: { profile: created, demoMode: false } }
+        : { body: { profile: null, demoMode: false } },
+      "/api/interview": () => ({ body: { sessions: [], progress: emptyProgress() } }),
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Make your next interview feel familiar." });
+    fireEvent.change(screen.getByPlaceholderText("Senior Frontend Engineer · React · TypeScript · achievements…"), {
+      target: { value: "Frontend engineer" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create my profile" }));
+
+    await screen.findByRole("heading", { name: "Make the coach accurate." });
+    fireEvent.change(screen.getByDisplayValue("Senior Frontend Engineer"), { target: { value: "Staff Frontend Engineer" } });
+    fireEvent.click(screen.getByRole("button", { name: "Confirm profile" }));
+
+    await screen.findByRole("heading", { name: "Ready when you are." });
+    const confirmCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "PUT");
+    expect(requestBody(confirmCall?.[1] as RequestInit)).toEqual({
+      profile: {
+        role: "Staff Frontend Engineer",
+        seniority: "Senior",
+        narrative: "Leads complex React work.",
+        expertise: ["React", "TypeScript"],
+      },
+    });
+  });
+});
+
+describe("App conversation interview", () => {
+  it("starts a grounded conversation and renders the interviewer message", async () => {
+    const started = activeConversationSession();
+    const fetchMock = await startInterviewFrom("Start interview", started, {
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/interview": (init) => init?.method === "POST"
+        ? { body: { session: started } }
+        : { body: { sessions: [], progress: emptyProgress() } },
+    });
+
+    const startCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "POST");
+    expect(requestBody(startCall?.[1] as RequestInit)).toEqual({ action: "start", mode: "conversation" });
+    expect(screen.getByText("Mixed interview · 0 of 1 answered")).toBeInTheDocument();
+    expect(screen.getByText("How would you phase a large React migration?")).toBeInTheDocument();
+    expect(screen.getByText("Grounded question")).toBeInTheDocument();
+  });
+
+  it("sends an answer and clears the composer", async () => {
+    const started = activeConversationSession();
+    const answered = session({
+      ...started,
+      questions: [question(1, "How would you phase a large React migration?", "Phase by route.", "react-architecture", "React architecture")],
+      messages: [
+        ...started.messages,
+        { id: "question-1:answer", role: "candidate", content: "Phase by route.", createdAt: "2026-08-29T10:05:00.000Z" },
+      ],
+    });
+    const fetchMock = await startInterviewFrom("Start interview", started, {
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/interview": (init) => {
+        if (init?.method !== "POST") return { body: { sessions: [], progress: emptyProgress() } };
+        return requestBody(init).action === "start" ? { body: { session: started } } : { body: { session: answered } };
+      },
+    });
+
+    const composer = screen.getByPlaceholderText("Answer as if you were in the room…");
+    fireEvent.change(composer, { target: { value: "Phase by route." } });
+    fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
+
+    await screen.findByText("Mixed interview · 1 of 1 answered");
+    expect(composer).toHaveValue("");
+    const respondCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "POST"
+      && requestBody(init as RequestInit).action === "respond");
+    expect(requestBody(respondCall?.[1] as RequestInit)).toEqual({
+      action: "respond",
+      sessionId: "session-active",
+      answer: "Phase by route.",
+    });
+  });
+
+  it("shows the results view once the interview completes", async () => {
+    const started = activeConversationSession();
+    const completed = session({ id: "session-active", overallScore: 7.5, resultSummary: { summary: "Strong migration reasoning." } });
+    await startInterviewFrom("Start interview", started, {
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/interview": (init) => {
+        if (init?.method !== "POST") return { body: { sessions: [completed], progress: emptyProgress() } };
+        return requestBody(init).action === "start"
+          ? { body: { session: started } }
+          : { body: { session: completed, profile: profile() } };
+      },
+    });
+
+    fireEvent.change(screen.getByPlaceholderText("Answer as if you were in the room…"), { target: { value: "Phase by route." } });
+    fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
+
+    expect(await screen.findByRole("heading", { name: "A useful baseline." })).toBeInTheDocument();
+    expect(screen.getByText("Strong migration reasoning.")).toBeInTheDocument();
+    expect(screen.getByText("7.5")).toBeInTheDocument();
+  });
+
+  it("reports a failed answer without clearing the composer", async () => {
+    const started = activeConversationSession();
+    await startInterviewFrom("Start interview", started, {
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/interview": (init) => {
+        if (init?.method !== "POST") return { body: { sessions: [], progress: emptyProgress() } };
+        return requestBody(init).action === "start"
+          ? { body: { session: started } }
+          : { ok: false, status: 500, body: { error: "The coach is unavailable." } };
+      },
+    });
+
+    fireEvent.change(screen.getByPlaceholderText("Answer as if you were in the room…"), { target: { value: "Phase by route." } });
+    fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("The coach is unavailable.");
+    expect(screen.getByPlaceholderText("Answer as if you were in the room…")).toHaveValue("Phase by route.");
+  });
+});
+
+describe("App hands-on interview", () => {
+  it("opens the exercise brief with the starter code loaded into the workspace", async () => {
+    const started = activeHandsOnSession();
+    const fetchMock = await startInterviewFrom("Hands-on interview", started, {
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/interview": (init) => init?.method === "POST"
+        ? { body: { session: started } }
+        : { body: { sessions: [], progress: emptyProgress() } },
+    });
+
+    const startCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "POST");
+    expect(requestBody(startCall?.[1] as RequestInit)).toEqual({ action: "start", mode: "hands-on" });
+    expect(screen.getByRole("heading", { name: "Accessible product search" })).toBeInTheDocument();
+    expect(screen.getByText("Debounce the query")).toBeInTheDocument();
+    expect(screen.getByLabelText("TypeScript code workspace")).toHaveValue("export function ProductSearch() {}");
+    expect(screen.getByText("0 checkpoints saved")).toBeInTheDocument();
+  });
+
+  it("saves a checkpoint and clears the note", async () => {
+    const started = activeHandsOnSession();
+    const withCheckpoint = activeHandsOnSession({
+      checkpoints: [
+        {
+          id: "checkpoint-1",
+          code: "export function ProductSearch() {}",
+          note: "Cancelling in-flight searches first.",
+          interviewerPrompt: "How will you keep focus stable?",
+          createdAt: "2026-08-29T10:10:00.000Z",
+        },
+      ],
+    });
+    const fetchMock = await startInterviewFrom("Hands-on interview", started, {
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/interview": (init) => {
+        if (init?.method !== "POST") return { body: { sessions: [], progress: emptyProgress() } };
+        return requestBody(init).action === "start" ? { body: { session: started } } : { body: { session: withCheckpoint } };
+      },
+    });
+
+    const note = screen.getByPlaceholderText("For example: I am cancelling in-flight searches and will add keyboard state next…");
+    fireEvent.change(note, { target: { value: "Cancelling in-flight searches first." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save checkpoint" }));
+
+    await screen.findByText("1 checkpoint saved");
+    expect(note).toHaveValue("");
+    const checkpointCall = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "POST"
+      && requestBody(init as RequestInit).action === "checkpoint");
+    expect(requestBody(checkpointCall?.[1] as RequestInit)).toEqual({
+      action: "checkpoint",
+      sessionId: "session-hands-on",
+      code: "export function ProductSearch() {}",
+      note: "Cancelling in-flight searches first.",
+    });
+  });
+});
+
+describe("App answer transcription", () => {
+  /**
+   * Minimal `MediaRecorder` stand-in: jsdom has none, and the shell only uses
+   * `state`, `mimeType`, `ondataavailable`, `onstop`, `start`, and `stop`.
+   */
+  class FakeMediaRecorder {
+    state: "inactive" | "recording" = "inactive";
+    mimeType = "audio/webm";
+    ondataavailable: ((event: { data: Blob }) => void) | null = null;
+    onstop: (() => void) | null = null;
+
+    constructor(readonly stream: MediaStream) {}
+
+    start() {
+      this.state = "recording";
+    }
+
+    stop() {
+      this.state = "inactive";
+      this.ondataavailable?.({ data: new Blob(["audio"], { type: "audio/webm" }) });
+      this.onstop?.();
+    }
+  }
+
+  function stubMicrophone() {
+    const track = { stop: vi.fn() };
+    const getUserMedia = vi.fn(async () => ({ getTracks: () => [track] }) as unknown as MediaStream);
+    Object.defineProperty(navigator, "mediaDevices", { value: { getUserMedia }, configurable: true });
+    vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
+    return { getUserMedia, track };
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, "mediaDevices");
+  });
+
+  it("appends the transcript of a recorded answer to the composer", async () => {
+    const { track } = stubMicrophone();
+    const started = activeConversationSession();
+    await startInterviewFrom("Start interview", started, {
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/interview": (init) => init?.method === "POST"
+        ? { body: { session: started } }
+        : { body: { sessions: [], progress: emptyProgress() } },
+      "/api/transcribe": () => ({ body: { transcript: "I would phase the migration by route." } }),
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "● Record answer" }));
+    fireEvent.click(await screen.findByRole("button", { name: "■ Stop & transcribe" }));
+
+    await waitFor(() => expect(screen.getByPlaceholderText("Answer as if you were in the room…"))
+      .toHaveValue("I would phase the migration by route."));
+    expect(track.stop).toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "● Record answer" })).toBeInTheDocument();
+  });
+
+  it("reports a failed transcription and leaves the composer untouched", async () => {
+    stubMicrophone();
+    const started = activeConversationSession();
+    await startInterviewFrom("Start interview", started, {
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/interview": (init) => init?.method === "POST"
+        ? { body: { session: started } }
+        : { body: { sessions: [], progress: emptyProgress() } },
+      "/api/transcribe": () => ({ ok: false, status: 500, body: { error: "Could not transcribe recording." } }),
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "● Record answer" }));
+    fireEvent.click(await screen.findByRole("button", { name: "■ Stop & transcribe" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not transcribe recording.");
+    expect(screen.getByPlaceholderText("Answer as if you were in the room…")).toHaveValue("");
+  });
+
+  it("explains that recording is unavailable when the browser has no MediaRecorder", async () => {
+    const started = activeConversationSession();
+    await startInterviewFrom("Start interview", started, {
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/interview": (init) => init?.method === "POST"
+        ? { body: { session: started } }
+        : { body: { sessions: [], progress: emptyProgress() } },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "● Record answer" }));
+
+    expect(await screen.findByRole("alert"))
+      .toHaveTextContent("Voice recording is not available in this browser. Type your answer instead.");
   });
 });
