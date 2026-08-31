@@ -509,6 +509,11 @@ export type UpdateCareerStoryInput = {
   confirmedAt?: string | null;
 };
 
+/** A `CareerStory` enriched for display with the count of its attached provenance rows. */
+export type CareerStorySummary = CareerStory & {
+  evidenceCount: number;
+};
+
 export type CoachObservationType =
   | "strength"
   | "weakness"
@@ -615,6 +620,36 @@ export type AttachObservationEvidenceOptions = {
   role?: ObservationEvidenceRole;
   weight?: number;
   reason?: string | null;
+};
+
+/**
+ * A user-safe display item resolved from one typed `ObservationEvidence` row
+ * by `resolveObservationEvidence` in `src/lib/coach-memory.ts`. The browser
+ * never sees the raw evidence-source id or joins the underlying table
+ * itself -- `label`/`summary` are always human-readable, per source kind:
+ * profile evidence -> project/employer plus a source-excerpt summary;
+ * question evaluation -> the question prompt plus a concise strength/
+ * weakness summary; career story -> its title; opportunity event ->
+ * company/role plus an event description.
+ */
+export type CoachEvidenceDisplay = {
+  kind: "profile_evidence" | "question_evaluation" | "career_story" | "opportunity_event";
+  label: string;
+  summary: string;
+  role: ObservationEvidenceRole;
+  reason: string | null;
+};
+
+/**
+ * A `CoachObservation` enriched for display by `loadCareerDashboard` in
+ * `src/lib/career-dashboard.ts`. `effectiveText` is the corrected wording
+ * when the user has reviewed and corrected the observation, otherwise the
+ * original `claim` -- `claim` itself always remains available separately,
+ * unmodified.
+ */
+export type CoachObservationSummary = CoachObservation & {
+  effectiveText: string;
+  evidence: CoachEvidenceDisplay[];
 };
 
 export type PracticePlanStatus = "draft" | "ready" | "started" | "completed" | "cancelled" | "failed";
@@ -778,4 +813,32 @@ export type PracticeBlueprintContext = {
   supportingOpportunities: Opportunity[];
   observations: CoachObservation[];
   stories: CareerStory[];
+};
+
+/**
+ * The single canonical read model for the Career Brain Home command center,
+ * built by `loadCareerDashboard` in `src/lib/career-dashboard.ts`. The
+ * client shell fetches this once after auth and never joins the underlying
+ * Career Brain sources itself.
+ *
+ * `observations` excludes dismissed rows -- unreviewed observations may
+ * still appear since Coach displays them, but never drive `recommendation`
+ * (that filtering lives entirely inside `recommendPractice`).
+ * `upcomingOpportunities` is `opportunities` filtered to future-dated
+ * interviews, soonest first. `coachMode` reflects whether AI-backed
+ * features are configured (`GEMINI_API_KEY` present) or running in demo
+ * mode; it is computed by the route, not this read model, since it depends
+ * on process configuration rather than persisted data.
+ */
+export type CareerDashboard = {
+  profile: Profile;
+  coachMode: "demo" | "live";
+  progress: ProgressSnapshot;
+  recentSessions: InterviewSession[];
+  opportunities: Opportunity[];
+  upcomingOpportunities: Opportunity[];
+  observations: CoachObservationSummary[];
+  stories: CareerStorySummary[];
+  recentPracticePlans: PracticePlan[];
+  recommendation: PracticeRecommendation;
 };
