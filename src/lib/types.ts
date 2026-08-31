@@ -683,3 +683,60 @@ export type CreatePracticePlanInput = {
   generationError?: string | null;
   completedAt?: string | null;
 };
+
+/**
+ * One user-displayable fact behind the current baseline practice
+ * recommendation, produced by `recommendPractice` in
+ * `src/lib/practice-recommendation.ts`. Rendered on Home as an explanation
+ * chip under "Why this?" -- `detail` must always be human-readable and must
+ * never contain a raw id.
+ */
+export type PracticeRecommendationSignal = {
+  kind:
+    | "upcoming_interview"
+    | "interviewing_opportunity"
+    | "reviewed_observation"
+    | "story_bank_gap"
+    | "progress_weakness"
+    | "applied_opportunity"
+    | "first_practice"
+    | "fallback";
+  label: string;
+  detail: string;
+};
+
+/**
+ * The deterministic Release 2 baseline practice recommendation preview. Not
+ * yet a persisted `PracticePlan` -- it becomes one only when the user starts
+ * it (see
+ * `docs/superpowers/specs/2026-08-31-career-brain-release-2-relay-rework-design.md`
+ * section 6). Release 2 deliberately does not compute a Release 3-style
+ * weighted priority score here.
+ */
+export type PracticeRecommendation = {
+  format: PracticeFormat;
+  primaryFocus: string;
+  secondaryFocus: string | null;
+  rationale: string;
+  estimatedMinutes: number;
+  successCriteria: string[];
+  primaryOpportunityId: string | null;
+  supportingOpportunityIds: string[];
+  signals: PracticeRecommendationSignal[];
+};
+
+/**
+ * Inputs to the deterministic baseline recommendation selector
+ * (`recommendPractice`). `now` is always caller-supplied -- the selector
+ * never reads the clock itself -- so selection stays deterministic and
+ * testable.
+ */
+export type PracticeRecommendationInput = {
+  opportunities: Opportunity[];
+  observations: CoachObservation[];
+  stories: CareerStory[];
+  progress: ProgressSnapshot;
+  recentSessions: InterviewSession[];
+  recentPlans: PracticePlan[];
+  now: Date;
+};
