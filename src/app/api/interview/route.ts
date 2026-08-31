@@ -151,7 +151,9 @@ export async function POST(request: Request) {
       return NextResponse.json({
         session: completed.kind === "conversation" ? visibleConversation(completed) : completed,
         profile: await getProfile(supabase, user.id),
-        ...(warning ? { practicePlanWarning: warning } : {}),
+        // Always present, `null` when there is nothing to warn about: clients
+        // read this as a nullable field, never as an optional key.
+        practicePlanWarning: warning,
       });
     }
     return NextResponse.json({ error: "Unknown action." }, { status: 400 });
@@ -172,7 +174,7 @@ async function finishConversation(
   return NextResponse.json({
     session: visibleConversation(completed),
     profile: refreshedProfile ?? profile,
-    ...(warning ? { practicePlanWarning: warning } : {}),
+    practicePlanWarning: warning,
   });
 }
 

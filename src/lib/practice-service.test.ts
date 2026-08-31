@@ -403,10 +403,13 @@ describe("practice orchestration", () => {
 
     await expect(startRecommendedPractice(supabase as never, "user-1", now)).rejects.toThrow("gemini exploded");
 
-    expect(mocks.updatePracticePlan).toHaveBeenCalledWith(expect.anything(), "user-1", "plan-1", {
-      status: "failed",
-      generationError: expect.not.stringContaining("sk-live-123"),
-    });
+    expect(mocks.updatePracticePlan).toHaveBeenCalledWith(
+      expect.anything(),
+      "user-1",
+      "plan-1",
+      { status: "failed", generationError: expect.not.stringContaining("sk-live-123") },
+      { expectedStatus: "ready" },
+    );
     expect(mocks.createSessionWithPracticeBlueprint).not.toHaveBeenCalled();
   });
 
@@ -416,10 +419,37 @@ describe("practice orchestration", () => {
 
     await expect(startRecommendedPractice(supabase as never, "user-1", now)).rejects.toBeInstanceOf(RepositoryError);
 
-    expect(mocks.updatePracticePlan).toHaveBeenCalledWith(expect.anything(), "user-1", "plan-1", {
-      status: "failed",
-      generationError: "Could not start the planned practice session.",
-    });
+    expect(mocks.updatePracticePlan).toHaveBeenCalledWith(
+      expect.anything(),
+      "user-1",
+      "plan-1",
+      { status: "failed", generationError: "Could not start the planned practice session." },
+      { expectedStatus: "ready" },
+    );
+  });
+
+  it("cannot mark a plan failed once the start RPC has already moved it to started", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    // A start call can fail on the way back from a transaction that already
+    // committed. The compensating write is scoped to `ready`, so it matches no
+    // row and the plan keeps the `started` status the RPC gave it.
+    mocks.createSessionWithPracticeBlueprint.mockRejectedValue(new Error("socket hang up"));
+    mocks.updatePracticePlan.mockRejectedValue(new RepositoryError("Could not update the practice plan.", "NO_OWNED_ROW"));
+
+    await expect(startRecommendedPractice(supabase as never, "user-1", now)).rejects.toThrow("socket hang up");
+
+    expect(mocks.updatePracticePlan).toHaveBeenCalledWith(
+      expect.anything(),
+      "user-1",
+      "plan-1",
+      expect.objectContaining({ status: "failed" }),
+      { expectedStatus: "ready" },
+    );
+    expect(consoleError).toHaveBeenCalledWith(
+      "[practice-service] could not mark the practice plan failed",
+      expect.objectContaining({ code: "NO_OWNED_ROW" }),
+    );
+    consoleError.mockRestore();
   });
 
   it("keeps the started session when the post-start plan reload fails", async () => {

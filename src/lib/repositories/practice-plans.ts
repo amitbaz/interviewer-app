@@ -14,6 +14,9 @@ import { RepositoryError } from "@/lib/repositories/profile";
 
 type Row = Record<string, unknown>;
 
+/** How many plans `listPracticePlans` returns when the caller does not choose. */
+const DEFAULT_PRACTICE_PLAN_LIMIT = 20;
+
 const practicePlanStatuses: PracticePlanStatus[] = [
   "draft", "ready", "started", "completed", "cancelled", "failed",
 ];
@@ -185,15 +188,27 @@ export async function getPracticePlan(
 }
 
 /**
- * Lists all practice plans owned by `userId`, most recently updated first,
+ * Lists the practice plans owned by `userId`, most recently updated first,
  * each hydrated with its linked opportunities.
+ *
+ * ALWAYS BOUNDED: each returned plan costs one extra query for its
+ * opportunity links, so this returns at most `options.limit` plans
+ * (`DEFAULT_PRACTICE_PLAN_LIMIT` when omitted) rather than every plan a
+ * long-lived account has accumulated. Mirrors `listRecentSessions` in
+ * `src/lib/repositories/interviews.ts`. Callers that need older plans must
+ * ask for them explicitly.
  */
-export async function listPracticePlans(supabase: SupabaseClient, userId: string): Promise<PracticePlan[]> {
+export async function listPracticePlans(
+  supabase: SupabaseClient,
+  userId: string,
+  options: { limit?: number } = {},
+): Promise<PracticePlan[]> {
   const { data, error } = await supabase
     .from("practice_plans")
     .select("*")
     .eq("user_id", userId)
-    .order("updated_at", { ascending: false });
+    .order("updated_at", { ascending: false })
+    .limit(options.limit ?? DEFAULT_PRACTICE_PLAN_LIMIT);
   if (error) throw new RepositoryError("Could not load your practice plans.", error.code);
   const rows = (data ?? []) as Row[];
   return Promise.all(rows.map(async (row) => {
@@ -207,12 +222,24 @@ export async function listPracticePlans(supabase: SupabaseClient, userId: string
  * present on `input` are patched; omitted fields are left untouched. This
  * never touches the plan's opportunity links -- use
  * `setPracticePlanOpportunities` for that.
+ *
+ * `options.expectedStatus` makes the write CONDITIONAL: the row is patched
+ * only while it still holds that status, so a compensating update can never
+ * overwrite a status something else already advanced. That matters because
+ * the planned-practice start RPCs move a plan `ready` -> `started` inside the
+ * transaction that creates its session: an unguarded "mark it failed" written
+ * after that commit would leave a `failed` plan with a live session pointing
+ * at it (see `markPlanFailed` in `src/lib/practice-service.ts`). When the
+ * status no longer matches, no row is returned and this throws
+ * `RepositoryError` with code `NO_OWNED_ROW`, exactly as for a plan the
+ * caller does not own.
  */
 export async function updatePracticePlan(
   supabase: SupabaseClient,
   userId: string,
   planId: string,
   input: Partial<CreatePracticePlanInput>,
+  options: { expectedStatus?: PracticePlanStatus } = {},
 ): Promise<PracticePlan> {
   const patch: Row = { updated_at: new Date().toISOString() };
   if (input.status !== undefined) patch.status = input.status;
@@ -227,13 +254,13 @@ export async function updatePracticePlan(
   if (input.generationError !== undefined) patch.generation_error = input.generationError;
   if (input.completedAt !== undefined) patch.completed_at = input.completedAt;
 
-  const { data, error } = await supabase
+  let query = supabase
     .from("practice_plans")
     .update(patch)
     .eq("id", planId)
-    .eq("user_id", userId)
-    .select("*")
-    .maybeSingle();
+    .eq("user_id", userId);
+  if (options.expectedStatus !== undefined) query = query.eq("status", options.expectedStatus);
+  const { data, error } = await query.select("*").maybeSingle();
   if (error || !data) throw new RepositoryError("Could not update the practice plan.", error?.code ?? "NO_OWNED_ROW");
   const opportunities = await loadPracticePlanOpportunities(supabase, userId, planId);
   return mapPracticePlan(data as Row, opportunities);

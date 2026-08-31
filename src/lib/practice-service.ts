@@ -93,6 +93,7 @@ type PracticeInputs = {
   observations: CoachObservation[];
   stories: CareerStory[];
   sessions: InterviewSession[];
+  /** The caller's most recent plans only -- `listPracticePlans` is always bounded. */
   plans: PracticePlan[];
   progress: ProgressSnapshot;
 };
@@ -426,8 +427,16 @@ async function deliverPractice(
 
 /**
  * Records why a plan never produced a session, so the plan stays explainable
- * instead of sitting in `ready` forever. Swallows its own failure: the
- * original error is what the caller must see.
+ * instead of sitting in `ready` forever.
+ *
+ * CONDITIONAL ON `ready`: a start call can fail AFTER its RPC transaction
+ * committed -- a transport or response-read failure on the way back -- and in
+ * that case a session exists and the plan is legitimately `started`. Writing
+ * `failed` unconditionally would orphan that live session behind a `failed`
+ * plan, so the update is scoped to plans still in `ready`. When the RPC won
+ * the race, no row matches and the resulting `RepositoryError` is swallowed
+ * here along with any other bookkeeping failure: the original error is what
+ * the caller must see.
  */
 async function markPlanFailed(
   supabase: SupabaseClient,
@@ -436,10 +445,13 @@ async function markPlanFailed(
   error: unknown,
 ): Promise<void> {
   try {
-    await updatePracticePlan(supabase, userId, planId, {
-      status: "failed",
-      generationError: userSafeGenerationFailure(error),
-    });
+    await updatePracticePlan(
+      supabase,
+      userId,
+      planId,
+      { status: "failed", generationError: userSafeGenerationFailure(error) },
+      { expectedStatus: "ready" },
+    );
   } catch (bookkeepingError) {
     console.error("[practice-service] could not mark the practice plan failed", describeError(bookkeepingError));
   }

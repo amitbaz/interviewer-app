@@ -553,7 +553,8 @@ describe("POST /api/interview", () => {
       status: "completed",
       completedAt: "2026-08-29T11:00:00.000Z",
     });
-    expect(body.practicePlanWarning).toBeUndefined();
+    // The key is always present so clients can read it as a nullable field.
+    expect(body).toHaveProperty("practicePlanWarning", null);
   });
 
   it("rejects an explicit finish on planned practice while a persisted follow-up is unanswered", async () => {
@@ -638,6 +639,7 @@ describe("POST /api/interview", () => {
     const body = await response.json();
 
     expect(body.session.status).toBe("complete");
+    expect(body).toHaveProperty("practicePlanWarning", null);
     expect(mocks.updatePracticePlan).toHaveBeenCalledWith(expect.anything(), "user-1", "plan-1", expect.objectContaining({
       status: "completed",
     }));

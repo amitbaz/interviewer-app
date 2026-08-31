@@ -44,16 +44,17 @@ const linkRow = (overrides: Row = {}): Row => ({
 
 /**
  * A chainable table-stub builder. It is awaitable directly (implements
- * `.then`) so callers that never terminate with `.maybeSingle()`/`.order()`
- * -- e.g. `await supabase.from(...).delete().eq(...).eq(...)` -- resolve to
- * `result` just like `.maybeSingle()`/`.order()` do. `capture.eq` records
- * every `[field, value]` pair passed to `.eq(...)` on this builder, in
- * call order, so tests can assert the actual scoping used -- not just that
- * `.eq` was called some number of times.
+ * `.then`) so callers that never terminate with `.maybeSingle()` -- e.g.
+ * `await supabase.from(...).delete().eq(...).eq(...)`, or a list query ending
+ * in `.order(...).limit(...)` -- resolve to `result` just like
+ * `.maybeSingle()` does. `capture.eq` records every `[field, value]` pair
+ * passed to `.eq(...)` on this builder, in call order, so tests can assert
+ * the actual scoping used -- not just that `.eq` was called some number of
+ * times; `capture.limit` records the row cap a list query asked for.
  */
 function tableStub(
   result: QueryResult,
-  capture?: { insert?: Row | Row[]; update?: Row; eq?: Array<[string, unknown]> },
+  capture?: { insert?: Row | Row[]; update?: Row; eq?: Array<[string, unknown]>; limit?: number },
 ) {
   const builder: Record<string, unknown> = {
     insert: (row: Row | Row[]) => {
@@ -70,7 +71,11 @@ function tableStub(
       if (capture) (capture.eq ??= []).push([field, value]);
       return builder;
     },
-    order: async () => result,
+    order: () => builder,
+    limit: (rows: number) => {
+      if (capture) capture.limit = rows;
+      return builder;
+    },
     maybeSingle: async () => result,
     then: (resolve: (value: QueryResult) => void) => resolve(result),
   };
@@ -151,7 +156,7 @@ describe("practice plan repository", () => {
   });
 
   it("lists practice plans scoped by user id, each hydrated with its linked opportunities", async () => {
-    const listCapture: { eq?: Array<[string, unknown]> } = {};
+    const listCapture: { eq?: Array<[string, unknown]>; limit?: number } = {};
     const supabase = makeSupabase({
       practice_plans: tableStub({
         data: [planRow(), planRow({ id: "plan-2" })],
@@ -166,6 +171,20 @@ describe("practice plan repository", () => {
     expect(plans[0]).toEqual(expect.objectContaining({ id: "plan-1" }));
     expect(plans[0].opportunities).toEqual([expect.objectContaining({ opportunityId: "opp-1" })]);
     expect(listCapture.eq).toEqual(expect.arrayContaining([["user_id", "user-1"]]));
+    // Each plan costs an extra link query, so the list must never be unbounded.
+    expect(listCapture.limit).toBe(20);
+  });
+
+  it("lists at most the number of plans the caller asks for", async () => {
+    const listCapture: { limit?: number } = {};
+    const supabase = makeSupabase({
+      practice_plans: tableStub({ data: [planRow()], error: null }, listCapture),
+      practice_plan_opportunities: tableStub({ data: [], error: null }),
+    });
+
+    await listPracticePlans(supabase as never, "user-1", { limit: 5 });
+
+    expect(listCapture.limit).toBe(5);
   });
 
   it("updates only the provided fields of an owned practice plan, scoped by user id", async () => {
@@ -194,6 +213,40 @@ describe("practice plan repository", () => {
       ["user_id", "user-1"],
     ]));
     expect(plan.status).toBe("ready");
+  });
+
+  it("scopes a conditional update to the expected status so it cannot overwrite a newer one", async () => {
+    const capture: { eq?: Array<[string, unknown]> } = {};
+    const supabase = makeSupabase({
+      practice_plans: tableStub({ data: planRow({ status: "failed" }), error: null }, capture),
+      practice_plan_opportunities: tableStub({ data: [], error: null }),
+    });
+
+    const plan = await updatePracticePlan(
+      supabase as never,
+      "user-1",
+      "plan-1",
+      { status: "failed", generationError: "Could not prepare this practice session." },
+      { expectedStatus: "ready" },
+    );
+
+    expect(capture.eq).toEqual(expect.arrayContaining([
+      ["id", "plan-1"],
+      ["user_id", "user-1"],
+      ["status", "ready"],
+    ]));
+    expect(plan.status).toBe("failed");
+  });
+
+  it("reports no owned row when the conditional update matches nothing", async () => {
+    const supabase = makeSupabase({
+      practice_plans: tableStub({ data: null, error: null }),
+      practice_plan_opportunities: tableStub({ data: [], error: null }),
+    });
+
+    await expect(
+      updatePracticePlan(supabase as never, "user-1", "plan-1", { status: "failed" }, { expectedStatus: "ready" }),
+    ).rejects.toMatchObject({ code: "NO_OWNED_ROW" });
   });
 
   it("persists one primary and multiple supporting opportunities", async () => {
