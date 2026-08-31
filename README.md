@@ -15,6 +15,7 @@ A personal, authenticated interview-practice POC for software-engineering candid
 - Browser voice recording → Gemini transcription → editable interview answer
 - Deterministic demo coach when no API key is configured
 - Gemini API provider when `GEMINI_API_KEY` is configured
+- Career Brain persistence foundation for opportunities, career stories, evidence-backed coach observations, and practice plans. The current UI does not expose these Release 1 entities yet; the job-hunter integration remains unchanged until a later release.
 
 ## Run locally
 

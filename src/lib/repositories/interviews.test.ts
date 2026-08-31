@@ -8,11 +8,108 @@ import {
   completeHandsOnSession,
   createSessionWithBlueprint,
   createSessionWithPlan,
+  linkSessionCareerContext,
   mapSession,
   recordAnswerAndEvaluation,
   recordConversationTurn,
 } from "@/lib/repositories/interviews";
+import { RepositoryError } from "@/lib/repositories/profile";
 import type { Competency, EvidenceItem, InterviewBlueprint, PlannedQuestion, ProfileDraft } from "@/lib/types";
+
+type Row = Record<string, unknown>;
+type QueryResult = { data: unknown; error: { code: string } | null };
+
+/**
+ * A minimal legacy session row shape -- as it would have existed before
+ * this task added `practice_plan_id`/`opportunity_id` -- for compatibility
+ * tests. Neither Career Brain column is present, matching a real
+ * pre-migration row (columns are nullable, never backfilled).
+ */
+const legacyRow = (overrides: Row = {}): Row => ({
+  id: "session-legacy", user_id: "user-1", kind: "conversation", status: "active",
+  started_at: "2026-08-29T10:00:00.000Z", completed_at: null, exercise: {}, result_summary: {},
+  overall_score: null, created_at: "2026-08-29T10:00:00.000Z", updated_at: "2026-08-29T10:00:00.000Z",
+  ...overrides,
+});
+
+/**
+ * A chainable table-stub builder, matching the pattern established in
+ * `practice-plans.test.ts`. It is awaitable directly (implements `.then`)
+ * so callers that never terminate with `.maybeSingle()`/`.order()`/`.in()`
+ * -- e.g. the plain `.update(...).eq(...).eq(...)` in
+ * `linkSessionCareerContext` -- resolve to `result` too. `capture.eq`
+ * records every `[field, value]` pair passed to `.eq(...)` on this
+ * builder, in call order, so tests can assert the actual scoping used --
+ * not just that `.eq` was called some number of times.
+ */
+function tableStub(
+  result: QueryResult,
+  capture?: { insert?: Row | Row[]; update?: Row; eq?: Array<[string, unknown]> },
+) {
+  const builder: Record<string, unknown> = {
+    insert: (row: Row | Row[]) => {
+      if (capture) capture.insert = row;
+      return builder;
+    },
+    update: (patch: Row) => {
+      if (capture) capture.update = patch;
+      return builder;
+    },
+    select: () => builder,
+    eq: (field: string, value: unknown) => {
+      if (capture) (capture.eq ??= []).push([field, value]);
+      return builder;
+    },
+    in: async () => result,
+    order: async () => result,
+    maybeSingle: async () => result,
+    then: (resolve: (value: QueryResult) => void) => resolve(result),
+  };
+  return builder;
+}
+
+/**
+ * A full career-context supabase double for `linkSessionCareerContext`.
+ * `interview_questions`, `hands_on_checkpoints`, and `session_evaluations`
+ * all resolve empty so `hydrateSession`'s reload skips both
+ * `question_evaluations` (no question ids to look up) and `competencies`
+ * (no competency ids to resolve) entirely -- keeping the double to exactly
+ * the tables `linkSessionCareerContext` and its reload actually touch.
+ */
+function careerContextSupabase(options: {
+  sessionRow: Row | null;
+  planRow?: Row | null;
+  opportunityRow?: Row | null;
+  planOpportunityRows?: Row[];
+  captures?: {
+    session?: { update?: Row; eq?: Array<[string, unknown]> };
+    plan?: { eq?: Array<[string, unknown]> };
+    opportunity?: { eq?: Array<[string, unknown]> };
+    planOpportunities?: { eq?: Array<[string, unknown]> };
+  };
+}) {
+  const captures = options.captures ?? {};
+  const tables: Record<string, ReturnType<typeof tableStub>> = {
+    interview_sessions: tableStub({ data: options.sessionRow, error: null }, captures.session),
+    interview_questions: tableStub({ data: [], error: null }),
+    hands_on_checkpoints: tableStub({ data: [], error: null }),
+    session_evaluations: tableStub({ data: [], error: null }),
+  };
+  if (options.planRow !== undefined) {
+    tables.practice_plans = tableStub({ data: options.planRow, error: null }, captures.plan);
+  }
+  if (options.opportunityRow !== undefined) {
+    tables.opportunities = tableStub({ data: options.opportunityRow, error: null }, captures.opportunity);
+  }
+  if (options.planOpportunityRows !== undefined) {
+    tables.practice_plan_opportunities = tableStub(
+      { data: options.planOpportunityRows, error: null },
+      captures.planOpportunities,
+    );
+  }
+  const from = vi.fn((table: string) => tables[table]);
+  return { from };
+}
 
 const fallbackProfile: ProfileDraft = {
   role: "Frontend Engineer",
@@ -88,6 +185,23 @@ const fallbackCompetencies: Competency[] = [
 ];
 
 describe("mapSession", () => {
+  it("hydrates legacy sessions with null Career Brain context", () => {
+    const session = mapSession(legacyRow(), [], [], [], new Map());
+
+    expect(session.practicePlanId).toBeNull();
+    expect(session.opportunityId).toBeNull();
+  });
+
+  it("hydrates persisted Career Brain context", () => {
+    const session = mapSession(
+      legacyRow({ practice_plan_id: "plan-1", opportunity_id: "opp-1" }),
+      [], [], [], new Map(),
+    );
+
+    expect(session.practicePlanId).toBe("plan-1");
+    expect(session.opportunityId).toBe("opp-1");
+  });
+
   it("maps persisted questions into an ordered plan and transcript", () => {
     const session = mapSession(
       {
@@ -922,6 +1036,168 @@ describe("mapSession", () => {
         })],
       }),
     }]);
+  });
+});
+
+describe("linkSessionCareerContext", () => {
+  it("throws when the session is not owned by the user", async () => {
+    const supabase = careerContextSupabase({ sessionRow: null });
+
+    await expect(
+      linkSessionCareerContext(supabase as never, "user-1", "session-legacy", {
+        practicePlanId: null,
+        opportunityId: null,
+      }),
+    ).rejects.toThrow("interview session was not found");
+  });
+
+  it("rejects an opportunity that is not associated with the requested plan", async () => {
+    const planOpportunitiesCapture: { eq?: Array<[string, unknown]> } = {};
+    const supabase = careerContextSupabase({
+      sessionRow: legacyRow(),
+      planRow: { id: "plan-1", user_id: "user-1" },
+      opportunityRow: { id: "opp-1", user_id: "user-1" },
+      planOpportunityRows: [], // plan-1 has no linked opportunities at all
+      captures: { planOpportunities: planOpportunitiesCapture },
+    });
+
+    await expect(
+      linkSessionCareerContext(supabase as never, "user-1", "session-legacy", {
+        practicePlanId: "plan-1",
+        opportunityId: "opp-1",
+      }),
+    ).rejects.toMatchObject(new RepositoryError(
+      "The practice plan and opportunity do not match.",
+      "INVALID_PLAN_CONTEXT",
+    ));
+
+    // The mismatch must be checked by querying practice_plan_opportunities
+    // scoped by BOTH user id and plan id -- not merely by call count.
+    expect(planOpportunitiesCapture.eq).toEqual([
+      ["user_id", "user-1"],
+      ["practice_plan_id", "plan-1"],
+    ]);
+  });
+
+  it("rejects an opportunity that is associated but differs from the plan's primary opportunity", async () => {
+    const supabase = careerContextSupabase({
+      sessionRow: legacyRow(),
+      planRow: { id: "plan-1", user_id: "user-1" },
+      opportunityRow: { id: "opp-2", user_id: "user-1" },
+      planOpportunityRows: [
+        { user_id: "user-1", practice_plan_id: "plan-1", opportunity_id: "opp-1", relevance: "primary" },
+        { user_id: "user-1", practice_plan_id: "plan-1", opportunity_id: "opp-2", relevance: "supporting" },
+      ],
+    });
+
+    await expect(
+      linkSessionCareerContext(supabase as never, "user-1", "session-legacy", {
+        practicePlanId: "plan-1",
+        opportunityId: "opp-2",
+      }),
+    ).rejects.toMatchObject(new RepositoryError(
+      "The practice plan and opportunity do not match.",
+      "INVALID_PLAN_CONTEXT",
+    ));
+  });
+
+  it("links a session to a practice plan and its primary opportunity, scoped by user id throughout", async () => {
+    const sessionCapture: { update?: Row; eq?: Array<[string, unknown]> } = {};
+    const planCapture: { eq?: Array<[string, unknown]> } = {};
+    const opportunityCapture: { eq?: Array<[string, unknown]> } = {};
+    const planOpportunitiesCapture: { eq?: Array<[string, unknown]> } = {};
+    const supabase = careerContextSupabase({
+      sessionRow: legacyRow({ practice_plan_id: "plan-1", opportunity_id: "opp-1" }),
+      planRow: { id: "plan-1", user_id: "user-1" },
+      opportunityRow: { id: "opp-1", user_id: "user-1" },
+      planOpportunityRows: [
+        { user_id: "user-1", practice_plan_id: "plan-1", opportunity_id: "opp-1", relevance: "primary" },
+      ],
+      captures: {
+        session: sessionCapture,
+        plan: planCapture,
+        opportunity: opportunityCapture,
+        planOpportunities: planOpportunitiesCapture,
+      },
+    });
+
+    const session = await linkSessionCareerContext(supabase as never, "user-1", "session-legacy", {
+      practicePlanId: "plan-1",
+      opportunityId: "opp-1",
+    });
+
+    expect(session.practicePlanId).toBe("plan-1");
+    expect(session.opportunityId).toBe("opp-1");
+    expect(sessionCapture.update).toEqual(expect.objectContaining({
+      practice_plan_id: "plan-1",
+      opportunity_id: "opp-1",
+    }));
+    // interview_sessions is touched three times (ownership check, update,
+    // post-update reload) and every one of them must be scoped by BOTH the
+    // session id and the requesting user id -- this is the assertion the
+    // task's deliberate-failure check exercises.
+    expect(sessionCapture.eq).toEqual([
+      ["id", "session-legacy"], ["user_id", "user-1"],
+      ["id", "session-legacy"], ["user_id", "user-1"],
+      ["id", "session-legacy"], ["user_id", "user-1"],
+    ]);
+    expect(planCapture.eq).toEqual([["id", "plan-1"], ["user_id", "user-1"]]);
+    expect(opportunityCapture.eq).toEqual([["id", "opp-1"], ["user_id", "user-1"]]);
+    expect(planOpportunitiesCapture.eq).toEqual([["user_id", "user-1"], ["practice_plan_id", "plan-1"]]);
+  });
+
+  it("links a session to a non-primary opportunity when the plan has associated opportunities but no primary designation", async () => {
+    // Spec section 17.5 case 5's "if one exists" branch: when a plan has no
+    // `primary` link at all, `linkSessionCareerContext` only needs the
+    // requested opportunity to be associated with the plan -- there is no
+    // primary to match against.
+    const supabase = careerContextSupabase({
+      sessionRow: legacyRow({ practice_plan_id: "plan-1", opportunity_id: "opp-2" }),
+      planRow: { id: "plan-1", user_id: "user-1" },
+      opportunityRow: { id: "opp-2", user_id: "user-1" },
+      planOpportunityRows: [
+        { user_id: "user-1", practice_plan_id: "plan-1", opportunity_id: "opp-1", relevance: "supporting" },
+        { user_id: "user-1", practice_plan_id: "plan-1", opportunity_id: "opp-2", relevance: "supporting" },
+      ],
+    });
+
+    const session = await linkSessionCareerContext(supabase as never, "user-1", "session-legacy", {
+      practicePlanId: "plan-1",
+      opportunityId: "opp-2",
+    });
+
+    expect(session.practicePlanId).toBe("plan-1");
+    expect(session.opportunityId).toBe("opp-2");
+  });
+
+  it("links a session to only a practice plan, without requiring any opportunity association check", async () => {
+    const supabase = careerContextSupabase({
+      sessionRow: legacyRow({ practice_plan_id: "plan-1" }),
+      planRow: { id: "plan-1", user_id: "user-1" },
+      // No opportunity/planOpportunity tables stubbed: this must not query them.
+    });
+
+    const session = await linkSessionCareerContext(supabase as never, "user-1", "session-legacy", {
+      practicePlanId: "plan-1",
+      opportunityId: null,
+    });
+
+    expect(session.practicePlanId).toBe("plan-1");
+    expect(session.opportunityId).toBeNull();
+  });
+
+  it("clears both links when passed an all-null context, without touching plan or opportunity tables", async () => {
+    const supabase = careerContextSupabase({
+      sessionRow: legacyRow({ practice_plan_id: null, opportunity_id: null }),
+    });
+
+    const session = await linkSessionCareerContext(supabase as never, "user-1", "session-legacy", {
+      practicePlanId: null,
+      opportunityId: null,
+    });
+
+    expect(session.practicePlanId).toBeNull();
+    expect(session.opportunityId).toBeNull();
   });
 });
 

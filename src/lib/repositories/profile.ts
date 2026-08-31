@@ -1,5 +1,6 @@
 import "server-only";
 
+import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { assessProfileReadiness } from "@/lib/coach";
 import type {
@@ -21,6 +22,32 @@ export class RepositoryError extends Error {
     super(message);
     this.name = "RepositoryError";
   }
+}
+
+function normalizedEvidenceText(value: string | null | undefined): string {
+  return (value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/**
+ * Deterministic identity for a piece of extracted evidence, independent of its
+ * temporary array position/id or its volatile confidence score. Equivalent
+ * source-backed content (same excerpt, project, decision, outcome, etc., modulo
+ * whitespace/case) always yields the same key, so `save_profile_bundle` can
+ * reconcile evidence across profile saves instead of deleting and recreating it.
+ */
+export function evidenceKeyFor(item: EvidenceItem): string {
+  const canonical = JSON.stringify({
+    sourceKind: item.sourceKind,
+    sourceExcerpt: normalizedEvidenceText(item.sourceExcerpt),
+    projectOrEmployer: normalizedEvidenceText(item.projectOrEmployer),
+    ownership: normalizedEvidenceText(item.ownership),
+    technologies: [...item.technologies].map(normalizedEvidenceText).sort(),
+    decision: normalizedEvidenceText(item.decision),
+    constraint: normalizedEvidenceText(item.constraint),
+    outcome: normalizedEvidenceText(item.outcome),
+    recency: normalizedEvidenceText(item.recency),
+  });
+  return createHash("sha256").update(canonical).digest("hex");
 }
 
 const baselineCompetencies = [
@@ -177,7 +204,7 @@ export async function getProfile(supabase: SupabaseClient, userId: string): Prom
   const [documentsResult, competenciesResult, evidenceResult] = await Promise.all([
     supabase.from("source_documents").select("*").eq("user_id", userId),
     supabase.from("competencies").select("*").eq("user_id", userId).eq("is_active", true).order("name"),
-    supabase.from("profile_evidence").select("*").eq("user_id", userId).order("created_at"),
+    supabase.from("profile_evidence").select("*").eq("user_id", userId).eq("is_active", true).order("created_at"),
   ]);
   if (documentsResult.error) throw new RepositoryError("Could not load your source documents.", documentsResult.error.code);
   if (competenciesResult.error) throw new RepositoryError("Could not load your competencies.", competenciesResult.error.code);
@@ -219,6 +246,7 @@ export async function saveProfile(
     p_cover_letter_file_name: source.coverLetterFileName ?? null,
     p_evidence: evidence.map((item, index) => ({
       id: item.id || `evidence-${index + 1}`,
+      evidence_key: evidenceKeyFor(item),
       source_kind: item.sourceKind,
       source_excerpt: item.sourceExcerpt,
       project_or_employer: item.projectOrEmployer,

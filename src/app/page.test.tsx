@@ -170,6 +170,8 @@ function session(overrides: Partial<InterviewSession> = {}): InterviewSession {
     messages: [],
     createdAt: "2026-08-29T10:00:00.000Z",
     updatedAt: "2026-08-29T11:00:00.000Z",
+    practicePlanId: null,
+    opportunityId: null,
     ...overrides,
   };
 }
