@@ -262,7 +262,7 @@ session_id unique per user
 status pending | processing | completed | failed
 attempt_count
 processing_mode live | deterministic_fallback nullable
-extractor_version
+extractor_version, initially release3-v1
 started_at
 completed_at
 last_error_code nullable
@@ -274,7 +274,7 @@ The table stores process metadata only, never raw model output or CV/answer cont
 
 ### 6.1 Idempotency
 
-Before processing a completed session, the service claims its learning run.
+Before processing a completed session, the service claims its learning run using the current extractor version.
 
 - `completed` -> no-op and return previous summary/status.
 - `processing` and not stale -> no-op/reject duplicate processing.
@@ -282,6 +282,8 @@ Before processing a completed session, the service claims its learning run.
 - stale processing rows may be reclaimed after a fixed timeout.
 
 The unique session constraint plus evidence uniqueness makes repeated calls safe.
+
+`extractor_version` is metadata for diagnosability. Release 3 uses the fixed constant `release3-v1`; changing extractor versions does not automatically reprocess already-completed runs.
 
 ### 6.2 No background dependency
 
@@ -335,15 +337,14 @@ The current hydrated `Evaluation` object does not expose the evaluation-row ID, 
 One model call per completed session returns zero or more constrained signals, with a maximum of two signals per evaluation source:
 
 ```text
-source_kind: question_evaluation | session_evaluation
-source_id: one of the supplied owned IDs
+source_id: one of the supplied owned question/session evaluation IDs
 topic: ObservationTopic
 signal: positive | negative
 claim: concise coaching-language description
 reason: concise explanation tied to the answer/evaluation
 ```
 
-The response schema dynamically restricts `source_id` to IDs supplied in that request, using the existing JSON-schema-constrained Gemini path.
+The response schema dynamically restricts `source_id` to IDs supplied in that request, using the existing JSON-schema-constrained Gemini path. The server derives `question_evaluation` versus `session_evaluation`, competency, category, and scope from the owned source record; the model does not choose them.
 
 The model does not output:
 
