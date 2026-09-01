@@ -1,16 +1,19 @@
 import type {
   BlueprintQuestion,
   Competency,
+  CompetencyScope,
   Difficulty,
   EvidenceItem,
   InterviewBlueprint,
   PlannedQuestion,
   ProfileDraft,
+  ProfileReadiness,
   QuestionCategory,
 } from "@/lib/types";
 
 const difficulties: Difficulty[] = ["foundational", "intermediate", "senior", "advanced"];
 const categories: QuestionCategory[] = ["introduction", "experience", "technical", "architecture", "behavioral"];
+const discoveryCategories: QuestionCategory[] = ["introduction", "experience", "technical", "architecture", "behavioral"];
 const plannerTimestamp = "1970-01-01T00:00:00.000Z";
 const defaultMaxFollowUps = 3;
 const defaultMaxQuestions = 8;
@@ -482,4 +485,116 @@ export function appendFollowUp(plan: PlannedQuestion[], followUp: PlannedQuestio
     sequence: plan.length + 1,
     isFollowUp: true,
   }];
+}
+
+/** Picks the highest-relevance competency scope name to anchor discovery prompts, or null when the profile lists none. */
+function selectDiscoveryScopeName(competencies: CompetencyScope[]): string | null {
+  if (!competencies.length) return null;
+  return [...competencies].sort((left, right) => right.relevance - left.relevance || left.name.localeCompare(right.name))[0].name;
+}
+
+/**
+ * Discovery-oriented prompt text. Unlike `blueprintPrompt`, these prompts
+ * never reference evidence-derived facts (project names, ownership,
+ * decisions, outcomes) -- the whole point of discovery is to surface those
+ * facts from the candidate's answer rather than assume them up front.
+ */
+function discoveryPrompt(category: QuestionCategory, role: string | null, subject: string): string {
+  switch (category) {
+    case "introduction":
+      return `Give me a concise introduction to yourself and the ${roleDescriptor(role)} work you have mainly been doing recently. You do not need a polished story yet.`;
+    case "experience":
+      return "Think of one piece of work you remember clearly, even if it does not feel like a strong interview story yet. What was happening, and what part were you personally responsible for?";
+    case "technical":
+      return `Choose one real technical problem or decision from your work${subject ? ` involving ${subject}` : ""}. What options or constraints shaped what you did?`;
+    case "architecture":
+      return "Think of a real feature, system, or project you worked on. What requirements or constraints mattered most, and how did the technical approach take shape?";
+    case "behavioral":
+      return "Think of a time collaboration, ambiguity, disagreement, or delivery pressure made the work harder. What did you do, and what happened next?";
+    default:
+      return `Tell me about a real example from your ${roleDescriptor(role)} work.`;
+  }
+}
+
+/**
+ * Discovery-oriented objective text. Preserves the same "General objective:"
+ * prefix convention `blueprintObjective` uses for evidence-free questions so
+ * a discovery blueprint keeps satisfying `validateInterviewBlueprint`.
+ */
+function discoveryObjective(category: QuestionCategory, item: EvidenceItem | null): string {
+  if (category === "introduction") return "Learn about the candidate's recent focus and background.";
+  const prefix = item ? "Surface" : "General objective: Surface";
+  if (category === "experience") return `${prefix} one concrete example of real work the candidate can describe in detail.`;
+  if (category === "technical") return `${prefix} a real technical problem or decision the candidate can walk through.`;
+  if (category === "architecture") return `${prefix} the requirements and constraints behind a real system or feature.`;
+  return `${prefix} how the candidate handled collaboration, ambiguity, or delivery pressure.`;
+}
+
+function discoveryMissingSignalPrompts(category: QuestionCategory): string[] {
+  if (category === "introduction") return ["Name the kind of work you have mainly been doing recently."];
+  if (category === "experience") return ["Name the specific project, team, or task this was part of."];
+  if (category === "technical") return ["Name the concrete problem, option, or constraint you dealt with."];
+  if (category === "architecture") return ["Name the requirement or constraint that mattered most."];
+  return ["Name who was involved and what changed as a result."];
+}
+
+/**
+ * Builds the deterministic five-question discovery backbone for a profile
+ * whose source evidence is too sparse for grounded, evidence-anchored
+ * questions (`assessProfileReadiness` returned `ready: false`). Discovery
+ * questions still consult `evidence` -- a genuinely relevant partial match
+ * keeps its evidence id and confidence -- but never invent a project,
+ * technology, decision, or outcome the evidence does not support.
+ */
+export function buildExperienceDiscoveryBlueprint(
+  profile: Pick<ProfileDraft,
+    | "role"
+    | "seniority"
+    | "summary"
+    | "narrative"
+    | "expertise"
+    | "characteristics"
+    | "competencies"
+  >,
+  evidence: EvidenceItem[],
+  readiness: ProfileReadiness,
+  now?: Date,
+): InterviewBlueprint {
+  const createdAt = (now ?? new Date()).toISOString();
+  const selectedScopeName = selectDiscoveryScopeName(profile.competencies);
+
+  const questions: BlueprintQuestion[] = discoveryCategories.map((category, index) => {
+    const sequence = index + 1;
+    const planned: PlannedQuestion = {
+      id: `discovery-${sequence}-${category}`,
+      sequence,
+      category,
+      competencyId: null,
+      competencyName: category === "introduction" ? null : selectedScopeName,
+      difficulty: normalizedSeniority(profile.seniority ?? ""),
+      isFollowUp: false,
+      prompt: discoveryPrompt(category, profile.role, selectedScopeName ?? ""),
+      answer: null,
+      createdAt,
+    };
+    const item = evidenceForQuestion(planned, evidence);
+    const base = defaultBlueprintQuestion(planned, item);
+    return {
+      ...base,
+      prompt: discoveryPrompt(category, profile.role, selectedScopeName ?? ""),
+      objective: discoveryObjective(category, item),
+      missingSignalPrompts: discoveryMissingSignalPrompts(category),
+    };
+  });
+
+  return {
+    status: "limited-grounding",
+    fallbackReason: readiness.missing.length > 0
+      ? `Your source profile has limited concrete example detail (${readiness.missing.join(", ")}), so this session starts broader and helps you uncover real projects, ownership, decisions, and outcomes as you answer.`
+      : "Your source profile has limited concrete example detail, so this session starts broader and helps you uncover real engineering examples as you answer.",
+    maxFollowUps: defaultMaxFollowUps,
+    maxQuestions: defaultMaxQuestions,
+    createdAt,
+    questions,
+  };
 }

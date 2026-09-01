@@ -3,7 +3,7 @@ import "server-only";
 import { z } from "zod";
 import { applyEvaluation } from "@/lib/competencies";
 import { geminiFailureState, geminiModel, geminiRequestError } from "@/lib/gemini";
-import { buildFallbackInterviewBlueprint, validateInterviewBlueprint } from "@/lib/interview-planner";
+import { buildExperienceDiscoveryBlueprint, buildFallbackInterviewBlueprint, validateInterviewBlueprint } from "@/lib/interview-planner";
 import { MAX_CV_PDF_BYTES } from "@/lib/upload-limits";
 import type {
   BlueprintQuestion,
@@ -849,6 +849,10 @@ export async function generateInterviewBlueprint(
   evidence: EvidenceItem[],
 ): Promise<InterviewBlueprint> {
   const createdAt = new Date().toISOString();
+  const readiness = assessProfileReadiness(evidence);
+  if (!readiness.ready) {
+    return buildExperienceDiscoveryBlueprint(profile, evidence, readiness, new Date(createdAt));
+  }
   const competencyContext = profile.competencies.map((competency) => ({
     name: competency.name,
     relevance: competency.relevance,

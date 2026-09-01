@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   appendFollowUp,
+  buildExperienceDiscoveryBlueprint,
   buildFallbackInterviewBlueprint,
   buildInterviewPlan,
   chooseDifficulty,
@@ -88,6 +89,16 @@ const profile: ProfileDraft = {
     { name: "React architecture", relevance: 1 },
     { name: "System design", relevance: 0.8 },
   ],
+};
+
+const sparseProfile: ProfileDraft = {
+  role: "Frontend Engineer",
+  seniority: "Senior",
+  summary: "Frontend engineer",
+  narrative: "Builds React product interfaces.",
+  expertise: ["React", "TypeScript"],
+  characteristics: ["Pragmatic"],
+  competencies: [{ name: "React", relevance: 1 }],
 };
 
 describe("adaptive interview planning", () => {
@@ -544,5 +555,77 @@ describe("adaptive interview planning", () => {
       competencyName: "System design",
       evidenceIds: ["evidence-2"],
     });
+  });
+
+  it("builds the exact generic five-question backbone for a sparse profile", () => {
+    const readiness = {
+      ready: false,
+      missing: [
+        "two concrete engineering projects or work examples",
+        "responsibilities or outcomes",
+      ],
+    };
+
+    const result = buildExperienceDiscoveryBlueprint(
+      {
+        role: "Frontend Engineer",
+        seniority: "Senior",
+        summary: "Frontend engineer",
+        narrative: "Builds React product interfaces.",
+        expertise: ["React", "TypeScript"],
+        characteristics: ["Pragmatic"],
+        competencies: [{ name: "React", relevance: 1 }],
+      },
+      [],
+      readiness,
+      new Date("2026-09-01T12:00:00.000Z"),
+    );
+
+    expect(result.status).toBe("limited-grounding");
+    expect(result.fallbackReason).toContain("limited concrete example detail");
+    expect(result.questions.map((item) => item.category)).toEqual([
+      "introduction",
+      "experience",
+      "technical",
+      "architecture",
+      "behavioral",
+    ]);
+    expect(result.questions).toHaveLength(5);
+    expect(result.questions.every((item) => item.evidenceIds.length === 0)).toBe(true);
+    expect(result.questions[1].prompt).toContain("even if it does not feel like a strong interview story yet");
+    expect(result.questions[1].prompt).toContain("personally responsible");
+    expect(validateInterviewBlueprint(result, [])).toEqual(result);
+  });
+
+  it("anchors discovery questions only to partial evidence that really exists", () => {
+    const evidence = [{
+      id: "evidence-1",
+      sourceKind: "cv" as const,
+      sourceExcerpt: "Worked on a React migration for checkout.",
+      projectOrEmployer: "Checkout migration",
+      ownership: null,
+      technologies: ["React"],
+      decision: null,
+      constraint: null,
+      outcome: null,
+      recency: "2025",
+      confidence: 0.82,
+    }];
+
+    const result = buildExperienceDiscoveryBlueprint(
+      sparseProfile,
+      evidence,
+      {
+        ready: false,
+        missing: ["two concrete engineering projects or work examples", "responsibilities or outcomes"],
+      },
+      new Date("2026-09-01T12:00:00.000Z"),
+    );
+
+    const referencedIds = result.questions.flatMap((item) => item.evidenceIds);
+    expect(referencedIds.every((id) => id === "evidence-1")).toBe(true);
+    expect(JSON.stringify(result.questions)).not.toContain("30%");
+    expect(JSON.stringify(result.questions)).not.toContain("led the migration");
+    expect(validateInterviewBlueprint(result, evidence)).toEqual(result);
   });
 });

@@ -1214,7 +1214,7 @@ describe("generateInterviewBlueprint", () => {
   it("returns a validated grounded blueprint that preserves evidence ids and objectives", async () => {
     vi.stubEnv("GEMINI_API_KEY", "private-test-key");
     vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
       candidates: [{
         content: {
           parts: [{
@@ -1333,6 +1333,25 @@ describe("generateInterviewBlueprint", () => {
         }),
       ]),
     });
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+
+  it("uses deterministic discovery planning when source readiness is incomplete", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+    const result = await generateInterviewBlueprint(
+      {
+        ...blueprintProfile,
+        competencies: [{ name: "React", relevance: 1 }],
+      },
+      [],
+    );
+
+    expect(result.status).toBe("limited-grounding");
+    expect(result.questions).toHaveLength(5);
+    expect(result.questions[1].prompt).toContain("strong interview story");
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("retries once when the first blueprint response fails validation", async () => {
