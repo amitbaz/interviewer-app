@@ -53,6 +53,7 @@ import type {
   ProgressSnapshot,
   UpdateOpportunityDetailsInput,
 } from "@/lib/types";
+import { profileReadinessCopy } from "@/app/profile-readiness";
 import { progressViewModel } from "@/app/progress-view-model";
 import { canExplicitlyCompleteConversation } from "@/lib/conversation-completion";
 import { createBrowserSupabaseClient } from "@/lib/supabase/client";
@@ -146,22 +147,6 @@ function progressTrendDescription(trend: ProgressSnapshot["trend"]): string {
     default:
       return "Complete a few sessions to unlock a clearer progress trend.";
   }
-}
-
-/**
- * Practice-first readiness copy: a `ready` profile is confirmed as
- * evidence-grounded for personalized practice; a sparse one is never a
- * blocker -- Relay simply starts broader and surfaces stronger project,
- * ownership, and outcome examples as the user answers. Exported so
- * {@link HomeView} and {@link PracticeView} render this exact sentence for
- * their own (non-blocking) Start-control guidance instead of a third copy of
- * the same state.
- */
-export function profileReadinessCopy(readiness: Profile["readiness"]): string | null {
-  if (!readiness) return null;
-  return readiness.ready
-    ? "Your source profile has enough detail for evidence-grounded practice."
-    : "You can practice now. Relay will start broader and help you uncover stronger project, ownership, and outcome examples as you answer.";
 }
 
 function evidenceLabel(item: EvidenceItem): string {

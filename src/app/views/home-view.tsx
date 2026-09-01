@@ -1,6 +1,6 @@
 "use client";
 
-import { profileReadinessCopy } from "@/app/relay-shell";
+import { profileReadinessCopy } from "@/app/profile-readiness";
 import type { CareerDashboard, Opportunity, OpportunityStatus, PracticeFormat, PracticeRecommendationSignal } from "@/lib/types";
 
 /**

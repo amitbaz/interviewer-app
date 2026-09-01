@@ -2,7 +2,7 @@
 
 import { FormEvent, useState } from "react";
 import type { ManualPracticeRequest } from "@/app/api-client";
-import { profileReadinessCopy } from "@/app/relay-shell";
+import { profileReadinessCopy } from "@/app/profile-readiness";
 import type { CareerDashboard, PracticeFormat } from "@/lib/types";
 
 /**
