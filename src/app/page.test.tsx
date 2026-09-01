@@ -382,7 +382,7 @@ function emptyProgress(): ProgressSnapshot {
 }
 
 /** The shape `/api/interview` returns for a freshly started conversation: one open question, no evaluations. */
-function activeConversationSession(): InterviewSession {
+function activeConversationSession(overrides: Partial<InterviewSession> = {}): InterviewSession {
   return session({
     id: "session-active",
     status: "active",
@@ -399,6 +399,7 @@ function activeConversationSession(): InterviewSession {
         createdAt: "2026-08-29T10:00:00.000Z",
       },
     ],
+    ...overrides,
   });
 }
 
@@ -527,7 +528,7 @@ describe("App progress view", () => {
     expect(screen.queryByText("Baseline established")).not.toBeInTheDocument();
   });
 
-  it("shows the profile evidence gate state on the progress view", async () => {
+  it("shows practice-first readiness guidance on the progress view when the profile is sparse", async () => {
     await renderProgressView({
       progress: {
         readiness: 75,
@@ -559,7 +560,9 @@ describe("App progress view", () => {
       sessions: [session({ overallScore: 8.2 })],
     });
 
-    expect(screen.getByText("Profile evidence gate still needs two concrete engineering projects or work examples, identifiable technologies, responsibilities or outcomes.")).toBeInTheDocument();
+    expect(screen.getByText(/You can practice now\./)).toBeInTheDocument();
+    expect(screen.getByText(/help you uncover stronger/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Profile evidence gate/i)).not.toBeInTheDocument();
   });
 
   it("shows a one-session baseline state with coaching guidance", async () => {
@@ -643,7 +646,7 @@ describe("App progress view", () => {
 });
 
 describe("App profile view", () => {
-  it("shows the profile evidence gate state on the profile screen", async () => {
+  it("shows evidence-grounded readiness state on the profile screen", async () => {
     mockCoachData({
       progress: {
         readiness: 75,
@@ -666,7 +669,7 @@ describe("App profile view", () => {
     await screen.findByRole("heading", { name: "Ready when you are." });
     fireEvent.click(screen.getByRole("button", { name: "profile" }));
 
-    expect(await screen.findByText("Grounded profile ready for personalized interviews.")).toBeInTheDocument();
+    expect(await screen.findByText("Your source profile has enough detail for evidence-grounded practice.")).toBeInTheDocument();
   });
 
   it("shows source-backed evidence and no-fabrication copy on the profile screen", async () => {
@@ -695,7 +698,7 @@ describe("App profile view", () => {
 });
 
 describe("App home view", () => {
-  it("blocks the recommended-practice CTA when the profile readiness gate is failing", async () => {
+  it("does not block the recommended-practice CTA when the profile readiness is not ready", async () => {
     await renderHomeView({
       progress: {
         readiness: null,
@@ -714,8 +717,8 @@ describe("App home view", () => {
       }),
     });
 
-    expect(screen.getByRole("button", { name: "Start recommended practice" })).toBeDisabled();
-    expect(screen.getByText(/two concrete engineering projects or work examples/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start recommended practice" })).toBeEnabled();
+    expect(screen.getByText(/You can practice now\./)).toBeInTheDocument();
   });
 
   it("navigates to Applications when its open-affordance button is clicked", async () => {
@@ -920,7 +923,7 @@ describe("App coach view", () => {
 });
 
 describe("App practice view", () => {
-  it("respects the readiness gate on the recommended-practice action", async () => {
+  it("does not gate the recommended-practice action on profile readiness", async () => {
     await renderPracticeView({
       progress: {
         readiness: null,
@@ -939,8 +942,8 @@ describe("App practice view", () => {
       }),
     });
 
-    expect(screen.getByRole("button", { name: "Start recommended practice" })).toBeDisabled();
-    expect(screen.getByText("Add two concrete engineering projects or work examples to your profile before Relay can start grounded practice.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start recommended practice" })).toBeEnabled();
+    expect(screen.getByText(/You can practice now\./)).toBeInTheDocument();
   });
 
   /**
@@ -1212,7 +1215,7 @@ describe("ResultsFeedbackCards", () => {
     fireEvent.click(screen.getByRole("button", { name: "React architecture feedback" }));
 
     const details = screen.getByRole("region", { name: "React architecture feedback" });
-    expect(within(details).getByText("Limited grounding")).toBeInTheDocument();
+    expect(within(details).getByText("Broader practice")).toBeInTheDocument();
     expect(within(details).getByText("Gemini returned invalid blueprint JSON after one repair attempt.")).toBeInTheDocument();
   });
 
@@ -1458,6 +1461,94 @@ describe("App conversation interview", () => {
     expect(screen.getByText("Mixed interview · 0 of 1 answered")).toBeInTheDocument();
     expect(screen.getByText("How would you phase a large React migration?")).toBeInTheDocument();
     expect(screen.getByText("Grounded question")).toBeInTheDocument();
+  });
+
+  // A sparse profile's discovery blueprint and a Gemini provider fallback
+  // share the same `limited-grounding` status (no new enum value), so the
+  // shell's own heading stays neutral -- "Broader practice" -- and
+  // `fallbackReason` is what actually distinguishes the two causes for the
+  // user reading it live, in an active conversation.
+  it("shows a Broader practice discovery banner through the real shell when the session starts with limited grounding", async () => {
+    const started = activeConversationSession({
+      blueprint: {
+        status: "limited-grounding",
+        fallbackReason: "Your source profile has limited concrete example detail, so this session starts broader and helps you uncover real examples as you answer.",
+        maxFollowUps: 3,
+        maxQuestions: 8,
+        createdAt: "2026-09-01T12:00:00.000Z",
+        questions: [
+          {
+            id: "question-1",
+            sequence: 1,
+            category: "experience",
+            competencyId: "react-architecture",
+            competencyName: "React architecture",
+            difficulty: "senior",
+            isFollowUp: false,
+            prompt: "How would you phase a large React migration?",
+            answer: null,
+            createdAt: "2026-09-01T12:00:00.000Z",
+            objective: "Discover a concrete project to ground later questions in.",
+            evidenceIds: [],
+            expectedSignals: ["ownership"],
+            missingSignalPrompts: [],
+            followUpLimit: 1,
+            sourceConfidence: null,
+          },
+        ],
+      },
+    });
+    await startInterviewFrom("conversation", started, {
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+    });
+
+    expect(screen.getByText("Broader practice")).toBeInTheDocument();
+    expect(screen.getByText(/helps you uncover real examples/i)).toBeInTheDocument();
+  });
+
+  // A discovery question's `evidenceIds` is deliberately empty (finding 2 in the
+  // final review dropped the evidence anchor entirely). The interviewer-message
+  // grounding line must not describe that as a deficit ("Grounded in 0 source
+  // evidence items") -- across a full discovery session every non-introduction
+  // question would render that same discouraging count.
+  it("does not present an evidence-free discovery question's grounding line as a deficit", async () => {
+    const started = activeConversationSession({
+      blueprint: {
+        status: "limited-grounding",
+        fallbackReason: "Your source profile has limited concrete example detail, so this session starts broader.",
+        maxFollowUps: 3,
+        maxQuestions: 8,
+        createdAt: "2026-09-01T12:00:00.000Z",
+        questions: [
+          {
+            id: "question-1",
+            sequence: 1,
+            category: "experience",
+            competencyId: null,
+            competencyName: null,
+            difficulty: "senior",
+            isFollowUp: false,
+            prompt: "How would you phase a large React migration?",
+            answer: null,
+            createdAt: "2026-09-01T12:00:00.000Z",
+            objective: "General objective: Surface one concrete example of real work the candidate can describe in detail.",
+            evidenceIds: [],
+            expectedSignals: ["ownership"],
+            missingSignalPrompts: [],
+            followUpLimit: 1,
+            sourceConfidence: null,
+          },
+        ],
+      },
+    });
+    await startInterviewFrom("conversation", started, {
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+    });
+
+    expect(screen.queryByText(/0 source evidence item/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Broader question/)).toBeInTheDocument();
   });
 
   it("sends an answer and clears the composer", async () => {

@@ -2,6 +2,7 @@
 
 import { FormEvent, useState } from "react";
 import type { ManualPracticeRequest } from "@/app/api-client";
+import { profileReadinessCopy } from "@/app/profile-readiness";
 import type { CareerDashboard, PracticeFormat } from "@/lib/types";
 
 /**
@@ -60,10 +61,11 @@ function formatDate(iso: string): string {
  */
 export function PracticeView({ dashboard, busy, onStartRecommended, onStartManual }: PracticeViewProps) {
   const { recommendation, opportunities, recentPracticePlans, recentSessions, profile } = dashboard;
-  const readinessBlocked = profile.readiness?.ready === false;
-  const readinessReason = readinessBlocked
-    ? `Add ${profile.readiness!.missing.join(", ")} to your profile before Relay can start grounded practice.`
-    : null;
+  // A sparse profile never disables Start -- it only changes what the first
+  // session looks like (broader discovery questions instead of grounded
+  // ones). `readinessSparse` gates the guidance copy below, not the CTA.
+  const readinessSparse = profile.readiness?.ready === false;
+  const readinessReason = readinessSparse ? profileReadinessCopy(profile.readiness) : null;
 
   const [primaryFocus, setPrimaryFocus] = useState("");
   const [secondaryFocus, setSecondaryFocus] = useState("");
@@ -119,7 +121,7 @@ export function PracticeView({ dashboard, busy, onStartRecommended, onStartManua
         <p className="mt-3 text-sm uppercase tracking-[.12em] text-[#c8d7cf]">{FORMAT_LABELS[recommendation.format]} · {recommendation.estimatedMinutes} min</p>
         <p className="mt-2 text-xl font-semibold">{recommendation.primaryFocus}</p>
         <p className="mt-4 max-w-2xl leading-6 text-[#dbe7df]">{recommendation.rationale}</p>
-        <button onClick={startRecommended} disabled={busy || readinessBlocked} className="mt-6 rounded-full bg-[var(--lime)] px-5 py-3 text-sm font-semibold text-[#18281f] disabled:opacity-50">
+        <button onClick={startRecommended} disabled={busy} className="mt-6 rounded-full bg-[var(--lime)] px-5 py-3 text-sm font-semibold text-[#18281f] disabled:opacity-50">
           {busy ? "Starting…" : "Start recommended practice"}
         </button>
         {readinessReason && <p className="mt-3 max-w-md text-sm leading-6 text-[#dbe7df]">{readinessReason}</p>}

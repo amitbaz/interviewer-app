@@ -40,7 +40,11 @@ export type EvidenceItem = {
   confidence: number;
 };
 
-/** Deterministic profile gate result used to allow or reject grounded interviews. */
+/**
+ * Deterministic assessment of how much source-backed detail is available for
+ * interview grounding. `ready === false` is advisory: it selects broader
+ * discovery-oriented practice and must not by itself block a session start.
+ */
 export type ProfileReadiness = {
   ready: boolean;
   missing: string[];

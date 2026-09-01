@@ -63,12 +63,6 @@ export async function POST(request: Request) {
         const session = await createHandsOnSession(supabase, user.id, handsOnExercise(profile));
         return NextResponse.json({ session });
       }
-      if (!profile.readiness?.ready) {
-        return NextResponse.json({
-          error: `Add ${profile.readiness?.missing.join(", ") ?? "more evidence"} before starting a personalized interview.`,
-          readiness: profile.readiness,
-        }, { status: 400 });
-      }
       const blueprint = await generateInterviewBlueprint(profile, profile.evidence ?? []);
       const session = await createSessionWithBlueprint(supabase, user.id, blueprint);
       if (session.questions[0]) {

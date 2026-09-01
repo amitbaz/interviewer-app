@@ -225,17 +225,18 @@ describe("HomeView", () => {
     expect(within(recommendedSection).getByText(/Staff Engineer/)).toBeInTheDocument();
   });
 
-  it("disables the CTA and shows the reason when the profile readiness gate is failing", () => {
+  it("keeps the CTA enabled and shows practice-first guidance when the profile readiness is not ready", () => {
     const { onStartRecommended } = renderHome({
       profile: profile({ readiness: { ready: false, missing: ["two concrete engineering projects"] } }),
     });
 
     const cta = screen.getByRole("button", { name: "Start recommended practice" });
-    expect(cta).toBeDisabled();
-    expect(screen.getByText(/two concrete engineering projects/)).toBeInTheDocument();
+    expect(cta).toBeEnabled();
+    expect(screen.getByText(/You can practice now\./)).toBeInTheDocument();
+    expect(screen.getByText(/help you uncover stronger/i)).toBeInTheDocument();
 
     fireEvent.click(cta);
-    expect(onStartRecommended).not.toHaveBeenCalled();
+    expect(onStartRecommended).toHaveBeenCalledTimes(1);
   });
 
   it("shows applications needing attention with company and role", () => {

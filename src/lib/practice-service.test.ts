@@ -264,6 +264,27 @@ describe("practice orchestration", () => {
     );
   });
 
+  it("starts plan-driven practice even when the profile readiness diagnostic is false", async () => {
+    const sparseProfile = {
+      ...profile,
+      readiness: {
+        ready: false,
+        missing: ["two concrete engineering projects or work examples"],
+      },
+    };
+    mocks.getProfile.mockResolvedValue(sparseProfile);
+
+    await startRecommendedPractice(supabase as never, "user-1", now);
+
+    expect(mocks.generatePracticeBlueprint).toHaveBeenCalledWith(
+      sparseProfile,
+      sparseProfile.evidence,
+      expect.objectContaining({ id: "plan-1" }),
+      expect.anything(),
+    );
+    expect(mocks.createSessionWithPracticeBlueprint).toHaveBeenCalled();
+  });
+
   it("persists the recommendation's opportunity links before starting the session", async () => {
     await startRecommendedPractice(supabase as never, "user-1", now);
 

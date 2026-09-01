@@ -149,9 +149,9 @@ export function ResultsFeedbackCards({
                 )}
                 {session.blueprint?.status === "limited-grounding" && (
                   <div className="rounded-2xl border border-[#e4c9a0] bg-[#fff6eb] px-4 py-3 text-[#8e5e20]">
-                    <p className="text-xs font-semibold uppercase tracking-[.12em]">Limited grounding</p>
+                    <p className="text-xs font-semibold uppercase tracking-[.12em]">Broader practice</p>
                     <p className="mt-1 leading-6">
-                      {session.blueprint.fallbackReason ?? "This session used a constrained fallback blueprint, so the feedback may be broader than a fully grounded session."}
+                      {session.blueprint.fallbackReason ?? "This session is using broader questions because Relay has less source grounding for this practice than usual."}
                     </p>
                   </div>
                 )}

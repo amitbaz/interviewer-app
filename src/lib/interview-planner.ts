@@ -1,16 +1,22 @@
 import type {
   BlueprintQuestion,
   Competency,
+  CompetencyScope,
   Difficulty,
   EvidenceItem,
   InterviewBlueprint,
   PlannedQuestion,
   ProfileDraft,
+  ProfileReadiness,
   QuestionCategory,
 } from "@/lib/types";
 
 const difficulties: Difficulty[] = ["foundational", "intermediate", "senior", "advanced"];
 const categories: QuestionCategory[] = ["introduction", "experience", "technical", "architecture", "behavioral"];
+// Same order as `categories` today, kept as its own const because the discovery backbone is
+// independently pinned by `validateInterviewBlueprint`/the discovery tests -- it is free to
+// diverge from `categories` if the legacy plan's ordering ever changes.
+const discoveryCategories: QuestionCategory[] = ["introduction", "experience", "technical", "architecture", "behavioral"];
 const plannerTimestamp = "1970-01-01T00:00:00.000Z";
 const defaultMaxFollowUps = 3;
 const defaultMaxQuestions = 8;
@@ -482,4 +488,170 @@ export function appendFollowUp(plan: PlannedQuestion[], followUp: PlannedQuestio
     sequence: plan.length + 1,
     isFollowUp: true,
   }];
+}
+
+/** Picks the highest-relevance competency scope name to anchor discovery prompts, or null when the profile lists none. */
+function selectDiscoveryScopeName(competencies: CompetencyScope[]): string | null {
+  if (!competencies.length) return null;
+  return [...competencies].sort((left, right) => right.relevance - left.relevance || left.name.localeCompare(right.name))[0].name;
+}
+
+/**
+ * Discovery-oriented prompt text. Unlike `blueprintPrompt`, these prompts
+ * never reference evidence-derived facts (project names, ownership,
+ * decisions, outcomes) -- the whole point of discovery is to surface those
+ * facts from the candidate's answer rather than assume them up front.
+ */
+function discoveryPrompt(category: QuestionCategory, role: string | null, subject: string): string {
+  switch (category) {
+    case "introduction":
+      return `Give me a concise introduction to yourself and the ${roleDescriptor(role)} work you have mainly been doing recently. You do not need a polished story yet.`;
+    case "experience":
+      return "Think of one piece of work you remember clearly, even if it does not feel like a strong interview story yet. What was happening, and what part were you personally responsible for?";
+    case "technical":
+      return `Choose one real technical problem or decision from your work${subject ? ` involving ${subject}` : ""}. What options or constraints shaped what you did?`;
+    case "architecture":
+      return "Think of a real feature, system, or project you worked on. What requirements or constraints mattered most, and how did the technical approach take shape?";
+    case "behavioral":
+      return "Think of a time collaboration, ambiguity, disagreement, or delivery pressure made the work harder. What did you do, and what happened next?";
+    default:
+      return `Tell me about a real example from your ${roleDescriptor(role)} work.`;
+  }
+}
+
+/**
+ * Discovery-oriented objective text. Every non-introduction question carries
+ * the "General objective:" prefix `validateInterviewBlueprint` requires for
+ * evidence-free questions -- discovery questions are always evidence-free
+ * (see `buildExperienceDiscoveryBlueprint`), so there is no evidence-anchored
+ * variant to branch on here.
+ */
+function discoveryObjective(category: QuestionCategory): string {
+  if (category === "introduction") return "Learn about the candidate's recent focus and background.";
+  const prefix = "General objective: Surface";
+  if (category === "experience") return `${prefix} one concrete example of real work the candidate can describe in detail.`;
+  if (category === "technical") return `${prefix} a real technical problem or decision the candidate can walk through.`;
+  if (category === "architecture") return `${prefix} the requirements and constraints behind a real system or feature.`;
+  return `${prefix} how the candidate handled collaboration, ambiguity, or delivery pressure.`;
+}
+
+function discoveryMissingSignalPrompts(category: QuestionCategory): string[] {
+  if (category === "introduction") return ["Name the kind of work you have mainly been doing recently."];
+  if (category === "experience") return ["Name the specific project, team, or task this was part of."];
+  if (category === "technical") return ["Name the concrete problem, option, or constraint you dealt with."];
+  if (category === "architecture") return ["Name the requirement or constraint that mattered most."];
+  return ["Name who was involved and what changed as a result."];
+}
+
+/**
+ * Discovery-oriented rubric criteria. Unlike `categoryRubricCriteria`, these
+ * name no project or subject -- discovery questions never carry an evidence
+ * anchor, so a rubric criterion naming a project the prompt never mentioned
+ * would mislead both the evaluator and the transcript UI (see the final
+ * review finding this fixes).
+ */
+function discoveryRubricCriteria(category: QuestionCategory): string[] {
+  if (category === "introduction") {
+    return [
+      "Establish what kind of engineering work the candidate has mainly been doing recently.",
+      "Keep the summary grounded in what the candidate actually says.",
+      "Do not drift into unrelated background details.",
+    ];
+  }
+  if (category === "experience") {
+    return [
+      "Surface one real piece of work the candidate can describe from memory.",
+      "Describe the candidate's personal responsibility in it.",
+      "Explain what happened and why it mattered, using only what the candidate said.",
+    ];
+  }
+  if (category === "technical") {
+    return [
+      "Surface a real technical problem or decision the candidate can walk through.",
+      "Explain the option, constraint, or trade-off the candidate considered.",
+      "Describe the result, using only what the candidate said.",
+    ];
+  }
+  if (category === "architecture") {
+    return [
+      "Surface the requirements or constraints behind a real system or feature.",
+      "Describe how the technical approach took shape.",
+      "State the outcome, using only what the candidate said.",
+    ];
+  }
+  return [
+    "Surface a real collaboration, ambiguity, or delivery-pressure challenge.",
+    "Describe what the candidate did about it.",
+    "State what changed as a result, using only what the candidate said.",
+  ];
+}
+
+/**
+ * Builds the deterministic five-question discovery backbone for a profile
+ * whose source evidence is too sparse for grounded, evidence-anchored
+ * questions (`assessProfileReadiness` returned `ready: false`).
+ *
+ * Discovery questions never anchor to `evidence`, even when a partial match
+ * scores > 0 against `scoreEvidenceForQuestion`. That matcher is permissive
+ * enough that the commonest sparse shape -- one real project that failed the
+ * two-example readiness threshold -- would score positively against nearly
+ * every non-introduction question, anchoring all four of them to the same
+ * evidence id despite prompts that never mention it (spec §6.1's discovery
+ * prompts are deliberately generic). Keeping that anchor would also silently
+ * disable `hasSourceEvidenceTarget`'s discovery-answer grounding protection
+ * for exactly the questions it exists to protect. So every discovery
+ * question gets `evidenceIds: []`, `sourceConfidence: null`, and rubric
+ * criteria that name no project -- see spec §6.2: "Questions without a safe
+ * source anchor use a general objective and `evidenceIds: []`."
+ */
+export function buildExperienceDiscoveryBlueprint(
+  profile: Pick<ProfileDraft,
+    | "role"
+    | "seniority"
+    | "summary"
+    | "narrative"
+    | "expertise"
+    | "characteristics"
+    | "competencies"
+  >,
+  evidence: EvidenceItem[],
+  readiness: ProfileReadiness,
+  now?: Date,
+): InterviewBlueprint {
+  const createdAt = (now ?? new Date()).toISOString();
+  const selectedScopeName = selectDiscoveryScopeName(profile.competencies);
+
+  const questions: BlueprintQuestion[] = discoveryCategories.map((category, index) => {
+    const sequence = index + 1;
+    return {
+      id: `discovery-${sequence}-${category}`,
+      sequence,
+      category,
+      competencyId: null,
+      competencyName: category === "introduction" ? null : selectedScopeName,
+      difficulty: normalizedSeniority(profile.seniority ?? ""),
+      isFollowUp: false,
+      prompt: discoveryPrompt(category, profile.role, selectedScopeName ?? ""),
+      answer: null,
+      createdAt,
+      objective: discoveryObjective(category),
+      evidenceIds: [],
+      expectedSignals: categorySignals(category),
+      missingSignalPrompts: discoveryMissingSignalPrompts(category),
+      rubricCriteria: discoveryRubricCriteria(category),
+      followUpLimit: category === "introduction" || category === "behavioral" ? 0 : 1,
+      sourceConfidence: null,
+    };
+  });
+
+  return {
+    status: "limited-grounding",
+    fallbackReason: readiness.missing.length > 0
+      ? `Your source profile has limited concrete example detail (${readiness.missing.join(", ")}), so this session starts broader and helps you uncover real projects, ownership, decisions, and outcomes as you answer.`
+      : "Your source profile has limited concrete example detail, so this session starts broader and helps you uncover real engineering examples as you answer.",
+    maxFollowUps: defaultMaxFollowUps,
+    maxQuestions: defaultMaxQuestions,
+    createdAt,
+    questions,
+  };
 }

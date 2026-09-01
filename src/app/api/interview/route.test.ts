@@ -163,30 +163,68 @@ describe("POST /api/interview", () => {
     expect(json).not.toHaveBeenCalled();
   });
 
-  it("rejects profiles that do not meet the readiness gate before planning an interview", async () => {
-    mocks.getProfile.mockResolvedValue({
+  it("starts discovery practice when profile source grounding is incomplete", async () => {
+    const sparseProfile = {
       ...profile,
+      evidence: [],
       readiness: {
         ready: false,
         missing: ["two concrete engineering projects or work examples"],
       },
-    });
+    };
+    const blueprint = {
+      status: "limited-grounding" as const,
+      fallbackReason: "Your source profile has limited concrete example detail, so this session starts broader.",
+      maxFollowUps: 3,
+      maxQuestions: 8,
+      createdAt: "2026-09-01T12:00:00.000Z",
+      questions: [
+        {
+          ...question(1, null),
+          id: "discovery-1-introduction",
+          objective: "Establish recent engineering context without requiring a polished example.",
+          evidenceIds: [],
+          expectedSignals: ["role summary", "recent ownership"],
+          missingSignalPrompts: ["Name one area of work you remember clearly."],
+          rubricCriteria: ["Explain recent work clearly."],
+          followUpLimit: 0,
+          sourceConfidence: null,
+        },
+      ],
+    };
+    const persisted = session([{ ...question(1, null), id: "database-question-1" }]);
+    persisted.blueprint = {
+      ...blueprint,
+      questions: blueprint.questions.map((item) => ({ ...item, id: "database-question-1" })),
+    };
+
+    mocks.getProfile.mockResolvedValue(sparseProfile);
+    mocks.generateInterviewBlueprint.mockResolvedValue(blueprint);
+    mocks.createSessionWithBlueprint.mockResolvedValue(persisted);
+    mocks.initialQuestion.mockReturnValue(blueprint.questions[0].prompt);
 
     const response = await POST(new Request("http://localhost/api/interview", {
       method: "POST",
-      body: JSON.stringify({ action: "start" }),
+      body: JSON.stringify({ action: "start", mode: "conversation" }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(mocks.generateInterviewBlueprint).toHaveBeenCalledWith(sparseProfile, []);
+    expect(mocks.createSessionWithBlueprint).toHaveBeenCalled();
+    expect((await response.json()).session.blueprint.status).toBe("limited-grounding");
+  });
+
+  it("still requires a profile before starting personalized practice", async () => {
+    mocks.getProfile.mockResolvedValue(null);
+
+    const response = await POST(new Request("http://localhost/api/interview", {
+      method: "POST",
+      body: JSON.stringify({ action: "start", mode: "conversation" }),
     }));
 
     expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({
-      error: expect.stringContaining("two concrete engineering projects"),
-      readiness: {
-        ready: false,
-        missing: ["two concrete engineering projects or work examples"],
-      },
-    });
+    expect(await response.json()).toEqual({ error: "Create your profile first." });
     expect(mocks.generateInterviewBlueprint).not.toHaveBeenCalled();
-    expect(mocks.createSessionWithBlueprint).not.toHaveBeenCalled();
   });
 
   it("logs the underlying failure while keeping the public error generic", async () => {

@@ -14,6 +14,7 @@ import {
   nextTurn,
 } from "@/lib/coach";
 import type {
+  BlueprintQuestion,
   EvidenceItem,
   InterviewBlueprint,
   InterviewSession,
@@ -749,7 +750,9 @@ describe("initialQuestion", () => {
       }],
     }), { status: 200, headers: { "Content-Type": "application/json" } }));
 
-    const answeredQuestion = planned({ id: "question-1", sequence: 1, category: "experience" });
+    // evidenceIds is non-empty so this question keeps a source-evidence
+    // target: the model's unsupportedClaims must still pass through.
+    const answeredQuestion = planned({ id: "question-1", sequence: 1, category: "experience", evidenceIds: ["evidence-1"] });
     const nextQuestion = planned({
       id: "question-2",
       sequence: 2,
@@ -781,6 +784,236 @@ describe("initialQuestion", () => {
     expect(turn.evaluation.dimensionReasons).toBeDefined();
     expect(turn.evaluation.dimensionReasons?.correctness).toContain("migration question");
     expect(turn.evaluation.dimensionReasons?.relevance).toContain("checkout migration question");
+  });
+
+  describe("discovery answers with no source evidence target", () => {
+    const discoveryQuestion: BlueprintQuestion = {
+      ...planned({
+        id: "discovery-question-1",
+        category: "experience",
+        prompt: "Think of one piece of work you remember clearly. What part were you responsible for?",
+      }),
+      objective: "Discover a real work example and personal ownership.",
+      evidenceIds: [],
+      expectedSignals: ["ownership", "trade-off", "impact"],
+      missingSignalPrompts: ["What changed because of your work?"],
+      rubricCriteria: [
+        "Name a real work example.",
+        "Describe personal responsibility.",
+        "Explain one action or decision and its result when remembered.",
+      ],
+      followUpLimit: 1,
+      sourceConfidence: null,
+    };
+    const discoveryBlueprint: InterviewBlueprint = {
+      status: "limited-grounding",
+      fallbackReason: null,
+      maxFollowUps: 3,
+      maxQuestions: 8,
+      createdAt: "2026-08-29T10:00:00.000Z",
+      questions: [discoveryQuestion],
+    };
+
+    it("scores a relevant discovery answer without treating newly supplied facts as unsupported", async () => {
+      vi.stubEnv("GEMINI_API_KEY", "");
+
+      const relevantAnswer = "At my previous company I rebuilt our questionnaire editor. I shaped the component architecture, coordinated the migration with the team, and measured a 20% drop in load time.";
+      const unrelatedAnswer = "I enjoy long weekend hikes and trying new recipes with friends after busy work weeks.".padEnd(relevantAnswer.length, ".");
+
+      const relevant = await evaluateAnswer(
+        discoveryQuestion,
+        discoveryBlueprint,
+        blueprintProfile,
+        relevantAnswer,
+        "interviewer: Think of one piece of work you remember clearly.",
+      );
+      const unrelated = await evaluateAnswer(
+        discoveryQuestion,
+        discoveryBlueprint,
+        blueprintProfile,
+        unrelatedAnswer,
+        "interviewer: Think of one piece of work you remember clearly.",
+      );
+
+      expect(relevant.relevance).toBeGreaterThan(5);
+      expect(relevant.unsupportedClaims).toEqual([]);
+      expect(relevant.supportedClaims.length).toBeGreaterThan(0);
+      expect(relevant.relevance).toBeGreaterThan(unrelated.relevance);
+    });
+
+    it("never surfaces a model-flagged first-person discovery detail as unsupported", async () => {
+      vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+      vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+      const mockResponseBody = JSON.stringify({
+        candidates: [{
+          content: {
+            parts: [{
+              text: JSON.stringify({
+                question: "What was the outcome of that work?",
+                shouldFollowUp: false,
+                evaluation: {
+                  score: 7.2,
+                  competency: "Ignored by normalization",
+                  relevance: 7.5,
+                  dimensions: {
+                    correctness: 7, depth: 7, clarity: 7, structure: 7,
+                    practicalExperience: 7, tradeOffAwareness: 7, communication: 7,
+                    confidence: 7, relevance: 7,
+                  },
+                  strengths: ["Names a concrete example"],
+                  needsWork: ["Add the outcome"],
+                  missingPoints: ["What changed because of your work?"],
+                  betterStructure: ["Lead with the responsibility, then the outcome."],
+                  improvedAnswer: "I rebuilt our questionnaire editor and shaped the component architecture.",
+                  supportedClaims: ["I shaped the component architecture and coordinated the migration."],
+                  expectedSignalsPresent: ["role"],
+                  unsupportedClaims: ["I rebuilt our questionnaire editor."],
+                  dimensionReasons: {
+                    correctness: "The answer names a real example.",
+                    depth: "It includes a concrete example.",
+                    clarity: "It is concise.",
+                    structure: "It follows a clear sequence.",
+                    practicalExperience: "It refers to hands-on work.",
+                    tradeOffAwareness: "It does not name a trade-off yet.",
+                    communication: "It reads as a full answer.",
+                    confidence: "It states the example directly.",
+                    relevance: "It answers the discovery prompt.",
+                  },
+                },
+              }),
+            }],
+          },
+        }],
+      });
+      // Two evaluateAnswer calls share this mock; each needs its own Response
+      // instance because a Response body can only be read once.
+      vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(mockResponseBody, { status: 200, headers: { "Content-Type": "application/json" } }));
+
+      const discoveryAnswer = "At my previous company I rebuilt our questionnaire editor. I shaped the component architecture and coordinated the migration with the team.";
+
+      const discoveryResult = await evaluateAnswer(
+        discoveryQuestion,
+        discoveryBlueprint,
+        blueprintProfile,
+        discoveryAnswer,
+        "interviewer: Think of one piece of work you remember clearly.",
+      );
+
+      expect(discoveryResult.unsupportedClaims).toEqual([]);
+
+      const groundedQuestion: BlueprintQuestion = { ...discoveryQuestion, evidenceIds: ["evidence-1"] };
+      const groundedBlueprintWithEvidence: InterviewBlueprint = {
+        ...discoveryBlueprint,
+        status: "grounded",
+        questions: [groundedQuestion],
+      };
+
+      const groundedResult = await evaluateAnswer(
+        groundedQuestion,
+        groundedBlueprintWithEvidence,
+        blueprintProfile,
+        discoveryAnswer,
+        "interviewer: Think of one piece of work you remember clearly.",
+      );
+
+      expect(groundedResult.unsupportedClaims).toEqual(["I rebuilt our questionnaire editor."]);
+    });
+
+    // The post-Gemini normalization backstops `unsupportedClaims` alone if this prompt
+    // rule silently reverts (see the two tests above), but nothing previously backstopped
+    // `improvedAnswer`, `needsWork`, or `missingPoints` -- all of which the model could
+    // still ground-check against the CV and accuse the candidate of inventing their own
+    // career. This pins the prompt rule itself so a regression there is caught directly.
+    it("includes the discovery grounding rule in the evaluator prompt only when the question has no evidence target", async () => {
+      vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+      vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({
+        candidates: [{
+          content: {
+            parts: [{
+              text: JSON.stringify({
+                question: "What was the outcome of that work?",
+                shouldFollowUp: false,
+                evaluation: {
+                  score: 7, competency: "Ignored by normalization", relevance: 7,
+                  dimensions: {
+                    correctness: 7, depth: 7, clarity: 7, structure: 7,
+                    practicalExperience: 7, tradeOffAwareness: 7, communication: 7,
+                    confidence: 7, relevance: 7,
+                  },
+                  strengths: [], needsWork: [], missingPoints: [], betterStructure: [],
+                  improvedAnswer: "An improved answer.",
+                  supportedClaims: ["A supported claim."],
+                  expectedSignalsPresent: ["ownership"],
+                  unsupportedClaims: [],
+                  dimensionReasons: {
+                    correctness: "ok", depth: "ok", clarity: "ok", structure: "ok",
+                    practicalExperience: "ok", tradeOffAwareness: "ok", communication: "ok",
+                    confidence: "ok", relevance: "ok",
+                  },
+                },
+              }),
+            }],
+          },
+        }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+      await evaluateAnswer(
+        discoveryQuestion,
+        discoveryBlueprint,
+        blueprintProfile,
+        "At my previous company I rebuilt our questionnaire editor.",
+        "interviewer: Think of one piece of work you remember clearly.",
+      );
+
+      const discoveryPrompt = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).contents[0].parts[0].text as string;
+      expect(discoveryPrompt).toContain("Grounding rule: question.evidenceIds is empty");
+      expect(discoveryPrompt).toContain("Do not mark them unsupported merely because they were absent from the source profile");
+
+      const groundedQuestion: BlueprintQuestion = { ...discoveryQuestion, evidenceIds: ["evidence-1"] };
+      const groundedBlueprintWithEvidence: InterviewBlueprint = {
+        ...discoveryBlueprint,
+        status: "grounded",
+        questions: [groundedQuestion],
+      };
+
+      await evaluateAnswer(
+        groundedQuestion,
+        groundedBlueprintWithEvidence,
+        blueprintProfile,
+        "At my previous company I rebuilt our questionnaire editor.",
+        "interviewer: Think of one piece of work you remember clearly.",
+      );
+
+      const groundedPrompt = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)).contents[0].parts[0].text as string;
+      expect(groundedPrompt).not.toContain("Grounding rule:");
+    });
+
+    it("still asks a follow-up for a vague discovery answer even though nothing is unsupported", async () => {
+      vi.stubEnv("GEMINI_API_KEY", "");
+
+      const nextQuestion = planned({
+        id: "question-2",
+        sequence: 2,
+        category: "architecture",
+        competencyId: "system-design-id",
+        competencyName: "System design",
+        prompt: "Generic architecture prompt",
+      });
+
+      const turn = await nextTurn(
+        { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "" },
+        discoveryQuestion,
+        nextQuestion,
+        { cvText: "", coverLetter: "" },
+        session([discoveryQuestion, nextQuestion]),
+        "I did some work once.",
+        discoveryBlueprint,
+      );
+
+      expect(turn.followUp).not.toBeNull();
+      expect(turn.evaluation.unsupportedClaims).toEqual([]);
+    });
   });
 
   it("requests a bounded follow-up when a weak answer needs clarification", async () => {
@@ -1214,7 +1447,7 @@ describe("generateInterviewBlueprint", () => {
   it("returns a validated grounded blueprint that preserves evidence ids and objectives", async () => {
     vi.stubEnv("GEMINI_API_KEY", "private-test-key");
     vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
       candidates: [{
         content: {
           parts: [{
@@ -1333,6 +1566,25 @@ describe("generateInterviewBlueprint", () => {
         }),
       ]),
     });
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+
+  it("uses deterministic discovery planning when source readiness is incomplete", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+    const result = await generateInterviewBlueprint(
+      {
+        ...blueprintProfile,
+        competencies: [{ name: "React", relevance: 1 }],
+      },
+      [],
+    );
+
+    expect(result.status).toBe("limited-grounding");
+    expect(result.questions).toHaveLength(5);
+    expect(result.questions[1].prompt).toContain("strong interview story");
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("retries once when the first blueprint response fails validation", async () => {
