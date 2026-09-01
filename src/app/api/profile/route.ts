@@ -18,9 +18,10 @@ export async function GET() {
 }
 
 /**
- * Extracts a profile from pasted text or a PDF, enforces the deterministic
- * readiness gate, and persists only profiles with enough grounding to support
- * personalized interview planning.
+ * Extracts a profile from pasted text or a PDF and persists it. Readiness is
+ * computed and stored alongside the profile as an advisory source-grounding
+ * signal -- it never blocks profile creation; see
+ * `docs/superpowers/specs/2026-09-01-practice-first-profile-grounding-design.md` §4.
  */
 export async function POST(request: Request) {
   let supabase;
@@ -64,12 +65,6 @@ export async function POST(request: Request) {
       extractEngineeringEvidence(cv, narrative),
     ]);
     const readiness = assessProfileReadiness(evidence);
-    if (!readiness.ready) {
-      return NextResponse.json({
-        error: `Add ${readiness.missing.join(", ")} before starting a personalized interview.`,
-        readiness,
-      }, { status: 400 });
-    }
     const source: ProfileSource = {
       cvText: cv,
       coverLetter: narrative,

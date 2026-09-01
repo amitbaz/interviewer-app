@@ -37,25 +37,46 @@ describe("POST /api/profile", () => {
     mocks.extractEngineeringEvidence.mockResolvedValue([]);
   });
 
-  it("rejects an unusable profile before saving it", async () => {
-    mocks.assessProfileReadiness.mockReturnValue({
+  it("saves a sparse profile instead of gating on readiness", async () => {
+    const readiness = {
       ready: false,
       missing: [
         "two concrete engineering projects or work examples",
         "identifiable technologies",
         "responsibilities or outcomes",
       ],
+    };
+    mocks.assessProfileReadiness.mockReturnValue(readiness);
+    mocks.saveProfile.mockResolvedValue({
+      userId: "user-1",
+      role: "Frontend Engineer",
+      seniority: "Senior",
+      summary: "Frontend engineer",
+      narrative: "Owns frontend platforms.",
+      expertise: ["React"],
+      characteristics: ["Pragmatic"],
+      competencies: [{ name: "React architecture", relevance: 1 }],
+      source: { cvText: "I am a developer.", coverLetter: "" },
+      readiness,
+      evidence: [],
+      createdAt: "2026-08-29T10:00:00.000Z",
+      updatedAt: "2026-08-29T10:00:00.000Z",
     });
 
     const response = await POST(new Request("http://localhost/api/profile", {
       method: "POST",
       body: JSON.stringify({ cvText: "I am a developer.", coverLetter: "" }),
     }));
-    const body = await response.json();
 
-    expect(response.status).toBe(400);
-    expect(body.error).toContain("concrete engineering projects");
-    expect(mocks.saveProfile).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(mocks.saveProfile).toHaveBeenCalledWith(
+      expect.anything(),
+      "user-1",
+      expect.objectContaining({ role: "Frontend Engineer" }),
+      expect.objectContaining({ cvText: "I am a developer." }),
+      [],
+      readiness,
+    );
   });
 
   it("saves a profile only after the evidence gate passes", async () => {
