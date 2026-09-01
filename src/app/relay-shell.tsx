@@ -176,6 +176,43 @@ function evidenceSummary(item: EvidenceItem): string {
  * renders is a Client Component, so browser-only concerns (Supabase auth,
  * `MediaRecorder`, View Transitions) stay on this side of the boundary.
  */
+/**
+ * Loudest sample a take must reach before it is worth transcribing.
+ *
+ * Gemini does not fail on silence: handed a silent recording it returns a
+ * fluent, entirely invented interview answer. The composer must therefore
+ * decide for itself whether the microphone heard anything.
+ */
+const speechFloor = 0.02;
+
+/**
+ * Watches a microphone stream and reports the loudest sample seen so far.
+ *
+ * Returns null when the browser has no Web Audio support, in which case the
+ * caller transcribes unguarded rather than losing the feature outright.
+ */
+function monitorSpeech(stream: MediaStream): { peak: () => number; stop: () => void } | null {
+  const AudioContextConstructor = window.AudioContext
+    ?? (window as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioContextConstructor) return null;
+  const context = new AudioContextConstructor();
+  const analyser = context.createAnalyser();
+  analyser.fftSize = 2048;
+  context.createMediaStreamSource(stream).connect(analyser);
+  const samples = new Float32Array(analyser.fftSize);
+  let peak = 0;
+  const sample = () => {
+    analyser.getFloatTimeDomainData(samples);
+    for (const value of samples) peak = Math.max(peak, Math.abs(value));
+  };
+  sample();
+  const timer = window.setInterval(sample, 100);
+  return {
+    peak: () => peak,
+    stop: () => { window.clearInterval(timer); void context.close(); },
+  };
+}
+
 export function RelayShell() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [dashboard, setDashboard] = useState<CareerDashboard | null>(null);
@@ -572,12 +609,20 @@ export function RelayShell() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const nextRecorder = new MediaRecorder(stream);
+      const monitor = monitorSpeech(stream);
       recordingChunks.current = [];
       nextRecorder.ondataavailable = (event) => { if (event.data.size) recordingChunks.current.push(event.data); };
       nextRecorder.onstop = async () => {
         stream.getTracks().forEach((track) => track.stop());
+        const peak = monitor?.peak() ?? null;
+        monitor?.stop();
         const audio = new Blob(recordingChunks.current, { type: nextRecorder.mimeType || "audio/webm" });
-        if (!audio.size) return;
+        const heardSpeech = peak === null || peak >= speechFloor;
+        if (!audio.size || !heardSpeech) {
+          if (audio.size && !heardSpeech) setError("No speech was picked up. Check your microphone, or type your answer instead.");
+          recorder.current = null; setIsRecording(false);
+          return;
+        }
         setBusy(true); setError("");
         try {
           const formData = new FormData();
