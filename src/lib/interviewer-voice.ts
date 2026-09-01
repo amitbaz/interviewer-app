@@ -21,6 +21,13 @@ const URL = /\b(?:https?:\/\/|www\.)\S+|\b[\w-]+\.(?:com|io|dev|de|org|net|co)\/
 const PHONE = /(?:\+\d[\d\s().-]{7,})|(?:\b\d{3,}[\s.-]\d{3,}[\s.-]\d{3,}\b)/;
 const PRAISE = /\b(great|excellent|perfect|well done|nice|good answer|brilliant|impressive)\b/i;
 
+/**
+ * Jaccard-overlap floor above which a candidate line counts as a repeat of an
+ * asked prompt. Untuned beyond the brief's one example; a named constant so
+ * later tuning against real model output (Task 6) is a one-line change.
+ */
+const REPEAT_SIMILARITY_THRESHOLD = 0.6;
+
 function sentences(line: string): string[] {
   return line.split(/(?<=[.!?])\s+/).map((part) => part.trim()).filter(Boolean);
 }
@@ -67,9 +74,18 @@ export function validateInterviewerLine(line: string, context: LineContext): Lin
   // Checked before the question-shape rules: a repeated prompt can be an
   // imperative ("Tell me about...") with no "?", and that repetition is the
   // more important violation to report.
-  if (context.askedPrompts.some((asked) => similarity(asked, trimmed) > 0.6)) return "repeats-asked";
+  if (context.askedPrompts.some((asked) => similarity(asked, trimmed) > REPEAT_SIMILARITY_THRESHOLD)) {
+    return "repeats-asked";
+  }
 
-  if (!trimmed.includes("?")) return "no-question";
+  // Spec §11.4: exactly one question, and it comes last. Counting by sentence
+  // (not by raw "?" count) lets a question mark inside a quotation or a
+  // parenthetical mid-sentence clause stand without tripping this — that
+  // punctuation belongs to the one sentence that contains it, not a second
+  // question. Zero and "more than one" both land on the same violation kind:
+  // the caller only needs to know the line failed the question-shape rule.
+  const questionSentences = parts.filter((part) => part.includes("?"));
+  if (questionSentences.length !== 1) return "no-question";
   if (!parts[parts.length - 1].includes("?")) return "question-not-last";
 
   if (!context.policy.acknowledgeStruggle && PRAISE.test(trimmed)) return "coaching";

@@ -38,6 +38,16 @@ describe("validateInterviewerLine", () => {
     expect(validateInterviewerLine("That sounds like a big migration.", context)).toBe("no-question");
   });
 
+  it("rejects a line with more than one question, even with the last sentence a question", () => {
+    const line = "What did you mean? What did you own?";
+    expect(validateInterviewerLine(line, context)).toBe("no-question");
+  });
+
+  it("accepts a single question containing a question mark inside a quoted clause", () => {
+    const line = 'When you asked yourself "why not?" what did you decide to do?';
+    expect(validateInterviewerLine(line, context)).toBeNull();
+  });
+
   it("rejects a paraphrase of a question already asked", () => {
     const line = "Tell me about the design system migration.";
     expect(validateInterviewerLine(line, { ...context, askedPrompts: [line] })).toBe("repeats-asked");
