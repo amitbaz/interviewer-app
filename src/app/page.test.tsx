@@ -1551,6 +1551,52 @@ describe("App conversation interview", () => {
     expect(screen.getByText(/Broader question/)).toBeInTheDocument();
   });
 
+  // The blueprint's `objective`, `expectedSignals`, and rubric are the
+  // interviewer's own contract: showing them beside the live question tells the
+  // candidate exactly what the evaluator scores before they answer. Only the
+  // grounding provenance line belongs in the live conversation; the objective
+  // and signals stay in the results feedback card, after the answer is scored.
+  it("keeps the interviewer's objective and expected signals out of the live conversation", async () => {
+    const started = activeConversationSession({
+      blueprint: {
+        status: "grounded",
+        fallbackReason: null,
+        maxFollowUps: 3,
+        maxQuestions: 8,
+        createdAt: "2026-09-01T12:00:00.000Z",
+        questions: [
+          {
+            id: "question-1",
+            sequence: 1,
+            category: "experience",
+            competencyId: "react-architecture",
+            competencyName: "React architecture",
+            difficulty: "senior",
+            isFollowUp: false,
+            prompt: "How would you phase a large React migration?",
+            answer: null,
+            createdAt: "2026-09-01T12:00:00.000Z",
+            objective: "Probe migration ownership and rollout trade-offs.",
+            evidenceIds: [],
+            expectedSignals: ["ownership", "trade-off"],
+            missingSignalPrompts: [],
+            followUpLimit: 1,
+            sourceConfidence: null,
+          },
+        ],
+      },
+    });
+    await startInterviewFrom("conversation", started, {
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+    });
+
+    expect(screen.queryByText("Question objective")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Probe migration ownership/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Expected signals/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Broader question/)).toBeInTheDocument();
+  });
+
   it("sends an answer and clears the composer", async () => {
     const started = activeConversationSession();
     const answered = session({

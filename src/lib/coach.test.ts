@@ -1888,6 +1888,35 @@ describe("generatePracticeBlueprint", () => {
     expect(blueprint.maxQuestions).toBeGreaterThan(2);
   });
 
+  // Observed in a live self_presentation session: evidence extracted without a
+  // `projectOrEmployer` collapsed the fallback subject onto `plan.primaryFocus`,
+  // producing "Probe Build your self-presentation foundation using Build your
+  // self-presentation foundation." and a prompt that named the focus twice.
+  it("names an evidence anchor other than the focus when the fallback evidence has no project or employer", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "");
+    const anchorlessEvidence: EvidenceItem[] = [{
+      ...blueprintEvidence[0],
+      projectOrEmployer: null,
+      ownership: "Owned frontend architecture",
+    }];
+
+    const blueprint = await generatePracticeBlueprint(
+      practiceProfile,
+      anchorlessEvidence,
+      practicePlan({ format: "self_presentation", primaryFocus: "Build your self-presentation foundation" }),
+      practiceContext,
+    );
+
+    expect(blueprint.status).toBe("limited-grounding");
+    const grounded = blueprint.questions.filter((question) => question.category !== "introduction");
+    expect(grounded.length).toBeGreaterThan(0);
+    for (const question of grounded) {
+      expect(question.objective).toContain("Owned frontend architecture");
+      expect(question.objective.match(/Build your self-presentation foundation/g) ?? []).toHaveLength(1);
+      expect(question.prompt.match(/Build your self-presentation foundation/g) ?? []).toHaveLength(1);
+    }
+  });
+
   it("constrains Gemini decoding with the blueprint schema so out-of-enum values cannot be returned", async () => {
     vi.stubEnv("GEMINI_API_KEY", "private-test-key");
     vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");

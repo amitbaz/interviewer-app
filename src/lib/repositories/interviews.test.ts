@@ -242,6 +242,41 @@ describe("mapSession", () => {
     }]);
   });
 
+  it("reveals only the active question so the candidate never sees the rest of the plan up front", () => {
+    const session = mapSession(
+      {
+        id: "session-1", user_id: "user-1", kind: "conversation", status: "active",
+        started_at: "2026-08-29T10:00:00.000Z", completed_at: null, exercise: {}, result_summary: {},
+        overall_score: null, created_at: "2026-08-29T10:00:00.000Z", updated_at: "2026-08-29T10:00:00.000Z",
+      },
+      [
+        {
+          id: "question-1", sequence: 1, category: "introduction", competency_id: null,
+          difficulty: "senior", is_follow_up: false, prompt: "Introduce yourself.", answer: "I own frontend architecture.",
+          created_at: "2026-08-29T10:01:00.000Z", answered_at: "2026-08-29T10:02:00.000Z",
+        },
+        {
+          id: "question-2", sequence: 2, category: "experience", competency_id: null,
+          difficulty: "senior", is_follow_up: false, prompt: "Tell me about the migration.", answer: null,
+          created_at: "2026-08-29T10:01:00.000Z", answered_at: null,
+        },
+        {
+          id: "question-3", sequence: 3, category: "technical", competency_id: null,
+          difficulty: "senior", is_follow_up: false, prompt: "How did you handle focus state?", answer: null,
+          created_at: "2026-08-29T10:01:00.000Z", answered_at: null,
+        },
+      ],
+      [], [], new Map(),
+    );
+
+    expect(session.questions).toHaveLength(3);
+    expect(session.messages.map((message) => message.id)).toEqual([
+      "question-1:question",
+      "question-1:answer",
+      "question-2:question",
+    ]);
+  });
+
   it("orders question evaluations by their persisted question sequence before hydrating results feedback", () => {
     const mapped = mapSession(
       {
