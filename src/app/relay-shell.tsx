@@ -657,17 +657,19 @@ export function RelayShell() {
         <p className="mb-2 text-xs font-semibold uppercase tracking-[.14em] text-[var(--ink-muted)]">
           {message.role === "interviewer" ? "Interviewer" : "You"}
         </p>
+        {/*
+          Only the grounding provenance is candidate-facing here. The blueprint's
+          objective and expected signals are the evaluator's contract -- showing
+          them beside an unanswered question hands the candidate the rubric, so
+          they surface in the results feedback card instead, once the answer has
+          been scored.
+        */}
         {message.role === "interviewer" && blueprintQuestion && (
-          <div className="mb-3 rounded-2xl border border-[#d9e2d2] bg-[#eef3e7] px-4 py-3 text-sm leading-6 text-[#38502e]">
-            <p className="text-xs font-semibold uppercase tracking-[.12em] text-[#537053]">Question objective</p>
-            <p className="mt-1">{blueprintQuestion.objective}</p>
-            <p className="mt-2 text-xs leading-5 text-[#537053]">
-              {blueprintQuestion.evidenceIds.length === 0
-                ? "Broader question — draws on what you actually say, not a fixed source example."
-                : `Grounded in ${groundedEvidence.length ? groundedEvidence.map(evidenceLabel).join(" · ") : `${blueprintQuestion.evidenceIds.length} source evidence item${blueprintQuestion.evidenceIds.length === 1 ? "" : "s"}`}`}
-              {blueprintQuestion.expectedSignals.length ? ` · Expected signals: ${blueprintQuestion.expectedSignals.join(", ")}` : ""}
-            </p>
-          </div>
+          <p className="mb-3 text-xs leading-5 text-[#537053]">
+            {blueprintQuestion.evidenceIds.length === 0
+              ? "Broader question — draws on what you actually say, not a fixed source example."
+              : `Grounded in ${groundedEvidence.length ? groundedEvidence.map(evidenceLabel).join(" · ") : `${blueprintQuestion.evidenceIds.length} source evidence item${blueprintQuestion.evidenceIds.length === 1 ? "" : "s"}`}`}
+          </p>
         )}
         {message.role === "interviewer" && conversationQuestion && !blueprintQuestion && (
           <p className="mb-3 text-xs font-semibold uppercase tracking-[.12em] text-[var(--ink-muted)]">Grounded question</p>

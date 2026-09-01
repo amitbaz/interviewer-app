@@ -164,8 +164,18 @@ function mapCheckpoint(row: Row): HandsOnCheckpoint {
   };
 }
 
+/**
+ * Renders the planned questions as a conversation transcript, stopping after
+ * the first unanswered question. The whole plan is persisted when the session
+ * starts, but revealing it at once would show the candidate every upcoming
+ * question (and, through the blueprint panel, its expected signals) before
+ * they answer the current one. Completed sessions are unaffected: every
+ * question carries an answer, so nothing is trimmed.
+ */
 function transcriptFor(questions: PlannedQuestion[], answerTimes: Map<string, string>): Message[] {
-  return questions.flatMap((question) => {
+  const firstUnanswered = questions.findIndex((question) => !question.answer);
+  const revealed = firstUnanswered === -1 ? questions : questions.slice(0, firstUnanswered + 1);
+  return revealed.flatMap((question) => {
     const interviewer = {
       id: `${question.id}:question`,
       role: "interviewer" as const,

@@ -1186,12 +1186,48 @@ function fallbackPracticeRubricCriteria(category: QuestionCategory, subject: str
   ];
 }
 
-function fallbackPracticePrompt(category: QuestionCategory, subject: string, plan: PracticePlan, role: string | null): string {
+/**
+ * The most specific work anchor an evidence item can name, or `null` when the
+ * item carries no anchor distinct from the practice focus. Extraction leaves
+ * `projectOrEmployer` null often enough that falling straight through to
+ * `plan.primaryFocus` produced questions and objectives naming the focus twice
+ * ("Probe X using X"), so each weaker anchor is tried before giving up.
+ */
+function practiceEvidenceAnchor(item: EvidenceItem | null): string | null {
+  if (!item) return null;
+  const candidates = [item.projectOrEmployer, item.ownership, item.technologies[0], item.sourceExcerpt];
+  for (const candidate of candidates) {
+    const trimmed = candidate?.trim();
+    if (trimmed) return trimmed;
+  }
+  return null;
+}
+
+/**
+ * Fallback prompt for one practice question. `anchor` is null when no evidence
+ * anchor is available; the focus-only wording then keeps the practice focus to
+ * a single mention instead of repeating it as both subject and context.
+ */
+function fallbackPracticePrompt(category: QuestionCategory, anchor: string | null, plan: PracticePlan, role: string | null): string {
   if (category === "introduction") return `Give me a concise introduction to yourself and the ${roleDescriptor(role)} work relevant to ${plan.primaryFocus}.`;
-  if (category === "technical") return `Walk me through a technical decision involving ${subject}, focused on ${plan.primaryFocus}. What trade-offs did you consider?`;
-  if (category === "architecture") return `Design an approach involving ${subject} that addresses ${plan.primaryFocus}. Start with the requirements you would clarify.`;
-  if (category === "behavioral") return `Tell me about a collaboration challenge related to ${subject}, connected to ${plan.primaryFocus}. How did you make progress?`;
-  return `Tell me about ${subject}, in the context of ${plan.primaryFocus}. What was your role and impact?`;
+  if (category === "technical") {
+    return anchor
+      ? `Walk me through a technical decision involving ${anchor}, focused on ${plan.primaryFocus}. What trade-offs did you consider?`
+      : `Walk me through a technical decision behind ${plan.primaryFocus}. What trade-offs did you consider?`;
+  }
+  if (category === "architecture") {
+    return anchor
+      ? `Design an approach involving ${anchor} that addresses ${plan.primaryFocus}. Start with the requirements you would clarify.`
+      : `Design an approach that addresses ${plan.primaryFocus}. Start with the requirements you would clarify.`;
+  }
+  if (category === "behavioral") {
+    return anchor
+      ? `Tell me about a collaboration challenge related to ${anchor}, connected to ${plan.primaryFocus}. How did you make progress?`
+      : `Tell me about a collaboration challenge connected to ${plan.primaryFocus}. How did you make progress?`;
+  }
+  return anchor
+    ? `Tell me about ${anchor}, in the context of ${plan.primaryFocus}. What was your role and impact?`
+    : `Tell me about your work on ${plan.primaryFocus}. What was your role and impact?`;
 }
 
 /**
@@ -1220,7 +1256,8 @@ function buildFallbackPracticeBlueprint(
     const item = category === "introduction" || !rankedEvidence.length
       ? null
       : rankedEvidence[index % rankedEvidence.length];
-    const subject = item?.projectOrEmployer ?? plan.primaryFocus;
+    const anchor = practiceEvidenceAnchor(item);
+    const subject = anchor ?? plan.primaryFocus;
     return {
       id: `practice-blueprint-question-${sequence}`,
       sequence,
@@ -1229,12 +1266,14 @@ function buildFallbackPracticeBlueprint(
       competencyName: plan.primaryFocus,
       difficulty,
       isFollowUp: false,
-      prompt: fallbackPracticePrompt(category, subject, plan, profile.role),
+      prompt: fallbackPracticePrompt(category, anchor, plan, profile.role),
       answer: null,
       createdAt,
       objective: category === "introduction"
         ? `Establish recent engineering ownership relevant to ${plan.primaryFocus}.`
-        : `Probe ${plan.primaryFocus} using ${subject}.`,
+        : anchor
+          ? `Probe ${plan.primaryFocus} using ${anchor}.`
+          : `Probe ${plan.primaryFocus}.`,
       evidenceIds: item ? [item.id] : [],
       expectedSignals: fallbackPracticeSignals(category),
       missingSignalPrompts: fallbackPracticeMissingSignalPrompts(category, subject),
