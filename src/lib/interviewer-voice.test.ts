@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { deterministicLine, validateInterviewerLine } from "@/lib/interviewer-voice";
 import { modePolicyFor } from "@/lib/interview-rounds";
+import type { Intent } from "@/lib/types";
 
 const context = {
   forbiddenRubricText: ["Probe Frontend Architecture with concrete evidence.", "ownership"],
@@ -60,23 +61,34 @@ describe("validateInterviewerLine", () => {
   });
 });
 
+// One entry per IntentKind, paired with the competencyName deterministicLine
+// would realistically be called with. The `challenge` claim is deliberately
+// adversarial -- multi-sentence, with an embedded phone number and a "?" --
+// because `claim` carries the candidate's own words verbatim (see its type
+// doc) with no length or content bound. It stands in for the worst the
+// interviewer call's answer text could produce, to prove deterministicLine
+// never echoes it into the fallback line.
+const ALL_INTENTS: [Intent, string | null][] = [
+  [{ kind: "open", targetId: "a" }, "Frontend Architecture"],
+  [{ kind: "probe", targetId: "a", aspect: "ownership", basis: "x" }, "Frontend Architecture"],
+  [{ kind: "challenge", targetId: "a", claim: "80% faster. Call me at +49 177 2276319, right?" }, "Frontend Architecture"],
+  [{ kind: "rescue", targetId: "a", style: "narrow", hook: null }, "Frontend Architecture"],
+  [{ kind: "advance", targetId: "b", reason: "satisfied" }, "System Design"],
+  [{ kind: "hypothetical", targetId: "a", basis: "x" }, "Frontend Architecture"],
+  [{ kind: "candidate-questions" }, null],
+  [{ kind: "close" }, null],
+];
+
 describe("deterministicLine", () => {
   it("returns a distinct line for every intent kind", () => {
-    const lines = new Set([
-      deterministicLine({ kind: "open", targetId: "a" }, "Frontend Architecture"),
-      deterministicLine({ kind: "probe", targetId: "a", aspect: "ownership", basis: "x" }, "Frontend Architecture"),
-      deterministicLine({ kind: "challenge", targetId: "a", claim: "80% faster" }, "Frontend Architecture"),
-      deterministicLine({ kind: "rescue", targetId: "a", style: "narrow", hook: null }, "Frontend Architecture"),
-      deterministicLine({ kind: "advance", targetId: "b", reason: "satisfied" }, "System Design"),
-      deterministicLine({ kind: "hypothetical", targetId: "a", basis: "x" }, "Frontend Architecture"),
-      deterministicLine({ kind: "candidate-questions" }, null),
-      deterministicLine({ kind: "close" }, null),
-    ]);
-    expect(lines.size).toBe(8);
+    const lines = new Set(ALL_INTENTS.map(([intent, name]) => deterministicLine(intent, name)));
+    expect(lines.size).toBe(ALL_INTENTS.length);
   });
 
-  it("passes its own validation", () => {
-    const line = deterministicLine({ kind: "probe", targetId: "a", aspect: "ownership", basis: "x" }, "Frontend Architecture");
-    expect(validateInterviewerLine(line, { forbiddenRubricText: [], askedPrompts: [], policy: modePolicyFor("real") })).toBeNull();
+  it("passes its own validation for every intent kind, even with an adversarial claim", () => {
+    const emptyContext = { forbiddenRubricText: [], askedPrompts: [], policy: modePolicyFor("real") };
+    for (const [intent, name] of ALL_INTENTS) {
+      expect(validateInterviewerLine(deterministicLine(intent, name), emptyContext)).toBeNull();
+    }
   });
 });

@@ -106,7 +106,14 @@ export function deterministicLine(intent: Intent, competencyName: string | null)
     case "probe":
       return `What part of that was yours specifically?`;
     case "challenge":
-      return `How do you know ${intent.claim} was the result?`;
+      // Deliberately does not interpolate `intent.claim`: that field carries
+      // the candidate's own words verbatim (see its type doc), unbounded in
+      // length or content. This is the unconditional fallback after the
+      // model call has already failed, so it must not itself be able to trip
+      // `too-long`, the one-question rule, or `contact-details` by echoing
+      // whatever the candidate said. A generic challenge is an acceptable
+      // trade for a fallback that cannot fail its own guardrails.
+      return `How do you know that was the result?`;
     case "rescue":
       return `Let's make it smaller — what is one thing you changed?`;
     case "advance":
