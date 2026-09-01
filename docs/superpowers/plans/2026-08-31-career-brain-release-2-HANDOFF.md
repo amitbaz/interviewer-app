@@ -52,14 +52,33 @@ Each fix was mutation-checked: reverting the production change makes the new tes
 
 ## Remaining work
 
-No plan tasks remain. Before merge:
+No plan tasks remain, and the migration is verified. Before merge:
 
-1. Verify the migration (ruling R1, below) — the only work that cannot be done from an agent session.
+1. Push the migration to the hosted project (`supabase db push`) — the only remaining side effect.
 2. Triage the deferred minor findings listed further down; none is a correctness defect.
 
-## Outstanding action for the human: verify the migration (ruling R1)
+## Migration verification (ruling R1) — DONE 2026-09-01
 
-`supabase/migrations/202608310001_planned_practice_sessions.sql` has **never been executed**. It was
+`supabase/migrations/202608310001_planned_practice_sessions.sql` ran green against a local Supabase
+stack (`supabase start && supabase db reset`), and every invariant below was checked at runtime by
+`supabase/tests/202608310001_planned_practice_sessions.verify.sql`, which is committed on this branch
+and ends in `rollback` so it leaves nothing behind. All 11 checks passed.
+
+The check that mattered most: **the JS `p_blueprint` payload keys DO match the SQL
+`jsonb_to_recordset` field list.** That was the one genuinely open item -- a mismatch would have
+nulled the fields silently at runtime and no test covered it. Check 3 now pins it.
+
+Every RPC-level rejection also returned the SQLSTATE the route mapping expects: `P0002` for an
+unowned plan or opportunity, `22023` for a non-`ready` plan, a bad question count, and an
+unlinked/non-primary opportunity. That closes the second unverified item -- the `P0002` -> 404 and
+`22023` -> 409 mapping in `/api/practice` is asserted against a mocked `RepositoryError`, and the live
+codes agree with it.
+
+The historical note below is kept for context.
+
+### Original outstanding action (now closed)
+
+`supabase/migrations/202608310001_planned_practice_sessions.sql` had **never been executed**. It was
 verified only by SQL desk-check against the existing migrations, plus TypeScript repository tests.
 
 The Supabase CLI is linked from the main checkout, not from a worktree. You do **not** need to merge
