@@ -3,16 +3,15 @@
 **Branch:** `codex/career-brain-release-2`
 **Plan:** `docs/superpowers/plans/2026-08-31-career-brain-release-2-relay-rework.md`
 **Spec:** `docs/superpowers/specs/2026-08-31-career-brain-release-2-relay-rework-design.md`
-**Status as of 2026-08-31:** Tasks 1–5 of 11 complete and reviewed. **Task 6 is the resume point.**
+**Status as of 2026-09-01:** All 11 tasks complete and reviewed. The whole-branch final review's
+four Important findings are fixed. **The branch is code-complete; the resume point is the human
+migration verification below, then merge.**
 
-Paused because the executing session was approaching a usage limit. No work is half-finished; the
-working tree was clean at the last commit.
-
-## Verification state at `c7acf2a`
+## Verification state at `aa090ee`
 
 ```bash
 npm install
-npm test                    # 323 passing, 0 failing
+npm test                    # 502 passing, 0 failing
 npm run lint                # clean
 npx tsc --noEmit            # clean
 npx next build --webpack    # clean
@@ -37,18 +36,26 @@ Baseline before this branch was 215 tests. Everything added since is on the bran
 Tasks 1–5 each passed an independent code review. Tasks 3, 4, and 5 required fix rounds; all
 findings were addressed and re-reviewed. No Critical findings were ever raised.
 
+## Final review findings — all four fixed on 2026-09-01
+
+The whole-branch review raised 0 Critical and 4 Important findings. Each was verified against the
+source before being fixed, and each fix carries a test that fails without it.
+
+| Commit | Finding | Fix |
+|---|---|---|
+| `2dc14bd` | Finish was gated on the generic five-answer rule while the API had moved to `canExplicitlyCompleteConversation`, leaving the control permanently dead for every 2–4 question planned format | Rule extracted to the client-safe `@/lib/conversation-completion`, imported by both the view and the route; planned sessions now label as "Practice session" |
+| `ba30228` | The manual-practice forwarding assertion sent only zero values, so hardcoding `primaryOpportunityId` or `successCriteria` kept the suite green | Assertion sends non-default values for every field; a second case covers the omitted-field defaults |
+| `b274218` | `pickReviewedObservation` had no `observationType` filter, so a confirmed `strength` was rendered to the user as "Work on: …" | `strength` and `story_strength` excluded, per design §5.3's "reviewed weaknesses" scope |
+| `aa090ee` | `jobUrl` and `location` were editable and persisted but never rendered, so design §4.2's "open the job URL when present" was unmet | Detail panel renders the location and an `Open job posting` link |
+
+Each fix was mutation-checked: reverting the production change makes the new test fail.
+
 ## Remaining work
 
-Tasks 6–11 of the plan, unstarted:
+No plan tasks remain. Before merge:
 
-6. Application lifecycle API (`/api/opportunities`)
-7. Story and coach-memory review APIs + deterministic story completeness
-8. Extract typed Relay client shell (`page.tsx` → `relay-shell.tsx` + `api-client.ts`)
-9. Home command center and Applications UX
-10. Stories, Coach, and manual Practice UX
-11. End-to-end regression, README, final verification
-
-Tasks 8–10 are the largest: splitting a ~45 KB `page.tsx` and adding five view components.
+1. Verify the migration (ruling R1, below) — the only work that cannot be done from an agent session.
+2. Triage the deferred minor findings listed further down; none is a correctness defect.
 
 ## Outstanding action for the human: verify the migration (ruling R1)
 
