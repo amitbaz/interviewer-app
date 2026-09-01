@@ -41,15 +41,24 @@ function input(overrides: Partial<DirectorInput> = {}): DirectorInput {
     turnsUsed: 1,
     turnBudget: 8,
     sessionRescues: 0,
+    now: "2026-01-01T00:00:00.000Z",
     ...overrides,
   };
 }
 
 describe("decideIntent — stuck candidates", () => {
   it("rescues rather than probes when the candidate is stuck", () => {
-    const decision = decideIntent(input({ read: "stuck", answer: "i am having a blackout" }));
+    const decision = decideIntent(input({
+      read: "stuck",
+      answer: "i am having a blackout",
+      now: "2026-03-14T09:30:00.000Z",
+    }));
     expect(decision.intent.kind).toBe("rescue");
     expect(decision.assistance).not.toBeNull();
+    // The director must not read the clock itself -- the timestamp is exactly
+    // the caller-supplied `now`, not a value it manufactured, which is what
+    // makes this function assertable without freezing time.
+    expect(decision.assistance?.at).toBe("2026-03-14T09:30:00.000Z");
   });
 
   it("never probes or challenges a stuck candidate", () => {
@@ -183,6 +192,30 @@ describe("decideIntent — coverage", () => {
     }));
     expect(decision.intent.kind).toBe("candidate-questions");
   });
+
+  it("closes at the turn-budget hard stop even though the current target is still open", () => {
+    // Without the unconditional `remaining <= 0` check, this would fall through
+    // to the probe branch: target "a" is open, not satisfied, with no asked
+    // intents yet, so there is an aspect available to probe. Neither "b" (unasked
+    // but not required, so it can't trip the turn-budget rule) nor "c" (parked)
+    // should let the director advance or deepen instead of closing.
+    const decision = decideIntent(input({
+      states: [
+        state("a", { status: "open", turnsSpent: 3 }),
+        state("b", { target: target("b", false) }),
+        state("c", {
+          status: "parked",
+          turnsSpent: 1,
+          rescuesSpent: 1,
+          askedIntents: [{ kind: "rescue", targetId: "c", style: "park", hook: null }],
+        }),
+      ],
+      currentTargetId: "a",
+      turnsUsed: 8,
+      turnBudget: 8,
+    }));
+    expect(decision.intent.kind).toBe("candidate-questions");
+  });
 });
 
 describe("decideIntent — pressure", () => {
@@ -194,6 +227,23 @@ describe("decideIntent — pressure", () => {
       states: [state("a", { status: "open", turnsSpent: 1, askedIntents: [{ kind: "open", targetId: "a" }] })],
     }));
     expect(decision.intent).toMatchObject({ kind: "challenge", claim: "cut load time by 80%" });
+  });
+
+  it("never re-issues a challenge for a claim already challenged on this target", () => {
+    const decision = decideIntent(input({
+      policy: modePolicyFor("real"),
+      read: "partial",
+      unsupportedClaims: ["cut load time by 80%"],
+      states: [state("a", {
+        status: "open",
+        turnsSpent: 2,
+        askedIntents: [
+          { kind: "open", targetId: "a" },
+          { kind: "challenge", targetId: "a", claim: "cut load time by 80%" },
+        ],
+      })],
+    }));
+    expect(decision.intent.kind).not.toBe("challenge");
   });
 
   it("only issues intents in the round's repertoire", () => {

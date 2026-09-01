@@ -21,6 +21,8 @@ export type DirectorInput = {
   turnsUsed: number;
   turnBudget: number;
   sessionRescues: number;
+  /** ISO-8601 timestamp supplied by the caller, stamped onto any `AssistanceRecord` this turn produces. Keeps `decideIntent` pure -- it never reads the clock itself. */
+  now: string;
 };
 
 export type DirectorDecision = {
@@ -121,7 +123,7 @@ export function decideIntent(input: DirectorInput): DirectorDecision {
     if (questionBudget && sessionBudget && style) {
       return {
         intent: { kind: "rescue", targetId: state.target.id, style, hook: style === "hook" ? hookFor(state) : null },
-        assistance: { style, at: new Date().toISOString() },
+        assistance: { style, at: input.now },
       };
     }
     return advance(input, "rescue-budget-spent") ?? closing(input);
