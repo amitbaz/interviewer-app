@@ -11,6 +11,7 @@ import type {
   InterviewSession,
   Message,
   PlannedQuestion,
+  PracticeSessionContext,
   SessionCareerContext,
 } from "@/lib/types";
 import { RepositoryError } from "@/lib/repositories/profile";
@@ -358,6 +359,27 @@ export function assertConversationPlan(plan: PlannedQuestion[]): void {
   if (!isBackbone) throw new RepositoryError("A conversation must use the exact five-question backbone.", "INVALID_PLAN");
 }
 
+/**
+ * The sibling validator to `assertConversationPlan` for planned practice
+ * sessions -- a SEPARATE contract, not a relaxation of the generic
+ * five-question backbone. A practice blueprint must contain 1-5 base
+ * questions with contiguous sequences starting at one, and none may be a
+ * follow-up (follow-ups are only ever added later, during the conversation,
+ * via `recordConversationTurn`). Deliberately does not check `category`
+ * against `backboneCategories` -- unlike the generic backbone, planned
+ * practice categories are not fixed to a specific five-slot sequence.
+ */
+export function assertPracticeConversationBlueprint(blueprint: InterviewBlueprint): void {
+  if (blueprint.questions.length < 1 || blueprint.questions.length > 5) {
+    throw new RepositoryError("Planned practice must contain between one and five base questions.", "INVALID_PLAN");
+  }
+  blueprint.questions.forEach((question, index) => {
+    if (question.sequence !== index + 1 || question.isFollowUp) {
+      throw new RepositoryError("Planned practice questions must be contiguous base questions.", "INVALID_PLAN");
+    }
+  });
+}
+
 export async function getSession(supabase: SupabaseClient, userId: string, sessionId: string): Promise<InterviewSession | null> {
   const { data, error } = await supabase
     .from("interview_sessions")
@@ -448,6 +470,57 @@ export async function createSessionWithBlueprint(
   return session;
 }
 
+/**
+ * Starts a planned practice conversation and its owning practice plan in one
+ * transaction, via `create_planned_conversation_session_with_blueprint`.
+ * Persists the same blueprint fields as `createSessionWithBlueprint`
+ * (objective, evidence targets, rubric criteria, follow-up limits), but for
+ * 1-5 base questions instead of the fixed five-question backbone, and links
+ * the session to `context.practicePlanId`/`context.opportunityId`. The RPC
+ * atomically locks and transitions the plan from `ready` to `started`, so a
+ * plan can only be started once; a second call fails server-side.
+ */
+export async function createSessionWithPracticeBlueprint(
+  supabase: SupabaseClient,
+  userId: string,
+  blueprint: InterviewBlueprint,
+  context: PracticeSessionContext,
+): Promise<InterviewSession> {
+  assertPracticeConversationBlueprint(blueprint);
+  const { data, error } = await supabase.rpc("create_planned_conversation_session_with_blueprint", {
+    p_blueprint: {
+      status: blueprint.status,
+      fallback_reason: blueprint.fallbackReason,
+      max_follow_ups: blueprint.maxFollowUps,
+      max_questions: blueprint.maxQuestions,
+      questions: blueprint.questions.map((question) => ({
+        sequence: question.sequence,
+        category: question.category,
+        competency_id: persistableCompetencyId(question.competencyId),
+        competency_name: question.competencyName ?? null,
+        difficulty: question.difficulty,
+        prompt: question.prompt,
+        objective: question.objective,
+        evidence_ids: question.evidenceIds,
+        expected_signals: question.expectedSignals,
+        missing_signal_prompts: question.missingSignalPrompts,
+        rubric_criteria: question.rubricCriteria ?? [],
+        follow_up_limit: question.followUpLimit,
+        source_confidence: question.sourceConfidence,
+      })),
+    },
+    p_practice_plan_id: context.practicePlanId,
+    p_opportunity_id: context.opportunityId,
+  });
+  if (error || !data) throw new RepositoryError("Could not start the planned practice session.", error?.code ?? "NO_OWNED_ROW");
+  const result = Array.isArray(data) ? data[0] as Row | undefined : data as Row;
+  const sessionId = result && stringValue(result.session_id);
+  if (!sessionId) throw new RepositoryError("Could not find the created practice session.", "NO_OWNED_ROW");
+  const session = await getSession(supabase, userId, sessionId);
+  if (!session) throw new RepositoryError("Could not reload the created practice session.", "NO_OWNED_ROW");
+  return session;
+}
+
 export async function createHandsOnSession(
   supabase: SupabaseClient,
   userId: string,
@@ -460,6 +533,34 @@ export async function createHandsOnSession(
     .single();
   if (error || !data) throw new RepositoryError("Could not start the hands-on interview.", error?.code);
   return hydrateSession(supabase, userId, data as Row);
+}
+
+/**
+ * Starts a planned hands-on practice session and its owning practice plan in
+ * one transaction, via `start_hands_on_practice_session`. Unlike
+ * `createHandsOnSession` (a plain table insert), this must be an RPC because
+ * it also has to atomically transition the plan from `ready` to `started`
+ * and validate the plan/opportunity relationship server-side; `exercise` is
+ * stored unchanged, matching the plain-insert shape of the generic path.
+ */
+export async function createHandsOnPracticeSession(
+  supabase: SupabaseClient,
+  userId: string,
+  exercise: HandsOnExercise,
+  context: PracticeSessionContext,
+): Promise<InterviewSession> {
+  const { data, error } = await supabase.rpc("start_hands_on_practice_session", {
+    p_practice_plan_id: context.practicePlanId,
+    p_opportunity_id: context.opportunityId,
+    p_exercise: exercise,
+  });
+  if (error || !data) throw new RepositoryError("Could not start the hands-on practice session.", error?.code ?? "NO_OWNED_ROW");
+  const result = Array.isArray(data) ? data[0] as Row | undefined : data as Row;
+  const sessionId = result && stringValue(result.session_id);
+  if (!sessionId) throw new RepositoryError("Could not find the created hands-on practice session.", "NO_OWNED_ROW");
+  const session = await getSession(supabase, userId, sessionId);
+  if (!session) throw new RepositoryError("Could not reload the created hands-on practice session.", "NO_OWNED_ROW");
+  return session;
 }
 
 export async function recordAnswerAndEvaluation(

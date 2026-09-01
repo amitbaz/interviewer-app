@@ -5,16 +5,26 @@ vi.mock("server-only", () => ({}));
 import { buildFallbackInterviewBlueprint } from "@/lib/interview-planner";
 import {
   assertConversationPlan,
+  assertPracticeConversationBlueprint,
   completeHandsOnSession,
+  createHandsOnPracticeSession,
   createSessionWithBlueprint,
   createSessionWithPlan,
+  createSessionWithPracticeBlueprint,
   linkSessionCareerContext,
   mapSession,
   recordAnswerAndEvaluation,
   recordConversationTurn,
 } from "@/lib/repositories/interviews";
 import { RepositoryError } from "@/lib/repositories/profile";
-import type { Competency, EvidenceItem, InterviewBlueprint, PlannedQuestion, ProfileDraft } from "@/lib/types";
+import type {
+  Competency,
+  EvidenceItem,
+  HandsOnExercise,
+  InterviewBlueprint,
+  PlannedQuestion,
+  ProfileDraft,
+} from "@/lib/types";
 
 type Row = Record<string, unknown>;
 type QueryResult = { data: unknown; error: { code: string } | null };
@@ -1036,6 +1046,118 @@ describe("mapSession", () => {
         })],
       }),
     }]);
+  });
+});
+
+/**
+ * A minimal grounded practice blueprint with `questionCount` contiguous base
+ * questions (sequence 1..questionCount, none a follow-up) -- the shape
+ * `assertPracticeConversationBlueprint` and `createSessionWithPracticeBlueprint`
+ * accept, as opposed to the generic five-question backbone.
+ */
+function practiceBlueprint(questionCount: number): InterviewBlueprint {
+  const categories: PlannedQuestion["category"][] = [
+    "technical", "behavioral", "architecture", "experience", "introduction",
+  ];
+  return {
+    status: "grounded",
+    fallbackReason: null,
+    maxFollowUps: 1,
+    maxQuestions: questionCount,
+    createdAt: "2026-08-31T10:00:00.000Z",
+    questions: Array.from({ length: questionCount }, (_, index) => ({
+      id: `practice-question-${index + 1}`,
+      sequence: index + 1,
+      category: categories[index % categories.length],
+      competencyId: null,
+      competencyName: null,
+      difficulty: "senior",
+      isFollowUp: false,
+      prompt: `Practice prompt ${index + 1}`,
+      answer: null,
+      createdAt: "2026-08-31T10:00:00.000Z",
+      objective: `Practice objective ${index + 1}`,
+      evidenceIds: [],
+      expectedSignals: ["signal"],
+      missingSignalPrompts: ["Name the missing signal."],
+      rubricCriteria: ["Meet the objective."],
+      followUpLimit: 0,
+      sourceConfidence: null,
+    })),
+  };
+}
+
+const practiceExercise: HandsOnExercise = {
+  title: "Debug the flaky retry loop",
+  durationMinutes: 20,
+  briefing: "The retry loop occasionally double-submits. Find and fix it.",
+  requirements: ["Identify the race condition", "Add a regression test"],
+  starterCode: "function retry() {}",
+  interviewerOpening: "Let's look at this retry loop together.",
+};
+
+/**
+ * A `{ rpc, from }` supabase double for the planned-practice start RPCs.
+ * `rpc` is a `vi.fn()` so tests can assert the exact RPC name and payload
+ * via `toHaveBeenCalledWith`, matching the pattern used elsewhere in this
+ * file. The session reload after the RPC call resolves the same way
+ * `rpcHydrationClient` does: an empty legacy conversation row plus empty
+ * question/checkpoint/evaluation tables.
+ */
+function practiceRpcSupabase() {
+  const sessionRow = {
+    id: "session-1", user_id: "user-1", kind: "conversation", status: "active",
+    started_at: "2026-08-31T10:00:00.000Z", completed_at: null, exercise: {}, result_summary: {},
+    overall_score: null, created_at: "2026-08-31T10:00:00.000Z", updated_at: "2026-08-31T10:00:00.000Z",
+  };
+  const emptyQuery = {
+    eq: () => emptyQuery,
+    in: async () => ({ data: [], error: null }),
+    order: async () => ({ data: [], error: null }),
+  };
+  const sessionQuery = {
+    eq: () => sessionQuery,
+    maybeSingle: async () => ({ data: sessionRow, error: null }),
+  };
+  const rpc = vi.fn(async () => ({ data: [{ session_id: "session-1" }], error: null }));
+  const from = (table: string) => ({ select: () => table === "interview_sessions" ? sessionQuery : emptyQuery });
+  return { rpc, from };
+}
+
+describe("planned practice session starts", () => {
+  it("accepts three planned base questions but generic backbone still rejects them", () => {
+    expect(() => assertPracticeConversationBlueprint(practiceBlueprint(3))).not.toThrow();
+    expect(() => assertConversationPlan(practiceBlueprint(3).questions)).toThrow();
+  });
+
+  it("calls planned conversation RPC with context", async () => {
+    const { rpc, from } = practiceRpcSupabase();
+    const supabase = { rpc, from };
+
+    await createSessionWithPracticeBlueprint(supabase as never, "user-1", practiceBlueprint(3), {
+      practicePlanId: "plan-1",
+      opportunityId: "opp-1",
+    });
+
+    expect(rpc).toHaveBeenCalledWith(
+      "create_planned_conversation_session_with_blueprint",
+      expect.objectContaining({ p_practice_plan_id: "plan-1", p_opportunity_id: "opp-1" }),
+    );
+  });
+
+  it("calls planned hands-on RPC with context", async () => {
+    const { rpc, from } = practiceRpcSupabase();
+    const supabase = { rpc, from };
+
+    await createHandsOnPracticeSession(supabase as never, "user-1", practiceExercise, {
+      practicePlanId: "plan-1",
+      opportunityId: null,
+    });
+
+    expect(rpc).toHaveBeenCalledWith(
+      "start_hands_on_practice_session",
+      expect.objectContaining({ p_practice_plan_id: "plan-1", p_exercise: practiceExercise }),
+    );
   });
 });
 

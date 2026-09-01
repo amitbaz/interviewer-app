@@ -15,7 +15,9 @@ A personal, authenticated interview-practice POC for software-engineering candid
 - Browser voice recording → Gemini transcription → editable interview answer
 - Deterministic demo coach when no API key is configured
 - Gemini API provider when `GEMINI_API_KEY` is configured
-- Career Brain persistence foundation for opportunities, career stories, evidence-backed coach observations, and practice plans. The current UI does not expose these Release 1 entities yet; the job-hunter integration remains unchanged until a later release.
+- Career Brain command center with application tracking, story bank, inspectable coach memory, and explainable recommended practice.
+- Recommended practice currently uses deterministic explicit Career Brain/progress signals; automatic observation learning and richer adaptive prioritization arrive in the next release.
+- The external job-hunter bot is still independent and has not yet been migrated to Supabase.
 
 ## Run locally
 
@@ -42,7 +44,7 @@ Create the key in Google AI Studio. Gemini's free tier is rate-limited and Googl
 
 The hosted POC uses Supabase Postgres, Auth, and private Storage. For a local or Vercel deployment:
 
-1. Create a free Supabase project. Install and authenticate the Supabase CLI, link the repository to the project, and run `supabase db push`. If the CLI is unavailable, paste and run every file in `supabase/migrations/` in filename order in the Supabase SQL Editor. Existing projects must also run `202608290002_complete_adaptive_interview_loop.sql` and `202608290003_richer_feedback.sql` after pulling this update.
+1. Create a free Supabase project. Install and authenticate the Supabase CLI, link the repository to the project, and run `supabase db push`. If the CLI is unavailable, paste and run every file in `supabase/migrations/` in filename order in the Supabase SQL Editor. Existing projects must also run `202608290002_complete_adaptive_interview_loop.sql`, `202608290003_richer_feedback.sql`, and, for this release, `202608310001_planned_practice_sessions.sql` after pulling this update.
 2. Copy the Supabase project URL and publishable key from Project Settings → API into `.env.local`:
 
    ```bash

@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { completeSession as summarizeSession, evaluateHandsOn, generateInterviewBlueprint, handsOnCheckpoint, handsOnExercise, initialQuestion, nextTurn } from "@/lib/coach";
+import { canExplicitlyCompleteConversation } from "@/lib/conversation-completion";
+import { completeLinkedPracticePlanBestEffort } from "@/lib/practice-service";
 import { calculateProgress } from "@/lib/progress";
 import {
   completeHandsOnSession,
@@ -134,8 +136,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ session: updated });
     }
     if (body.action === "complete") {
-      if (session.kind === "conversation" && session.questions.filter((question) => question.answer).length < 5) {
-        return NextResponse.json({ error: "Answer at least five questions before completing this interview." }, { status: 400 });
+      if (session.kind === "conversation" && !canExplicitlyCompleteConversation(session)) {
+        return NextResponse.json({ error: incompleteConversationMessage(session) }, { status: 400 });
       }
       if (session.kind === "hands-on" && !session.checkpoints.length) {
         return NextResponse.json({ error: "Save a coding checkpoint before completing this interview." }, { status: 400 });
@@ -144,9 +146,15 @@ export async function POST(request: Request) {
       const completed = session.kind === "hands-on"
         ? await completeHandsOnSession(supabase, user.id, session.id, result as ReturnType<typeof evaluateHandsOn>)
         : await completeSession(supabase, user.id, session.id, result);
+      // The session and its evidence are already saved; plan bookkeeping runs
+      // afterwards and can only add a warning, never fail this response.
+      const { warning } = await completeLinkedPracticePlanBestEffort(supabase, user.id, completed);
       return NextResponse.json({
         session: completed.kind === "conversation" ? visibleConversation(completed) : completed,
         profile: await getProfile(supabase, user.id),
+        // Always present, `null` when there is nothing to warn about: clients
+        // read this as a nullable field, never as an optional key.
+        practicePlanWarning: warning,
       });
     }
     return NextResponse.json({ error: "Unknown action." }, { status: 400 });
@@ -162,8 +170,26 @@ async function finishConversation(
   session: InterviewSession,
 ) {
   const completed = await completeSession(supabase, userId, session.id, summarizeSession(session));
+  const { warning } = await completeLinkedPracticePlanBestEffort(supabase, userId, completed);
   const refreshedProfile = await getProfile(supabase, userId);
-  return NextResponse.json({ session: visibleConversation(completed), profile: refreshedProfile ?? profile });
+  return NextResponse.json({
+    session: visibleConversation(completed),
+    profile: refreshedProfile ?? profile,
+    practicePlanWarning: warning,
+  });
+}
+
+/**
+ * Why an explicit Complete was refused. Planned practice and generic
+ * conversations have different completion rules (see
+ * `canExplicitlyCompleteConversation`), so they need different guidance: a
+ * planned session must answer every persisted question, including a
+ * follow-up, while a generic one needs five answers.
+ */
+function incompleteConversationMessage(session: InterviewSession): string {
+  return session.practicePlanId
+    ? "Answer every question in this practice before completing it."
+    : "Answer at least five questions before completing this interview.";
 }
 
 function visibleConversation(session: InterviewSession): InterviewSession {

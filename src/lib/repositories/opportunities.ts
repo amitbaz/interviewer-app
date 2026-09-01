@@ -29,12 +29,23 @@ function jsonRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
+/**
+ * Whether `value` is one of the seven statuses the `opportunities.status`
+ * check constraint allows. Exported so callers outside this module (the
+ * `/api/opportunities` route) can validate a `toStatus`/`initialStatus`
+ * from an untrusted request body without duplicating this list -- mirrors
+ * `isPracticeFormat` in `src/lib/repositories/practice-plans.ts`.
+ */
+export function isOpportunityStatus(value: unknown): value is OpportunityStatus {
+  return opportunityStatuses.includes(value as OpportunityStatus);
+}
+
 function opportunityStatus(value: unknown): OpportunityStatus {
-  return opportunityStatuses.includes(value as OpportunityStatus) ? value as OpportunityStatus : "considering";
+  return isOpportunityStatus(value) ? value : "considering";
 }
 
 function nullableOpportunityStatus(value: unknown): OpportunityStatus | null {
-  return opportunityStatuses.includes(value as OpportunityStatus) ? value as OpportunityStatus : null;
+  return isOpportunityStatus(value) ? value : null;
 }
 
 function mapOpportunity(row: Row): Opportunity {
@@ -244,6 +255,38 @@ export async function scheduleOpportunityInterview(
   const opportunity = await getOpportunity(supabase, userId, opportunityId);
   if (!opportunity) throw new RepositoryError("Could not reload the opportunity after scheduling the interview.", "NO_OWNED_ROW");
   return opportunity;
+}
+
+/**
+ * Appends one `note` event to an opportunity's history and returns it.
+ *
+ * This is the only opportunity-event kind a caller creates directly --
+ * `created`, `status_changed`, and `interview_scheduled` events are always
+ * emitted by the atomic RPCs above, never inserted here. There is
+ * deliberately no update or delete: like every other opportunity event, a
+ * note is append-only once written.
+ */
+export async function addOpportunityNote(
+  supabase: SupabaseClient,
+  userId: string,
+  opportunityId: string,
+  note: string,
+): Promise<OpportunityEvent> {
+  const trimmed = note.trim();
+  if (!trimmed) throw new RepositoryError("A note cannot be empty.", "INVALID_NOTE");
+  const { data, error } = await supabase
+    .from("opportunity_events")
+    .insert({
+      user_id: userId,
+      opportunity_id: opportunityId,
+      event_type: "note",
+      note: trimmed,
+      metadata: {},
+    })
+    .select("*")
+    .maybeSingle();
+  if (error || !data) throw new RepositoryError("Could not add the note.", error?.code ?? "NO_OWNED_ROW");
+  return mapOpportunityEvent(data as Row);
 }
 
 /** Lists an opportunity's append-only history, most recent first. */

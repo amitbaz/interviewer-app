@@ -83,7 +83,15 @@ export type BlueprintQuestion = PlannedQuestion & {
   sourceConfidence: number | null;
 };
 
-/** The five-question interview plan generated before the first answer is collected. */
+/**
+ * The interview plan generated before the first answer is collected.
+ * Reused by two separate contracts, not renamed for either: generic
+ * interviews carry the exact five-question backbone (enforced by
+ * `assertConversationPlan` in `src/lib/repositories/interviews.ts`), while
+ * planned practice sessions carry 1-5 base questions (enforced by
+ * `assertPracticeConversationBlueprint`, the sibling validator used by the
+ * `PracticeSessionContext`-driven start RPCs).
+ */
 export type InterviewBlueprint = {
   status: BlueprintStatus;
   fallbackReason: string | null;
@@ -280,6 +288,19 @@ export type SessionCareerContext = {
   opportunityId: string | null;
 };
 
+/**
+ * The plan (and optional opportunity) context passed to a planned practice
+ * session's atomic start RPC -- `createSessionWithPracticeBlueprint` and
+ * `createHandsOnPracticeSession` in `src/lib/repositories/interviews.ts`.
+ * Unlike `SessionCareerContext` (used to link an already-existing session,
+ * where both fields may be null), `practicePlanId` here is always the plan
+ * being started and can never be null.
+ */
+export type PracticeSessionContext = {
+  practicePlanId: string;
+  opportunityId: string | null;
+};
+
 /** Deterministic progress signals derived from completed coaching evidence. */
 export type ProgressSnapshot = {
   readiness: number | null;
@@ -430,6 +451,25 @@ export type CareerStory = {
 };
 
 /**
+ * The nine free-text fields a career story is drafted with. Passed to
+ * `careerStoryCompleteness` (`src/lib/career-story.ts`), which maps them
+ * onto six factual dimensions to score how much of the story is filled in
+ * -- see that function's doc comment for the exact mapping.
+ */
+export type CareerStoryDraftFields = Pick<
+  CareerStory,
+  | "situation"
+  | "responsibility"
+  | "problem"
+  | "actions"
+  | "alternatives"
+  | "tradeoffs"
+  | "ownership"
+  | "outcome"
+  | "lessons"
+>;
+
+/**
  * Typed provenance link from a career story to the durable evidence that
  * backs it. Exactly one source is set, enforced in the database with
  * `check (num_nonnulls(profile_evidence_id, interview_question_id) = 1)`.
@@ -486,6 +526,11 @@ export type UpdateCareerStoryInput = {
   completeness?: number;
   reviewState?: CareerStoryReviewState;
   confirmedAt?: string | null;
+};
+
+/** A `CareerStory` enriched for display with the count of its attached provenance rows. */
+export type CareerStorySummary = CareerStory & {
+  evidenceCount: number;
 };
 
 export type CoachObservationType =
@@ -596,6 +641,36 @@ export type AttachObservationEvidenceOptions = {
   reason?: string | null;
 };
 
+/**
+ * A user-safe display item resolved from one typed `ObservationEvidence` row
+ * by `resolveObservationEvidence` in `src/lib/coach-memory.ts`. The browser
+ * never sees the raw evidence-source id or joins the underlying table
+ * itself -- `label`/`summary` are always human-readable, per source kind:
+ * profile evidence -> project/employer plus a source-excerpt summary;
+ * question evaluation -> the question prompt plus a concise strength/
+ * weakness summary; career story -> its title; opportunity event ->
+ * company/role plus an event description.
+ */
+export type CoachEvidenceDisplay = {
+  kind: "profile_evidence" | "question_evaluation" | "career_story" | "opportunity_event";
+  label: string;
+  summary: string;
+  role: ObservationEvidenceRole;
+  reason: string | null;
+};
+
+/**
+ * A `CoachObservation` enriched for display by `loadCareerDashboard` in
+ * `src/lib/career-dashboard.ts`. `effectiveText` is the corrected wording
+ * when the user has reviewed and corrected the observation, otherwise the
+ * original `claim` -- `claim` itself always remains available separately,
+ * unmodified.
+ */
+export type CoachObservationSummary = CoachObservation & {
+  effectiveText: string;
+  evidence: CoachEvidenceDisplay[];
+};
+
 export type PracticePlanStatus = "draft" | "ready" | "started" | "completed" | "cancelled" | "failed";
 
 export type PracticeFormat =
@@ -682,4 +757,107 @@ export type CreatePracticePlanInput = {
   priorityFactors?: Record<string, unknown>;
   generationError?: string | null;
   completedAt?: string | null;
+};
+
+/**
+ * One user-displayable fact behind the current baseline practice
+ * recommendation, produced by `recommendPractice` in
+ * `src/lib/practice-recommendation.ts`. Rendered on Home as an explanation
+ * chip under "Why this?" -- `detail` must always be human-readable and must
+ * never contain a raw id.
+ */
+export type PracticeRecommendationSignal = {
+  kind:
+    | "upcoming_interview"
+    | "interviewing_opportunity"
+    | "reviewed_observation"
+    | "story_bank_gap"
+    | "progress_weakness"
+    | "applied_opportunity"
+    | "first_practice"
+    | "fallback";
+  label: string;
+  detail: string;
+};
+
+/**
+ * The deterministic Release 2 baseline practice recommendation preview. Not
+ * yet a persisted `PracticePlan` -- it becomes one only when the user starts
+ * it (see
+ * `docs/superpowers/specs/2026-08-31-career-brain-release-2-relay-rework-design.md`
+ * section 6). Release 2 deliberately does not compute a Release 3-style
+ * weighted priority score here.
+ */
+export type PracticeRecommendation = {
+  format: PracticeFormat;
+  primaryFocus: string;
+  secondaryFocus: string | null;
+  rationale: string;
+  estimatedMinutes: number;
+  successCriteria: string[];
+  primaryOpportunityId: string | null;
+  supportingOpportunityIds: string[];
+  signals: PracticeRecommendationSignal[];
+};
+
+/**
+ * Inputs to the deterministic baseline recommendation selector
+ * (`recommendPractice`). `now` is always caller-supplied -- the selector
+ * never reads the clock itself -- so selection stays deterministic and
+ * testable.
+ */
+export type PracticeRecommendationInput = {
+  opportunities: Opportunity[];
+  observations: CoachObservation[];
+  stories: CareerStory[];
+  progress: ProgressSnapshot;
+  recentSessions: InterviewSession[];
+  recentPlans: PracticePlan[];
+  now: Date;
+};
+
+/**
+ * Career Brain grounding inputs for `generatePracticeBlueprint` in
+ * `src/lib/coach.ts` -- distinct from `PracticeSessionContext`, which links
+ * an already-generated blueprint's session to its plan/opportunity, not the
+ * material used to generate it. `primaryOpportunity`/`supportingOpportunities`
+ * shape what the blueprint probes (job requirements are targets to probe,
+ * never candidate evidence). `observations` and `stories` may include
+ * unreviewed/draft rows -- `generatePracticeBlueprint` itself filters to the
+ * reviewed subset it is allowed to ground on (see that function's
+ * documentation for the exact filter).
+ */
+export type PracticeBlueprintContext = {
+  primaryOpportunity: Opportunity | null;
+  supportingOpportunities: Opportunity[];
+  observations: CoachObservation[];
+  stories: CareerStory[];
+};
+
+/**
+ * The single canonical read model for the Career Brain Home command center,
+ * built by `loadCareerDashboard` in `src/lib/career-dashboard.ts`. The
+ * client shell fetches this once after auth and never joins the underlying
+ * Career Brain sources itself.
+ *
+ * `observations` excludes dismissed rows -- unreviewed observations may
+ * still appear since Coach displays them, but never drive `recommendation`
+ * (that filtering lives entirely inside `recommendPractice`).
+ * `upcomingOpportunities` is `opportunities` filtered to future-dated
+ * interviews, soonest first. `coachMode` reflects whether AI-backed
+ * features are configured (`GEMINI_API_KEY` present) or running in demo
+ * mode; it is computed by the route, not this read model, since it depends
+ * on process configuration rather than persisted data.
+ */
+export type CareerDashboard = {
+  profile: Profile;
+  coachMode: "demo" | "live";
+  progress: ProgressSnapshot;
+  recentSessions: InterviewSession[];
+  opportunities: Opportunity[];
+  upcomingOpportunities: Opportunity[];
+  observations: CoachObservationSummary[];
+  stories: CareerStorySummary[];
+  recentPracticePlans: PracticePlan[];
+  recommendation: PracticeRecommendation;
 };

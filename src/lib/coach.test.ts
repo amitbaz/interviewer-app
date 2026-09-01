@@ -9,10 +9,21 @@ import {
   extractPdfText,
   evaluateAnswer,
   generateInterviewBlueprint,
+  generatePracticeBlueprint,
   initialQuestion,
   nextTurn,
 } from "@/lib/coach";
-import type { EvidenceItem, InterviewBlueprint, InterviewSession, PlannedQuestion, ProfileDraft } from "@/lib/types";
+import type {
+  EvidenceItem,
+  InterviewBlueprint,
+  InterviewSession,
+  Opportunity,
+  PlannedQuestion,
+  PracticeBlueprintContext,
+  PracticePlan,
+  Profile,
+  ProfileDraft,
+} from "@/lib/types";
 
 const planned = (overrides: Partial<PlannedQuestion>): PlannedQuestion => ({
   id: "question-1",
@@ -100,6 +111,62 @@ const blueprintProfile: ProfileDraft = {
     { name: "React architecture", relevance: 1 },
     { name: "System design", relevance: 0.8 },
   ],
+};
+
+const practiceProfile: Profile = {
+  userId: "user-1",
+  role: "Frontend Engineer",
+  seniority: "Senior",
+  summary: "Frontend engineer focused on performance and delivery.",
+  narrative: "Owns frontend platforms and reliability work.",
+  expertise: ["React", "TypeScript", "Next.js"],
+  characteristics: ["Pragmatic"],
+  competencies: [
+    {
+      id: "react-architecture",
+      name: "React architecture",
+      relevance: 1,
+      expectedLevel: "senior",
+      estimatedLevel: "senior",
+      confidence: "high",
+      lastPracticedAt: null,
+      questionCount: 0,
+      averageScore: null,
+      recentScore: null,
+      strengths: [],
+      weaknesses: [],
+    },
+  ],
+  source: { cvText: "At Acme I led a React migration for checkout.", coverLetter: "" },
+  createdAt: "2026-08-29T10:00:00.000Z",
+  updatedAt: "2026-08-29T10:00:00.000Z",
+};
+
+const practicePlan = (overrides: Partial<PracticePlan> = {}): PracticePlan => ({
+  id: "plan-1",
+  userId: "user-1",
+  status: "ready",
+  primaryFocus: "React architecture trade-offs",
+  secondaryFocus: null,
+  rationale: "Upcoming onsite focuses on frontend architecture decisions.",
+  format: "targeted_drill",
+  estimatedMinutes: 20,
+  successCriteria: ["Name a concrete trade-off with a measured outcome."],
+  priorityScore: null,
+  priorityFactors: {},
+  generationError: null,
+  completedAt: null,
+  createdAt: "2026-08-29T10:00:00.000Z",
+  updatedAt: "2026-08-29T10:00:00.000Z",
+  opportunities: [],
+  ...overrides,
+});
+
+const practiceContext: PracticeBlueprintContext = {
+  primaryOpportunity: null,
+  supportingOpportunities: [],
+  observations: [],
+  stories: [],
 };
 
 const groundedBlueprint = (question: PlannedQuestion, overrides: Partial<InterviewBlueprint["questions"][number]> = {}): InterviewBlueprint => ({
@@ -911,6 +978,130 @@ describe("initialQuestion", () => {
     expect(turn.evaluation.dimensions.structure).not.toBe(9);
   });
 
+  it("advances a two-question practice blueprint without assuming the five-question backbone", async () => {
+    const firstQuestion = groundedBlueprint(planned({
+      id: "question-1",
+      sequence: 1,
+      category: "experience",
+      prompt: "Tell me about the checkout migration.",
+    })).questions[0];
+    const secondQuestionPlanned = planned({
+      id: "question-2",
+      sequence: 2,
+      category: "technical",
+      competencyId: "react-id",
+      competencyName: "React architecture",
+      prompt: "Generic technical prompt",
+    });
+    const blueprint: InterviewBlueprint = {
+      status: "grounded",
+      fallbackReason: null,
+      maxFollowUps: 1,
+      maxQuestions: 3,
+      createdAt: "2026-08-29T10:00:00.000Z",
+      questions: [
+        firstQuestion,
+        {
+          ...secondQuestionPlanned,
+          objective: "Probe the route-splitting technical decision.",
+          evidenceIds: [],
+          expectedSignals: ["decision", "trade-off"],
+          missingSignalPrompts: ["Name the trade-off you rejected."],
+          rubricCriteria: ["Name the decision.", "Explain the trade-off."],
+          followUpLimit: 1,
+          sourceConfidence: null,
+        },
+      ],
+    };
+
+    const turn = await nextTurn(
+      { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "Owns frontend platforms." },
+      firstQuestion,
+      secondQuestionPlanned,
+      { cvText: "At Acme I led a React migration and measured checkout performance.", coverLetter: "" },
+      session([firstQuestion, secondQuestionPlanned]),
+      "I led the checkout migration, split bundles by route, accepted extra QA during rollout, and measured a 28% bundle-size drop.",
+      blueprint,
+    );
+
+    expect(turn.followUp).toBeNull();
+    expect(turn.nextQuestion).toContain("React architecture");
+  });
+
+  it("gates follow-ups on a three-question blueprint's own maxFollowUps rather than the generic eight-question ceiling", async () => {
+    const firstQuestion = groundedBlueprint(planned({
+      id: "question-1",
+      sequence: 1,
+      category: "experience",
+      prompt: "Tell me about the checkout migration.",
+    })).questions[0];
+    const secondQuestion = {
+      ...planned({ id: "question-2", sequence: 2, category: "technical", prompt: "Second prompt" }),
+      objective: "Probe the technical decision.",
+      evidenceIds: [],
+      expectedSignals: ["decision", "trade-off"],
+      missingSignalPrompts: ["Name the trade-off."],
+      rubricCriteria: ["Name the decision.", "Explain the trade-off."],
+      followUpLimit: 1,
+      sourceConfidence: null,
+    };
+    const thirdQuestionPlanned = planned({ id: "question-3", sequence: 3, category: "behavioral", prompt: "Third prompt" });
+    const blueprint: InterviewBlueprint = {
+      status: "grounded",
+      fallbackReason: null,
+      maxFollowUps: 1,
+      maxQuestions: 4,
+      createdAt: "2026-08-29T10:00:00.000Z",
+      questions: [
+        firstQuestion,
+        secondQuestion,
+        {
+          ...thirdQuestionPlanned,
+          objective: "Probe a collaboration challenge.",
+          evidenceIds: [],
+          expectedSignals: ["collaboration"],
+          missingSignalPrompts: ["Who did you need alignment from?"],
+          rubricCriteria: ["Name the collaboration challenge."],
+          followUpLimit: 1,
+          sourceConfidence: null,
+        },
+      ],
+    };
+    const priorFollowUp = {
+      id: "question-1a",
+      sequence: 4,
+      category: "experience" as const,
+      competencyId: firstQuestion.competencyId,
+      competencyName: firstQuestion.competencyName,
+      difficulty: firstQuestion.difficulty,
+      isFollowUp: true,
+      prompt: "Make that migration example more concrete.",
+      answer: "I kept the release staged.",
+      createdAt: "2026-08-29T10:00:00.000Z",
+      parentQuestionId: firstQuestion.id,
+      objective: firstQuestion.objective,
+      evidenceIds: firstQuestion.evidenceIds,
+      expectedSignals: firstQuestion.expectedSignals,
+      missingSignalPrompts: firstQuestion.missingSignalPrompts,
+      rubricCriteria: firstQuestion.rubricCriteria,
+      followUpLimit: firstQuestion.followUpLimit,
+      sourceConfidence: firstQuestion.sourceConfidence,
+    } satisfies PlannedQuestion;
+
+    const turn = await nextTurn(
+      { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "" },
+      secondQuestion,
+      thirdQuestionPlanned,
+      { cvText: "React engineer at Acme.", coverLetter: "" },
+      session([firstQuestion, priorFollowUp, secondQuestion, thirdQuestionPlanned]),
+      "I used React.",
+      blueprint,
+    );
+
+    expect(turn.followUp).toBeNull();
+    expect(turn.nextQuestion).toContain("collaboration challenge related to React architecture");
+  });
+
   it("sends PDF input without unsupported sampling parameters", async () => {
     vi.stubEnv("GEMINI_API_KEY", "private-test-key");
     vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
@@ -1303,6 +1494,369 @@ describe("generateInterviewBlueprint", () => {
     expect(blueprint.fallbackReason).toContain("Gemini");
     expect(blueprint.questions).toHaveLength(5);
     expect(blueprint.questions[1].evidenceIds).toEqual(["evidence-1"]);
+  });
+});
+
+describe("generatePracticeBlueprint", () => {
+  it.each([
+    ["targeted_drill", 3],
+    ["story_work", 3],
+    ["self_presentation", 2],
+    ["behavioral", 3],
+    ["technical_communication", 3],
+    ["role_prep", 4],
+    ["full_simulation", 5],
+  ] as const)("generates %s with %d base questions", async (format, count) => {
+    const blueprint = await generatePracticeBlueprint(
+      practiceProfile,
+      blueprintEvidence,
+      practicePlan({ format }),
+      practiceContext,
+    );
+
+    expect(blueprint.questions).toHaveLength(count);
+    // Ruling R5: maxQuestions must always leave follow-up headroom above the
+    // base question count -- the persisted floor in the Task 2 migration
+    // would otherwise refuse every follow-up on a plan-driven session.
+    expect(blueprint.maxQuestions).toBeGreaterThan(blueprint.questions.length);
+  });
+
+  it("rejects an AI response that exceeds the plan's base question count and falls back instead of silently expanding", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+    // role_prep's base count is 4 (baseQuestionCountFor). This response
+    // returns 5 -- schema-valid on its own (practiceBlueprintDraftSchema
+    // allows up to 5 questions), but it must still be rejected by
+    // validatePracticeBlueprint's over-count check and never silently
+    // accepted as a 5-question role_prep blueprint.
+    const overCountQuestion = (sequence: number) => ({
+      sequence,
+      category: "technical",
+      competencyName: "React architecture",
+      difficulty: "senior",
+      objective: `Probe decision ${sequence}.`,
+      evidenceIds: ["evidence-1"],
+      expectedSignals: ["decision", "trade-off"],
+      missingSignalPrompts: ["Name the trade-off."],
+      rubricCriteria: ["Name the decision.", "Explain the trade-off."],
+      followUpLimit: 1,
+      prompt: `Walk me through decision ${sequence}.`,
+      sourceConfidence: 0.9,
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{
+        content: {
+          parts: [{
+            text: JSON.stringify({
+              status: "grounded",
+              fallbackReason: null,
+              maxFollowUps: 2,
+              maxQuestions: 7,
+              questions: [1, 2, 3, 4, 5].map(overCountQuestion),
+            }),
+          }],
+        },
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    const blueprint = await generatePracticeBlueprint(
+      practiceProfile,
+      blueprintEvidence,
+      practicePlan({ format: "role_prep" }),
+      practiceContext,
+    );
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2); // one attempt, one repair retry, both over-count
+    expect(blueprint.questions).toHaveLength(4);
+    expect(blueprint.status).toBe("limited-grounding");
+  });
+
+  it("accepts a conforming AI response sized to a second (non-role_prep) format's base count", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+    // self_presentation's base count is 2 -- drives the AI path (not the
+    // fallback) for a second format so the count matrix above is not
+    // exclusively exercising buildFallbackPracticeBlueprint.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{
+        content: {
+          parts: [{
+            text: JSON.stringify({
+              status: "grounded",
+              fallbackReason: null,
+              maxFollowUps: 1,
+              maxQuestions: 3,
+              questions: [
+                {
+                  sequence: 1,
+                  category: "introduction",
+                  competencyName: null,
+                  difficulty: "senior",
+                  objective: "Establish recent engineering ownership.",
+                  evidenceIds: [],
+                  expectedSignals: ["role summary", "recent ownership"],
+                  missingSignalPrompts: ["Name the most recent engineering area you owned."],
+                  rubricCriteria: ["Establish the candidate's recent engineering ownership."],
+                  followUpLimit: 0,
+                  prompt: "Give me a concise introduction to yourself.",
+                  sourceConfidence: null,
+                },
+                {
+                  sequence: 2,
+                  category: "experience",
+                  competencyId: "react",
+                  competencyName: "React architecture",
+                  difficulty: "senior",
+                  objective: "Probe the checkout migration ownership and impact.",
+                  evidenceIds: ["evidence-1"],
+                  expectedSignals: ["role", "trade-off", "outcome"],
+                  missingSignalPrompts: ["Name the launch trade-off you accepted."],
+                  rubricCriteria: ["Name the project or work example.", "Describe ownership.", "Explain the outcome."],
+                  followUpLimit: 1,
+                  prompt: "Tell me about the Checkout Platform migration.",
+                  sourceConfidence: 0.94,
+                },
+              ],
+            }),
+          }],
+        },
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    const blueprint = await generatePracticeBlueprint(
+      practiceProfile,
+      blueprintEvidence,
+      practicePlan({ format: "self_presentation" }),
+      practiceContext,
+    );
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(blueprint.status).toBe("grounded");
+    expect(blueprint.questions).toHaveLength(2);
+    expect(blueprint.maxQuestions).toBeGreaterThan(2);
+  });
+
+  it("keeps evidence ids traceable to candidate evidence when job-description requirements shape the prompt", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+    const opportunity: Opportunity = {
+      id: "opportunity-1",
+      userId: "user-1",
+      company: "Northwind",
+      role: "Senior Frontend Engineer",
+      status: "interviewing",
+      location: null,
+      remote: null,
+      jobUrl: null,
+      jobDescription: "Requires deep experience leading large-scale React migrations and mentoring engineers on rollout risk.",
+      sourceLabel: null,
+      sourceSystem: null,
+      sourceExternalId: null,
+      matchScore: null,
+      strengths: [],
+      gaps: [],
+      notes: null,
+      appliedAt: null,
+      nextInterviewAt: null,
+      createdAt: "2026-08-29T10:00:00.000Z",
+      updatedAt: "2026-08-29T10:00:00.000Z",
+    };
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{
+        content: {
+          parts: [{
+            text: JSON.stringify({
+              status: "grounded",
+              fallbackReason: null,
+              maxFollowUps: 2,
+              maxQuestions: 6,
+              questions: [
+                {
+                  sequence: 1,
+                  category: "introduction",
+                  competencyName: null,
+                  difficulty: "senior",
+                  objective: "Establish recent engineering ownership relevant to the role.",
+                  evidenceIds: [],
+                  expectedSignals: ["role summary", "recent ownership"],
+                  missingSignalPrompts: ["Name the most recent engineering area you owned."],
+                  rubricCriteria: ["Establish the candidate's recent engineering ownership."],
+                  followUpLimit: 0,
+                  prompt: "Give me a concise introduction focused on leading React migrations.",
+                  sourceConfidence: null,
+                },
+                {
+                  sequence: 2,
+                  category: "experience",
+                  competencyId: "react",
+                  competencyName: "React architecture",
+                  difficulty: "senior",
+                  objective: "Probe the checkout migration ownership and impact.",
+                  evidenceIds: ["evidence-1"],
+                  expectedSignals: ["role", "trade-off", "outcome"],
+                  missingSignalPrompts: ["Name the launch trade-off you accepted."],
+                  rubricCriteria: ["Name the project or work example.", "Describe ownership.", "Explain the outcome."],
+                  followUpLimit: 1,
+                  prompt: "Tell me about the Checkout Platform migration.",
+                  sourceConfidence: 0.94,
+                },
+                {
+                  sequence: 3,
+                  category: "technical",
+                  competencyName: "React architecture",
+                  difficulty: "senior",
+                  objective: "Probe the migration trade-off decision.",
+                  evidenceIds: ["evidence-1"],
+                  expectedSignals: ["decision", "constraint", "trade-off"],
+                  missingSignalPrompts: ["What trade-off did you reject?"],
+                  rubricCriteria: ["Name the technical decision.", "Explain the constraint.", "Describe the trade-off."],
+                  followUpLimit: 1,
+                  prompt: "Walk me through the route-splitting decision.",
+                  sourceConfidence: 0.94,
+                },
+                {
+                  sequence: 4,
+                  category: "architecture",
+                  competencyName: "React architecture",
+                  difficulty: "senior",
+                  objective: "Probe rollout mentoring readiness for large-scale migrations.",
+                  evidenceIds: ["evidence-2"],
+                  expectedSignals: ["requirements", "mentoring", "constraint"],
+                  missingSignalPrompts: ["Who did you mentor through the rollout?"],
+                  rubricCriteria: ["Explain the requirements.", "Describe the design choice.", "State the outcome."],
+                  followUpLimit: 0,
+                  prompt: "How would you mentor a team through a large-scale React migration rollout?",
+                  sourceConfidence: 0.91,
+                },
+              ],
+            }),
+          }],
+        },
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    const blueprint = await generatePracticeBlueprint(
+      practiceProfile,
+      blueprintEvidence,
+      practicePlan({ format: "role_prep" }),
+      { ...practiceContext, primaryOpportunity: opportunity },
+    );
+
+    const requestBody = JSON.parse(String(fetchSpy.mock.calls[0][1]?.body));
+    expect(requestBody.contents[0].parts[0].text).toContain("leading large-scale React migrations");
+    expect(requestBody.contents[0].parts[0].text).toContain("Job requirements are targets to probe, not candidate evidence.");
+    expect(requestBody.contents[0].parts[0].text).toContain("Candidate factual claims must be grounded in supplied evidence or confirmed story facts.");
+    expect(requestBody.contents[0].parts[0].text).toContain("Do not invent company interview-process facts.");
+
+    const knownEvidenceIds = new Set(blueprintEvidence.map((item) => item.id));
+    for (const question of blueprint.questions) {
+      for (const evidenceId of question.evidenceIds) {
+        expect(knownEvidenceIds.has(evidenceId)).toBe(true);
+      }
+    }
+  });
+
+  it("only grounds on confirmed or corrected observations and confirmed stories, preferring a user correction over the original claim", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: "{}" }] } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    const context: PracticeBlueprintContext = {
+      primaryOpportunity: null,
+      supportingOpportunities: [],
+      observations: [
+        {
+          id: "observation-unreviewed",
+          userId: "user-1",
+          observationType: "weakness",
+          claim: "Skips trade-offs entirely, never seen this candidate mention one.",
+          confidence: 0.8,
+          importance: 0.9,
+          trend: "unresolved",
+          reviewState: "unreviewed",
+          userCorrection: null,
+          firstSeenAt: null,
+          lastSeenAt: null,
+          confirmedAt: null,
+          correctedAt: null,
+          dismissedAt: null,
+          createdAt: "2026-08-29T10:00:00.000Z",
+          updatedAt: "2026-08-29T10:00:00.000Z",
+        },
+        {
+          id: "observation-corrected",
+          userId: "user-1",
+          observationType: "weakness",
+          claim: "Never explains trade-offs.",
+          confidence: 0.8,
+          importance: 0.9,
+          trend: "unresolved",
+          reviewState: "corrected",
+          userCorrection: "Explains trade-offs but rushes the outcome.",
+          firstSeenAt: null,
+          lastSeenAt: null,
+          confirmedAt: null,
+          correctedAt: "2026-08-29T10:00:00.000Z",
+          dismissedAt: null,
+          createdAt: "2026-08-29T10:00:00.000Z",
+          updatedAt: "2026-08-29T10:00:00.000Z",
+        },
+      ],
+      stories: [
+        {
+          id: "story-draft",
+          userId: "user-1",
+          title: "Unfinished draft story, never seen elsewhere in this test.",
+          situation: null,
+          responsibility: null,
+          problem: null,
+          actions: null,
+          alternatives: null,
+          tradeoffs: null,
+          ownership: null,
+          outcome: null,
+          lessons: null,
+          tags: [],
+          completeness: 0.2,
+          reviewState: "draft",
+          confirmedAt: null,
+          createdAt: "2026-08-29T10:00:00.000Z",
+          updatedAt: "2026-08-29T10:00:00.000Z",
+        },
+        {
+          id: "story-confirmed",
+          userId: "user-1",
+          title: "Checkout migration rollback story",
+          situation: "Rollout risk on the checkout migration.",
+          responsibility: "Owned the rollback plan.",
+          problem: null,
+          actions: null,
+          alternatives: null,
+          tradeoffs: null,
+          ownership: null,
+          outcome: null,
+          lessons: null,
+          tags: [],
+          completeness: 0.9,
+          reviewState: "confirmed",
+          confirmedAt: "2026-08-29T10:00:00.000Z",
+          createdAt: "2026-08-29T10:00:00.000Z",
+          updatedAt: "2026-08-29T10:00:00.000Z",
+        },
+      ],
+    };
+
+    await generatePracticeBlueprint(practiceProfile, blueprintEvidence, practicePlan(), context);
+
+    const requestBody = JSON.parse(String(fetchSpy.mock.calls[0][1]?.body));
+    const promptText = requestBody.contents[0].parts[0].text as string;
+    expect(promptText).toContain("Explains trade-offs but rushes the outcome.");
+    expect(promptText).not.toContain("Skips trade-offs entirely, never seen this candidate mention one.");
+    expect(promptText).not.toContain("Never explains trade-offs.");
+    expect(promptText).toContain("Checkout migration rollback story");
+    expect(promptText).not.toContain("Unfinished draft story, never seen elsewhere in this test.");
   });
 });
 

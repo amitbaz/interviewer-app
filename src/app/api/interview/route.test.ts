@@ -21,21 +21,36 @@ const mocks = vi.hoisted(() => ({
   evaluateHandsOn: vi.fn(),
   handsOnCheckpoint: vi.fn(),
   handsOnExercise: vi.fn(),
+  generatePracticeBlueprint: vi.fn(),
+  assessProfileReadiness: vi.fn(),
+  updatePracticePlan: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ requireUser: mocks.requireUser }));
-vi.mock("@/lib/repositories/profile", () => ({ getProfile: mocks.getProfile }));
+vi.mock("@/lib/repositories/profile", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/repositories/profile")>("@/lib/repositories/profile");
+  return { ...actual, getProfile: mocks.getProfile };
+});
 vi.mock("@/lib/repositories/interviews", () => ({
   getSession: mocks.getSession,
   listRecentSessions: mocks.listRecentSessions,
   createHandsOnSession: mocks.createHandsOnSession,
   createSessionWithPlan: mocks.createSessionWithPlan,
   createSessionWithBlueprint: mocks.createSessionWithBlueprint,
+  createSessionWithPracticeBlueprint: vi.fn(),
+  createHandsOnPracticeSession: vi.fn(),
   recordConversationTurn: mocks.recordConversationTurn,
   saveHandsOnCheckpoint: mocks.saveHandsOnCheckpoint,
   completeSession: mocks.completeSession,
   completeHandsOnSession: mocks.completeHandsOnSession,
 }));
+// The practice-plan bookkeeping the route triggers after a completion runs for
+// real (via `completeLinkedPracticePlanBestEffort`); only its persistence is
+// stubbed, so these tests exercise the actual best-effort path.
+vi.mock("@/lib/repositories/practice-plans", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/repositories/practice-plans")>("@/lib/repositories/practice-plans");
+  return { ...actual, updatePracticePlan: mocks.updatePracticePlan };
+});
 vi.mock("@/lib/interview-planner", () => ({ buildInterviewPlan: mocks.buildInterviewPlan }));
 vi.mock("@/lib/coach", () => ({
   nextTurn: mocks.nextTurn,
@@ -45,6 +60,8 @@ vi.mock("@/lib/coach", () => ({
   handsOnCheckpoint: mocks.handsOnCheckpoint,
   handsOnExercise: mocks.handsOnExercise,
   generateInterviewBlueprint: mocks.generateInterviewBlueprint,
+  generatePracticeBlueprint: mocks.generatePracticeBlueprint,
+  assessProfileReadiness: mocks.assessProfileReadiness,
 }));
 
 import { GET, POST } from "@/app/api/interview/route";
@@ -97,7 +114,11 @@ function question(sequence: number, answer: string | null): PlannedQuestion {
   };
 }
 
-function session(questions: PlannedQuestion[], status: InterviewSession["status"] = "active"): InterviewSession {
+function session(
+  questions: PlannedQuestion[],
+  status: InterviewSession["status"] = "active",
+  practicePlanId: string | null = null,
+): InterviewSession {
   return {
     id: "session-1",
     userId: "user-1",
@@ -114,9 +135,14 @@ function session(questions: PlannedQuestion[], status: InterviewSession["status"
     messages: [],
     createdAt: "2026-08-29T10:00:00.000Z",
     updatedAt: "2026-08-29T10:00:00.000Z",
-    practicePlanId: null,
+    practicePlanId,
     opportunityId: null,
   };
+}
+
+/** A planned practice conversation: three base questions plus any follow-ups already persisted. */
+function plannedSession(questions: PlannedQuestion[], status: InterviewSession["status"] = "active"): InterviewSession {
+  return session(questions, status, "plan-1");
 }
 
 describe("POST /api/interview", () => {
@@ -124,6 +150,7 @@ describe("POST /api/interview", () => {
     vi.clearAllMocks();
     mocks.requireUser.mockResolvedValue({ supabase: { client: true }, user: { id: "user-1" } });
     mocks.getProfile.mockResolvedValue(profile);
+    mocks.updatePracticePlan.mockResolvedValue({ id: "plan-1", status: "completed" });
   });
 
   it("returns 401 before reading a request body when authentication is absent", async () => {
@@ -493,6 +520,129 @@ describe("POST /api/interview", () => {
 
     expect(response.status).toBe(200);
     expect(mocks.completeSession).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an explicit finish on a generic conversation with fewer than five answers", async () => {
+    mocks.getSession.mockResolvedValue(session([1, 2, 3, 4].map((sequence) => question(sequence, "answered"))));
+
+    const response = await POST(new Request("http://localhost/api/interview", {
+      method: "POST",
+      body: JSON.stringify({ action: "complete", sessionId: "session-1" }),
+    }));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Answer at least five questions before completing this interview." });
+    expect(mocks.completeSession).not.toHaveBeenCalled();
+  });
+
+  it("allows an explicit finish on planned practice once its three base questions are answered", async () => {
+    const planned = plannedSession([1, 2, 3].map((sequence) => question(sequence, "answered")));
+    mocks.getSession.mockResolvedValue(planned);
+    mocks.summarizeSession.mockReturnValue({ overallScore: 8, summary: "Complete" });
+    mocks.completeSession.mockResolvedValue(plannedSession(planned.questions, "complete"));
+
+    const response = await POST(new Request("http://localhost/api/interview", {
+      method: "POST",
+      body: JSON.stringify({ action: "complete", sessionId: "session-1" }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(mocks.completeSession).toHaveBeenCalledOnce();
+    expect(mocks.updatePracticePlan).toHaveBeenCalledWith(expect.anything(), "user-1", "plan-1", {
+      status: "completed",
+      completedAt: "2026-08-29T11:00:00.000Z",
+    });
+    // The key is always present so clients can read it as a nullable field.
+    expect(body).toHaveProperty("practicePlanWarning", null);
+  });
+
+  it("rejects an explicit finish on planned practice while a persisted follow-up is unanswered", async () => {
+    mocks.getSession.mockResolvedValue(plannedSession([
+      ...[1, 2, 3].map((sequence) => question(sequence, "answered")),
+      question(6, null),
+    ]));
+
+    const response = await POST(new Request("http://localhost/api/interview", {
+      method: "POST",
+      body: JSON.stringify({ action: "complete", sessionId: "session-1" }),
+    }));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Answer every question in this practice before completing it." });
+    expect(mocks.completeSession).not.toHaveBeenCalled();
+  });
+
+  it("allows the same planned practice to finish once the follow-up is answered", async () => {
+    const planned = plannedSession([
+      ...[1, 2, 3].map((sequence) => question(sequence, "answered")),
+      question(6, "follow-up answered"),
+    ]);
+    mocks.getSession.mockResolvedValue(planned);
+    mocks.summarizeSession.mockReturnValue({ overallScore: 8, summary: "Complete" });
+    mocks.completeSession.mockResolvedValue(plannedSession(planned.questions, "complete"));
+
+    const response = await POST(new Request("http://localhost/api/interview", {
+      method: "POST",
+      body: JSON.stringify({ action: "complete", sessionId: "session-1" }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(mocks.completeSession).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a completed session when practice-plan bookkeeping fails", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const planned = plannedSession([1, 2, 3].map((sequence) => question(sequence, "answered")));
+    mocks.getSession.mockResolvedValue(planned);
+    mocks.summarizeSession.mockReturnValue({ overallScore: 8, summary: "Complete" });
+    mocks.completeSession.mockResolvedValue(plannedSession(planned.questions, "complete"));
+    mocks.updatePracticePlan.mockRejectedValue(new Error("practice_plans update failed"));
+
+    const response = await POST(new Request("http://localhost/api/interview", {
+      method: "POST",
+      body: JSON.stringify({ action: "complete", sessionId: "session-1" }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.session.status).toBe("complete");
+    expect(body.practicePlanWarning).toEqual(expect.any(String));
+    expect(consoleError).toHaveBeenCalledWith(
+      "[practice-service] practice plan completion failed",
+      expect.objectContaining({ message: "practice_plans update failed" }),
+    );
+    consoleError.mockRestore();
+  });
+
+  it("marks the plan completed when a planned conversation finishes naturally", async () => {
+    const current = plannedSession([
+      question(1, "answered"),
+      question(2, "answered"),
+      question(3, null),
+    ]);
+    const answered = plannedSession([1, 2, 3].map((sequence) => question(sequence, "answered")));
+    mocks.getSession.mockResolvedValue(current);
+    mocks.nextTurn.mockResolvedValue({
+      evaluation: { score: 8, competencyId: "react-id", competency: "React architecture", dimensions: {}, strengths: [], needsWork: [] },
+      nextQuestion: null,
+      followUp: null,
+    });
+    mocks.recordConversationTurn.mockResolvedValue(answered);
+    mocks.summarizeSession.mockReturnValue({ overallScore: 8, summary: "Complete" });
+    mocks.completeSession.mockResolvedValue(plannedSession(answered.questions, "complete"));
+
+    const response = await POST(new Request("http://localhost/api/interview", {
+      method: "POST",
+      body: JSON.stringify({ action: "respond", sessionId: "session-1", answer: "A complete answer." }),
+    }));
+    const body = await response.json();
+
+    expect(body.session.status).toBe("complete");
+    expect(body).toHaveProperty("practicePlanWarning", null);
+    expect(mocks.updatePracticePlan).toHaveBeenCalledWith(expect.anything(), "user-1", "plan-1", expect.objectContaining({
+      status: "completed",
+    }));
   });
 });
 
