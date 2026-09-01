@@ -841,8 +841,13 @@ export async function extractEngineeringEvidence(cvText: string, coverLetter: st
 
 /**
  * Generates the persisted five-question interview blueprint from the validated
- * profile and extracted evidence. It retries once on malformed or unsupported
- * model output, then falls back to a deterministic limited-grounding plan.
+ * profile and extracted evidence. `assessProfileReadiness(evidence)` is the
+ * single decision point: when the profile lacks enough source-backed detail,
+ * this returns a deterministic discovery blueprint (`buildExperienceDiscoveryBlueprint`)
+ * with zero model calls. Otherwise it asks the model for a grounded blueprint,
+ * retries once on malformed or unsupported output, then falls back to a
+ * deterministic limited-grounding plan (`buildFallbackInterviewBlueprint`) if
+ * both attempts fail.
  */
 export async function generateInterviewBlueprint(
   profile: Pick<ProfileDraft, "role" | "seniority" | "summary" | "narrative" | "expertise" | "characteristics" | "competencies">,
@@ -1251,9 +1256,11 @@ function concreteEvidenceCount(evidence: EvidenceItem[]): number {
 }
 
 /**
- * Applies the deterministic profile-quality gate for personalized interviews.
- * The gate requires concrete work examples, identifiable technologies, and
- * ownership or outcome signals before the profile can start a grounded session.
+ * Deterministically scores how much source-backed detail is available for
+ * interview grounding: concrete work examples, identifiable technologies, and
+ * ownership or outcome signals. `ready === false` is advisory, not a gate --
+ * `generateInterviewBlueprint` routes it to a discovery blueprint instead of
+ * blocking the session (see `ProfileReadiness` in `@/lib/types`).
  */
 export function assessProfileReadiness(evidence: EvidenceItem[]): ProfileReadiness {
   const missing = new Set<string>();

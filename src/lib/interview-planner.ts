@@ -13,6 +13,9 @@ import type {
 
 const difficulties: Difficulty[] = ["foundational", "intermediate", "senior", "advanced"];
 const categories: QuestionCategory[] = ["introduction", "experience", "technical", "architecture", "behavioral"];
+// Same order as `categories` today, kept as its own const because the discovery backbone is
+// independently pinned by `validateInterviewBlueprint`/the discovery tests -- it is free to
+// diverge from `categories` if the legacy plan's ordering ever changes.
 const discoveryCategories: QuestionCategory[] = ["introduction", "experience", "technical", "architecture", "behavioral"];
 const plannerTimestamp = "1970-01-01T00:00:00.000Z";
 const defaultMaxFollowUps = 3;
