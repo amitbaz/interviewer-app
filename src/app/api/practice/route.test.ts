@@ -103,13 +103,23 @@ describe("POST /api/practice", () => {
     expect(mocks.startRecommendedPractice.mock.calls[0]).toHaveLength(3);
   });
 
-  it("forwards only the validated manual practice fields", async () => {
+  /**
+   * Every user-choosable field carries a NON-DEFAULT value here on purpose. An
+   * earlier version of this test sent `primaryOpportunityId: null` and omitted
+   * `successCriteria`, so hardcoding either forwarded field to its zero value
+   * still satisfied the assertion -- a manually started role-specific practice
+   * would silently lose its opportunity link and generate a blueprint with no
+   * job context, and the suite would stay green.
+   */
+  it("forwards every validated manual practice field, not just its defaults", async () => {
     const response = await post({
       action: "start_manual",
       format: "targeted_drill",
       primaryFocus: "Architecture decision framing",
+      secondaryFocus: "Trade-off narration",
       estimatedMinutes: 12,
-      primaryOpportunityId: null,
+      successCriteria: ["Name the constraint that drove the decision."],
+      primaryOpportunityId: "opp-7",
       status: "completed",
       priorityScore: 99,
     });
@@ -118,8 +128,26 @@ describe("POST /api/practice", () => {
     expect(mocks.startManualPractice).toHaveBeenCalledWith(expect.anything(), "user-1", {
       format: "targeted_drill",
       primaryFocus: "Architecture decision framing",
-      secondaryFocus: null,
+      secondaryFocus: "Trade-off narration",
       estimatedMinutes: 12,
+      successCriteria: ["Name the constraint that drove the decision."],
+      primaryOpportunityId: "opp-7",
+    });
+  });
+
+  it("defaults the optional manual practice fields when the body omits them", async () => {
+    const response = await post({
+      action: "start_manual",
+      format: "targeted_drill",
+      primaryFocus: "Architecture decision framing",
+    });
+
+    expect(response.status).toBe(200);
+    expect(mocks.startManualPractice).toHaveBeenCalledWith(expect.anything(), "user-1", {
+      format: "targeted_drill",
+      primaryFocus: "Architecture decision framing",
+      secondaryFocus: null,
+      estimatedMinutes: null,
       successCriteria: [],
       primaryOpportunityId: null,
     });
