@@ -4,6 +4,11 @@ import { requireUser } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
 
+/** Marker Gemini is asked to return instead of inventing words for silent audio. */
+const noSpeechSentinel = "NO_SPEECH_DETECTED";
+
+const noSpeechMessage = "No speech was detected. You can type your answer instead.";
+
 export async function POST(request: Request) {
   try {
     await requireUser();
@@ -29,8 +34,13 @@ export async function POST(request: Request) {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
       body: JSON.stringify({
+        // Temperature 0 keeps decoding deterministic so the same recording is not
+        // reworded between attempts. The sentinel is a best-effort second line of
+        // defence: Gemini happily invents a plausible interview answer when handed
+        // silence, so the recorder also refuses to upload a silent take.
+        generationConfig: { temperature: 0 },
         contents: [{ parts: [
-          { text: "Transcribe this interview answer accurately. Return only the spoken words, preserving the speaker's meaning. Do not add a heading, notes, or commentary." },
+          { text: `Transcribe the speech in this audio verbatim. Return only the words actually spoken, with no heading, notes, or commentary. Never guess, summarise, or invent content: if the audio contains no intelligible speech, return exactly ${noSpeechSentinel} and nothing else.` },
           { inlineData: { mimeType: audio.type || "audio/webm", data } },
         ] }],
       }),
@@ -42,7 +52,9 @@ export async function POST(request: Request) {
     }
     const body = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
     const transcript = body.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("").trim();
-    if (!transcript) return NextResponse.json({ error: "No speech was detected. You can type your answer instead." }, { status: 422 });
+    if (!transcript || transcript === noSpeechSentinel) {
+      return NextResponse.json({ error: noSpeechMessage }, { status: 422 });
+    }
     return NextResponse.json({ transcript });
   } catch (caught) {
     if (caught instanceof Error && caught.message.startsWith("GEMINI_MODEL")) {
