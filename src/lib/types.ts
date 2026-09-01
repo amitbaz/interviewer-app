@@ -10,6 +10,93 @@ export type QuestionCategory =
 
 export type Difficulty = "foundational" | "intermediate" | "senior" | "advanced";
 
+export type RoundId = "recruiter" | "tech-lead" | "hr" | "founder" | "code-review";
+
+export type InterviewMode = "coach" | "real";
+
+export type ProbeAspect =
+  | "specifics"
+  | "ownership"
+  | "tradeoff"
+  | "outcome"
+  | "collaboration"
+  | "hindsight";
+
+export type RescueStyle = "narrow" | "hook" | "reframe" | "park";
+
+export type AdvanceReason =
+  | "satisfied"
+  | "line-exhausted"
+  | "rescue-budget-spent"
+  | "turn-budget";
+
+/**
+ * A single decided interviewer move. The director produces exactly one per
+ * turn; the interviewer model authors speech for it and decides nothing.
+ *
+ * `basis` and `claim` carry the candidate's own words, so the interviewer can
+ * react to what was actually said without ever receiving the rubric.
+ */
+export type Intent =
+  | { kind: "open"; targetId: string }
+  | { kind: "probe"; targetId: string; aspect: ProbeAspect; basis: string }
+  | { kind: "challenge"; targetId: string; claim: string }
+  | { kind: "rescue"; targetId: string; style: RescueStyle; hook: string | null }
+  | { kind: "advance"; targetId: string; reason: AdvanceReason }
+  | { kind: "hypothetical"; targetId: string; basis: string }
+  | { kind: "candidate-questions" }
+  | { kind: "close" };
+
+export type IntentKind = Intent["kind"];
+
+/** One rescue actually applied to a question, for results display and Release 3. */
+export type AssistanceRecord = {
+  style: RescueStyle;
+  at: string;
+};
+
+export type ModePolicy = {
+  rescuesPerQuestion: number;
+  rescuesPerSession: number;
+  rescueStyles: RescueStyle[];
+  pushback: "light" | "firm";
+  parkAndReturn: boolean;
+  acknowledgeStruggle: boolean;
+};
+
+/**
+ * A competency the round must cover. Replaces pre-written prompt text: the
+ * blueprint now says what to find out, not what to say.
+ *
+ * `objective`, `expectedSignals` and `rubricCriteria` are assessor-only and
+ * must never reach the interviewer call (spec §11.1).
+ */
+export type CoverageTarget = {
+  id: string;
+  competencyId: string | null;
+  competencyName: string | null;
+  category: QuestionCategory;
+  evidenceIds: string[];
+  difficulty: Difficulty;
+  objective: string;
+  expectedSignals: string[];
+  rubricCriteria: string[];
+  required: boolean;
+};
+
+export type TargetStatus = "unasked" | "open" | "satisfied" | "parked" | "skipped";
+
+export type TargetState = {
+  target: CoverageTarget;
+  status: TargetStatus;
+  turnsSpent: number;
+  rescuesSpent: number;
+  askedIntents: Intent[];
+};
+
+/** The assessor's coarse read of the answer, separate from its rubric scoring. */
+export type AssessmentRead = "answered" | "partial" | "evasive" | "stuck";
+
 export type Competency = {
   id: string;
   name: string;
@@ -60,9 +147,15 @@ export type PlannedQuestion = {
   competencyName: string | null;
   difficulty: Difficulty;
   isFollowUp: boolean;
-  prompt: string;
+  /** Null until the interviewer authors it at reveal time. */
+  prompt: string | null;
   answer: string | null;
   createdAt: string;
+  /** The director intent that produced this question's prompt. */
+  askedIntent: Intent | null;
+  assistance: AssistanceRecord[];
+  /** True when the candidate did not attempt the question; never scored. */
+  nonAnswer: boolean;
   objective?: string;
   evidenceIds?: string[];
   expectedSignals?: string[];
@@ -102,7 +195,11 @@ export type InterviewBlueprint = {
   maxFollowUps: number;
   maxQuestions: number;
   createdAt: string;
+  /** Legacy pre-written questions. Present on sessions created before this release. */
   questions: BlueprintQuestion[];
+  roundId: RoundId;
+  turnBudget: number;
+  targets: CoverageTarget[];
 };
 
 /**
@@ -262,7 +359,11 @@ export type InterviewSession = {
   id: string;
   userId: string;
   kind: "conversation" | "hands-on";
+  roundId: RoundId;
+  mode: InterviewMode;
   status: "active" | "complete";
+  /** True once any turn fell back to a deterministic evaluation or line (spec §13.2). */
+  degraded: boolean;
   startedAt: string;
   completedAt: string | null;
   exercise: Record<string, unknown>;
