@@ -662,7 +662,9 @@ export function RelayShell() {
             <p className="text-xs font-semibold uppercase tracking-[.12em] text-[#537053]">Question objective</p>
             <p className="mt-1">{blueprintQuestion.objective}</p>
             <p className="mt-2 text-xs leading-5 text-[#537053]">
-              Grounded in {groundedEvidence.length ? groundedEvidence.map(evidenceLabel).join(" · ") : `${blueprintQuestion.evidenceIds.length} source evidence item${blueprintQuestion.evidenceIds.length === 1 ? "" : "s"}`}
+              {blueprintQuestion.evidenceIds.length === 0
+                ? "Broader question — draws on what you actually say, not a fixed source example."
+                : `Grounded in ${groundedEvidence.length ? groundedEvidence.map(evidenceLabel).join(" · ") : `${blueprintQuestion.evidenceIds.length} source evidence item${blueprintQuestion.evidenceIds.length === 1 ? "" : "s"}`}`}
               {blueprintQuestion.expectedSignals.length ? ` · Expected signals: ${blueprintQuestion.expectedSignals.join(", ")}` : ""}
             </p>
           </div>

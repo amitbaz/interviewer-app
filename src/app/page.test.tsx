@@ -1507,6 +1507,50 @@ describe("App conversation interview", () => {
     expect(screen.getByText(/helps you uncover real examples/i)).toBeInTheDocument();
   });
 
+  // A discovery question's `evidenceIds` is deliberately empty (finding 2 in the
+  // final review dropped the evidence anchor entirely). The interviewer-message
+  // grounding line must not describe that as a deficit ("Grounded in 0 source
+  // evidence items") -- across a full discovery session every non-introduction
+  // question would render that same discouraging count.
+  it("does not present an evidence-free discovery question's grounding line as a deficit", async () => {
+    const started = activeConversationSession({
+      blueprint: {
+        status: "limited-grounding",
+        fallbackReason: "Your source profile has limited concrete example detail, so this session starts broader.",
+        maxFollowUps: 3,
+        maxQuestions: 8,
+        createdAt: "2026-09-01T12:00:00.000Z",
+        questions: [
+          {
+            id: "question-1",
+            sequence: 1,
+            category: "experience",
+            competencyId: null,
+            competencyName: null,
+            difficulty: "senior",
+            isFollowUp: false,
+            prompt: "How would you phase a large React migration?",
+            answer: null,
+            createdAt: "2026-09-01T12:00:00.000Z",
+            objective: "General objective: Surface one concrete example of real work the candidate can describe in detail.",
+            evidenceIds: [],
+            expectedSignals: ["ownership"],
+            missingSignalPrompts: [],
+            followUpLimit: 1,
+            sourceConfidence: null,
+          },
+        ],
+      },
+    });
+    await startInterviewFrom("conversation", started, {
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+    });
+
+    expect(screen.queryByText(/0 source evidence item/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Broader question/)).toBeInTheDocument();
+  });
+
   it("sends an answer and clears the composer", async () => {
     const started = activeConversationSession();
     const answered = session({
