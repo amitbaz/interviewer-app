@@ -100,8 +100,8 @@ vi.mock("@/lib/repositories/practice-plans", async () => {
 // `@/lib/coach`, `@/lib/practice-recommendation`, `@/lib/progress`, and
 // `@/lib/practice-service` are deliberately NOT mocked anywhere in this file.
 import { completeSession as summarizeSession, nextTurn } from "@/lib/coach";
+import { canExplicitlyCompleteConversation } from "@/lib/conversation-completion";
 import {
-  canExplicitlyCompleteConversation,
   completeLinkedPracticePlanBestEffort,
   startRecommendedPractice,
 } from "@/lib/practice-service";

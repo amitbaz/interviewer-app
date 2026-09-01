@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { completeSession as summarizeSession, evaluateHandsOn, generateInterviewBlueprint, handsOnCheckpoint, handsOnExercise, initialQuestion, nextTurn } from "@/lib/coach";
-import { canExplicitlyCompleteConversation, completeLinkedPracticePlanBestEffort } from "@/lib/practice-service";
+import { canExplicitlyCompleteConversation } from "@/lib/conversation-completion";
+import { completeLinkedPracticePlanBestEffort } from "@/lib/practice-service";
 import { calculateProgress } from "@/lib/progress";
 import {
   completeHandsOnSession,

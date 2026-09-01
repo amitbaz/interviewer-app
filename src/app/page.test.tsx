@@ -973,6 +973,72 @@ describe("App practice view", () => {
 
     await screen.findByRole("heading", { name: "Stay in the conversation." });
   });
+
+  /**
+   * Pins the Finish control to the SERVER completion rule
+   * (`canExplicitlyCompleteConversation`). A planned practice conversation is
+   * shorter than the generic five-question backbone, so a five-answer client
+   * gate left Finish permanently dead for every 2-4 question practice format.
+   */
+  it("enables Finish on a fully answered planned practice conversation", async () => {
+    const planned = session({
+      id: "session-planned",
+      status: "active",
+      completedAt: null,
+      overallScore: null,
+      resultSummary: {},
+      evaluations: [],
+      practicePlanId: "plan-started",
+      questions: [1, 2, 3].map((sequence) => question(sequence, `Planned prompt ${sequence}`, "An answer.", null, null)),
+      messages: [],
+    });
+    mockRoutes({
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/practice": () => ({ body: { plan: startedPracticePlan("targeted_drill"), session: planned } }),
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Ready when you are." });
+    fireEvent.click(screen.getByRole("button", { name: "practice" }));
+    await screen.findByRole("heading", { name: "Choose deliberate practice." });
+    fireEvent.change(screen.getByLabelText("Focus"), { target: { value: "System design tradeoffs" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start practice" }));
+
+    await screen.findByRole("heading", { name: "Stay in the conversation." });
+    expect(screen.getByRole("button", { name: "Finish" })).toBeEnabled();
+    expect(screen.getByText("Practice session · 3 of 3 answered")).toBeInTheDocument();
+  });
+
+  it("keeps Finish disabled on a generic conversation under five answers", async () => {
+    const generic = session({
+      id: "session-generic",
+      status: "active",
+      completedAt: null,
+      overallScore: null,
+      resultSummary: {},
+      evaluations: [],
+      practicePlanId: null,
+      questions: [1, 2, 3].map((sequence) => question(sequence, `Prompt ${sequence}`, "An answer.", null, null)),
+      messages: [],
+    });
+    mockRoutes({
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/practice": () => ({ body: { plan: startedPracticePlan("targeted_drill"), session: generic } }),
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "Ready when you are." });
+    fireEvent.click(screen.getByRole("button", { name: "practice" }));
+    await screen.findByRole("heading", { name: "Choose deliberate practice." });
+    fireEvent.change(screen.getByLabelText("Focus"), { target: { value: "System design tradeoffs" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start practice" }));
+
+    await screen.findByRole("heading", { name: "Stay in the conversation." });
+    expect(screen.getByRole("button", { name: "Finish" })).toBeDisabled();
+    expect(screen.getByText("Mixed interview · 3 of 3 answered")).toBeInTheDocument();
+  });
 });
 
 describe("ResultsFeedbackCards", () => {

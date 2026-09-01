@@ -60,7 +60,6 @@ vi.mock("@/lib/coach", () => ({
 
 import {
   PracticeServiceError,
-  canExplicitlyCompleteConversation,
   completeLinkedPracticePlanBestEffort,
   loadPracticeInputs,
   loadPracticeOverview,
@@ -607,38 +606,5 @@ describe("completeLinkedPracticePlanBestEffort", () => {
       expect.objectContaining({ message: "failed" }),
     );
     consoleError.mockRestore();
-  });
-});
-
-describe("canExplicitlyCompleteConversation", () => {
-  it("allows a planned conversation once every persisted question is answered", () => {
-    const planned = session({
-      practicePlanId: "plan-1",
-      questions: [1, 2, 3].map((sequence) => question(sequence, "answered")),
-    });
-
-    expect(canExplicitlyCompleteConversation(planned)).toBe(true);
-  });
-
-  it("blocks a planned conversation while a persisted follow-up is unanswered", () => {
-    const planned = session({
-      practicePlanId: "plan-1",
-      questions: [
-        ...[1, 2, 3].map((sequence) => question(sequence, "answered")),
-        question(4, null, true),
-      ],
-    });
-
-    expect(canExplicitlyCompleteConversation(planned)).toBe(false);
-  });
-
-  it("keeps the five-answer rule for generic conversations", () => {
-    const fourAnswers = session({ questions: [1, 2, 3, 4].map((sequence) => question(sequence, "answered")) });
-    const fiveAnswers = session({
-      questions: [...[1, 2, 3, 4, 5].map((sequence) => question(sequence, "answered")), question(6, null, true)],
-    });
-
-    expect(canExplicitlyCompleteConversation(fourAnswers)).toBe(false);
-    expect(canExplicitlyCompleteConversation(fiveAnswers)).toBe(true);
   });
 });

@@ -287,24 +287,6 @@ export async function completeLinkedPracticePlanBestEffort(
   }
 }
 
-/**
- * Whether the user may end a conversation early, from the Complete action.
- *
- * A planned practice conversation is shorter than the generic five-question
- * backbone, so the five-answer rule does not apply to it: it may finish once
- * every currently persisted question is answered. That deliberately includes
- * follow-ups added mid-conversation -- an unanswered persisted follow-up
- * blocks explicit completion, because the follow-up exists precisely because
- * the plan's objective was not yet met. Generic/manual conversations keep the
- * existing five-answer rule.
- */
-export function canExplicitlyCompleteConversation(session: InterviewSession): boolean {
-  if (!session.practicePlanId) {
-    return session.questions.filter((question) => question.answer).length >= 5;
-  }
-  return session.questions.every((question) => Boolean(question.answer));
-}
-
 function requireProfile(profile: Profile | null): Profile {
   if (!profile) throw new PracticeServiceError("Create your profile first.", "PROFILE_REQUIRED");
   return profile;
