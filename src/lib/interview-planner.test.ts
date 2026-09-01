@@ -597,7 +597,14 @@ describe("adaptive interview planning", () => {
     expect(validateInterviewBlueprint(result, [])).toEqual(result);
   });
 
-  it("anchors discovery questions only to partial evidence that really exists", () => {
+  it("never anchors discovery questions to evidence, even when a partial match exists", () => {
+    // The evidence matcher (`scoreEvidenceForQuestion`) is permissive: any item with a
+    // non-empty `projectOrEmployer` scores > 0 against nearly every non-introduction
+    // question. On the commonest sparse shape -- one real project that failed the
+    // two-example readiness threshold -- that would anchor every discovery question to
+    // the same evidence id, contradicting their deliberately generic, evidence-free
+    // wording (spec §6.1) and disabling the discovery-answer grounding protection
+    // (`hasSourceEvidenceTarget`) exactly where it exists to help.
     const evidence = [{
       id: "evidence-1",
       sourceKind: "cv" as const,
@@ -622,10 +629,15 @@ describe("adaptive interview planning", () => {
       new Date("2026-09-01T12:00:00.000Z"),
     );
 
-    const referencedIds = result.questions.flatMap((item) => item.evidenceIds);
-    expect(referencedIds.every((id) => id === "evidence-1")).toBe(true);
-    expect(JSON.stringify(result.questions)).not.toContain("30%");
-    expect(JSON.stringify(result.questions)).not.toContain("led the migration");
+    for (const question of result.questions) {
+      expect(question.evidenceIds).toEqual([]);
+      expect(question.sourceConfidence).toBeNull();
+    }
+    const serialized = JSON.stringify(result.questions);
+    expect(serialized).not.toContain("Checkout migration");
+    expect(serialized).not.toContain("evidence-1");
+    expect(serialized).not.toContain("30%");
+    expect(serialized).not.toContain("led the migration");
     expect(validateInterviewBlueprint(result, evidence)).toEqual(result);
   });
 });

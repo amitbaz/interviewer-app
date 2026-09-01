@@ -520,13 +520,15 @@ function discoveryPrompt(category: QuestionCategory, role: string | null, subjec
 }
 
 /**
- * Discovery-oriented objective text. Preserves the same "General objective:"
- * prefix convention `blueprintObjective` uses for evidence-free questions so
- * a discovery blueprint keeps satisfying `validateInterviewBlueprint`.
+ * Discovery-oriented objective text. Every non-introduction question carries
+ * the "General objective:" prefix `validateInterviewBlueprint` requires for
+ * evidence-free questions -- discovery questions are always evidence-free
+ * (see `buildExperienceDiscoveryBlueprint`), so there is no evidence-anchored
+ * variant to branch on here.
  */
-function discoveryObjective(category: QuestionCategory, item: EvidenceItem | null): string {
+function discoveryObjective(category: QuestionCategory): string {
   if (category === "introduction") return "Learn about the candidate's recent focus and background.";
-  const prefix = item ? "Surface" : "General objective: Surface";
+  const prefix = "General objective: Surface";
   if (category === "experience") return `${prefix} one concrete example of real work the candidate can describe in detail.`;
   if (category === "technical") return `${prefix} a real technical problem or decision the candidate can walk through.`;
   if (category === "architecture") return `${prefix} the requirements and constraints behind a real system or feature.`;
@@ -542,12 +544,65 @@ function discoveryMissingSignalPrompts(category: QuestionCategory): string[] {
 }
 
 /**
+ * Discovery-oriented rubric criteria. Unlike `categoryRubricCriteria`, these
+ * name no project or subject -- discovery questions never carry an evidence
+ * anchor, so a rubric criterion naming a project the prompt never mentioned
+ * would mislead both the evaluator and the transcript UI (see the final
+ * review finding this fixes).
+ */
+function discoveryRubricCriteria(category: QuestionCategory): string[] {
+  if (category === "introduction") {
+    return [
+      "Establish what kind of engineering work the candidate has mainly been doing recently.",
+      "Keep the summary grounded in what the candidate actually says.",
+      "Do not drift into unrelated background details.",
+    ];
+  }
+  if (category === "experience") {
+    return [
+      "Surface one real piece of work the candidate can describe from memory.",
+      "Describe the candidate's personal responsibility in it.",
+      "Explain what happened and why it mattered, using only what the candidate said.",
+    ];
+  }
+  if (category === "technical") {
+    return [
+      "Surface a real technical problem or decision the candidate can walk through.",
+      "Explain the option, constraint, or trade-off the candidate considered.",
+      "Describe the result, using only what the candidate said.",
+    ];
+  }
+  if (category === "architecture") {
+    return [
+      "Surface the requirements or constraints behind a real system or feature.",
+      "Describe how the technical approach took shape.",
+      "State the outcome, using only what the candidate said.",
+    ];
+  }
+  return [
+    "Surface a real collaboration, ambiguity, or delivery-pressure challenge.",
+    "Describe what the candidate did about it.",
+    "State what changed as a result, using only what the candidate said.",
+  ];
+}
+
+/**
  * Builds the deterministic five-question discovery backbone for a profile
  * whose source evidence is too sparse for grounded, evidence-anchored
- * questions (`assessProfileReadiness` returned `ready: false`). Discovery
- * questions still consult `evidence` -- a genuinely relevant partial match
- * keeps its evidence id and confidence -- but never invent a project,
- * technology, decision, or outcome the evidence does not support.
+ * questions (`assessProfileReadiness` returned `ready: false`).
+ *
+ * Discovery questions never anchor to `evidence`, even when a partial match
+ * scores > 0 against `scoreEvidenceForQuestion`. That matcher is permissive
+ * enough that the commonest sparse shape -- one real project that failed the
+ * two-example readiness threshold -- would score positively against nearly
+ * every non-introduction question, anchoring all four of them to the same
+ * evidence id despite prompts that never mention it (spec §6.1's discovery
+ * prompts are deliberately generic). Keeping that anchor would also silently
+ * disable `hasSourceEvidenceTarget`'s discovery-answer grounding protection
+ * for exactly the questions it exists to protect. So every discovery
+ * question gets `evidenceIds: []`, `sourceConfidence: null`, and rubric
+ * criteria that name no project -- see spec §6.2: "Questions without a safe
+ * source anchor use a general objective and `evidenceIds: []`."
  */
 export function buildExperienceDiscoveryBlueprint(
   profile: Pick<ProfileDraft,
@@ -568,7 +623,7 @@ export function buildExperienceDiscoveryBlueprint(
 
   const questions: BlueprintQuestion[] = discoveryCategories.map((category, index) => {
     const sequence = index + 1;
-    const planned: PlannedQuestion = {
+    return {
       id: `discovery-${sequence}-${category}`,
       sequence,
       category,
@@ -579,14 +634,13 @@ export function buildExperienceDiscoveryBlueprint(
       prompt: discoveryPrompt(category, profile.role, selectedScopeName ?? ""),
       answer: null,
       createdAt,
-    };
-    const item = evidenceForQuestion(planned, evidence);
-    const base = defaultBlueprintQuestion(planned, item);
-    return {
-      ...base,
-      prompt: discoveryPrompt(category, profile.role, selectedScopeName ?? ""),
-      objective: discoveryObjective(category, item),
+      objective: discoveryObjective(category),
+      evidenceIds: [],
+      expectedSignals: categorySignals(category),
       missingSignalPrompts: discoveryMissingSignalPrompts(category),
+      rubricCriteria: discoveryRubricCriteria(category),
+      followUpLimit: category === "introduction" || category === "behavioral" ? 0 : 1,
+      sourceConfidence: null,
     };
   });
 
