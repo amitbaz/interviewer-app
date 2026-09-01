@@ -919,6 +919,76 @@ describe("initialQuestion", () => {
       expect(groundedResult.unsupportedClaims).toEqual(["I rebuilt our questionnaire editor."]);
     });
 
+    // The post-Gemini normalization backstops `unsupportedClaims` alone if this prompt
+    // rule silently reverts (see the two tests above), but nothing previously backstopped
+    // `improvedAnswer`, `needsWork`, or `missingPoints` -- all of which the model could
+    // still ground-check against the CV and accuse the candidate of inventing their own
+    // career. This pins the prompt rule itself so a regression there is caught directly.
+    it("includes the discovery grounding rule in the evaluator prompt only when the question has no evidence target", async () => {
+      vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+      vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({
+        candidates: [{
+          content: {
+            parts: [{
+              text: JSON.stringify({
+                question: "What was the outcome of that work?",
+                shouldFollowUp: false,
+                evaluation: {
+                  score: 7, competency: "Ignored by normalization", relevance: 7,
+                  dimensions: {
+                    correctness: 7, depth: 7, clarity: 7, structure: 7,
+                    practicalExperience: 7, tradeOffAwareness: 7, communication: 7,
+                    confidence: 7, relevance: 7,
+                  },
+                  strengths: [], needsWork: [], missingPoints: [], betterStructure: [],
+                  improvedAnswer: "An improved answer.",
+                  supportedClaims: ["A supported claim."],
+                  expectedSignalsPresent: ["ownership"],
+                  unsupportedClaims: [],
+                  dimensionReasons: {
+                    correctness: "ok", depth: "ok", clarity: "ok", structure: "ok",
+                    practicalExperience: "ok", tradeOffAwareness: "ok", communication: "ok",
+                    confidence: "ok", relevance: "ok",
+                  },
+                },
+              }),
+            }],
+          },
+        }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+      await evaluateAnswer(
+        discoveryQuestion,
+        discoveryBlueprint,
+        blueprintProfile,
+        "At my previous company I rebuilt our questionnaire editor.",
+        "interviewer: Think of one piece of work you remember clearly.",
+      );
+
+      const discoveryPrompt = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).contents[0].parts[0].text as string;
+      expect(discoveryPrompt).toContain("Grounding rule: question.evidenceIds is empty");
+      expect(discoveryPrompt).toContain("Do not mark them unsupported merely because they were absent from the source profile");
+
+      const groundedQuestion: BlueprintQuestion = { ...discoveryQuestion, evidenceIds: ["evidence-1"] };
+      const groundedBlueprintWithEvidence: InterviewBlueprint = {
+        ...discoveryBlueprint,
+        status: "grounded",
+        questions: [groundedQuestion],
+      };
+
+      await evaluateAnswer(
+        groundedQuestion,
+        groundedBlueprintWithEvidence,
+        blueprintProfile,
+        "At my previous company I rebuilt our questionnaire editor.",
+        "interviewer: Think of one piece of work you remember clearly.",
+      );
+
+      const groundedPrompt = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)).contents[0].parts[0].text as string;
+      expect(groundedPrompt).not.toContain("Grounding rule:");
+    });
+
     it("still asks a follow-up for a vague discovery answer even though nothing is unsupported", async () => {
       vi.stubEnv("GEMINI_API_KEY", "");
 
