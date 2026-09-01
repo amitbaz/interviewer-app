@@ -1,5 +1,6 @@
 "use client";
 
+import { profileReadinessCopy } from "@/app/relay-shell";
 import type { CareerDashboard, Opportunity, OpportunityStatus, PracticeFormat, PracticeRecommendationSignal } from "@/lib/types";
 
 /**
@@ -51,10 +52,11 @@ const sectionButtonClass = "mt-5 text-sm font-semibold text-[var(--pine)]";
  */
 export function HomeView({ dashboard, busy, onStartRecommended, onOpenApplications, onOpenStories, onOpenCoach, onOpenProgress }: HomeViewProps) {
   const { profile, recommendation, opportunities, observations, stories, progress } = dashboard;
-  const readinessBlocked = profile.readiness?.ready === false;
-  const readinessReason = readinessBlocked
-    ? `Add ${profile.readiness!.missing.join(", ")} to your profile before Relay can start grounded practice.`
-    : null;
+  // A sparse profile never disables Start -- it only changes what the first
+  // session looks like (broader discovery questions instead of grounded
+  // ones). `readinessSparse` gates the guidance copy below, not the CTA.
+  const readinessSparse = profile.readiness?.ready === false;
+  const readinessReason = readinessSparse ? profileReadinessCopy(profile.readiness) : null;
   const signals = recommendation.signals.slice(0, 3);
   const primaryOpportunity = recommendation.primaryOpportunityId
     ? opportunities.find((item) => item.id === recommendation.primaryOpportunityId) ?? null
@@ -95,7 +97,7 @@ export function HomeView({ dashboard, busy, onStartRecommended, onOpenApplicatio
         )}
         <button
           onClick={() => { void onStartRecommended(); }}
-          disabled={busy || readinessBlocked}
+          disabled={busy}
           className="mt-6 rounded-full bg-[var(--lime)] px-5 py-3 text-sm font-semibold text-[#18281f] disabled:opacity-50"
         >
           {busy ? "Starting…" : "Start recommended practice"}

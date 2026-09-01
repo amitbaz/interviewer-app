@@ -155,11 +155,16 @@ describe("PracticeView", () => {
     await waitFor(() => expect(onStartRecommended).toHaveBeenCalledTimes(1));
   });
 
-  it("disables the recommended-practice action when the profile readiness gate is failing", () => {
-    renderPractice(dashboard({ profile: profile({ readiness: { ready: false, missing: ["two concrete engineering projects or work examples"] } }) }));
+  it("keeps the recommended-practice action enabled and shows practice-first guidance when the profile readiness is not ready", async () => {
+    const { onStartRecommended } = renderPractice(dashboard({ profile: profile({ readiness: { ready: false, missing: ["two concrete engineering projects or work examples"] } }) }));
 
-    expect(screen.getByRole("button", { name: "Start recommended practice" })).toBeDisabled();
-    expect(screen.getByText(/two concrete engineering projects or work examples/)).toBeInTheDocument();
+    const cta = screen.getByRole("button", { name: "Start recommended practice" });
+    expect(cta).toBeEnabled();
+    expect(screen.getByText(/You can practice now\./)).toBeInTheDocument();
+    expect(screen.getByText(/help you uncover stronger/i)).toBeInTheDocument();
+
+    fireEvent.click(cta);
+    await waitFor(() => expect(onStartRecommended).toHaveBeenCalledTimes(1));
   });
 
   it("submits the manual focus/format form", async () => {
