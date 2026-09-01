@@ -224,9 +224,22 @@ function pickInterviewingOpportunity(activeOpportunities: Opportunity[]): Opport
   return candidates[0] ?? null;
 }
 
+/**
+ * Observation types that describe something the user already does WELL. They
+ * are never a practice target: design section 5.3 scopes this branch to
+ * reviewed weaknesses, and `formatForObservation`'s catch-all would otherwise
+ * route a confirmed strength to `targeted_drill` and render it to the user as
+ * "Work on: you consistently give clear architecture answers".
+ */
+const NON_ACTIONABLE_OBSERVATION_TYPES: ReadonlySet<CoachObservationType> = new Set([
+  "strength",
+  "story_strength",
+]);
+
 function pickReviewedObservation(observations: CoachObservation[]): CoachObservation | null {
   const candidates = observations
     .filter((observation) => (observation.reviewState === "confirmed" || observation.reviewState === "corrected")
+      && !NON_ACTIONABLE_OBSERVATION_TYPES.has(observation.observationType)
       && observation.importance >= REVIEWED_OBSERVATION_MIN_IMPORTANCE)
     .sort((left, right) => right.importance - left.importance || left.id.localeCompare(right.id));
   return candidates[0] ?? null;

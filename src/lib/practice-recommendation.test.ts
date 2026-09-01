@@ -207,6 +207,50 @@ describe("recommendPractice", () => {
     expect(result.format).toBe("full_simulation");
   });
 
+  /**
+   * A confirmed strength is not a practice target. Without a type filter the
+   * catch-all in `formatForObservation` routes it to `targeted_drill`, and the
+   * user is told to "Work on:" something they already do well.
+   */
+  it.each(["strength", "story_strength"] as const)(
+    "never lets a confirmed %s drive the recommendation",
+    (observationType) => {
+      const result = recommendPractice({
+        ...baseInput,
+        observations: [{
+          ...observation,
+          observationType,
+          reviewState: "confirmed",
+          importance: 0.95,
+          claim: "You consistently give clear architecture answers",
+        }],
+      });
+
+      expect(result.format).toBe("full_simulation");
+      expect(result.primaryFocus).not.toContain("You consistently give clear architecture answers");
+    },
+  );
+
+  it("still selects a lower-importance reviewed weakness over a confirmed strength", () => {
+    const result = recommendPractice({
+      ...baseInput,
+      observations: [
+        { ...observation, id: "observation-strength", observationType: "strength", reviewState: "confirmed", importance: 0.95 },
+        {
+          ...observation,
+          id: "observation-weakness",
+          observationType: "weakness",
+          reviewState: "confirmed",
+          importance: 0.7,
+          claim: "You skip the trade-off when you close an answer",
+        },
+      ],
+    });
+
+    expect(result.format).toBe("targeted_drill");
+    expect(result.primaryFocus).toContain("You skip the trade-off when you close an answer");
+  });
+
   it("maps a reviewed answer_habit/delivery_pattern observation to technical_communication by default", () => {
     const result = recommendPractice({
       ...baseInput,
