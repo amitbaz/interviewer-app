@@ -1888,6 +1888,34 @@ describe("generatePracticeBlueprint", () => {
     expect(blueprint.maxQuestions).toBeGreaterThan(2);
   });
 
+  it("constrains Gemini decoding with the blueprint schema so out-of-enum values cannot be returned", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+    // Without a response schema Gemini honours only the JSON mime type and
+    // invents plausible-but-invalid enum values (observed in production:
+    // `difficulty: "medium"`), which fails schema.parse on both the first and
+    // the repair attempt and silently degrades every session to the
+    // deterministic fallback blueprint.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: "{}" }] } }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    await generatePracticeBlueprint(
+      practiceProfile,
+      blueprintEvidence,
+      practicePlan({ format: "self_presentation" }),
+      practiceContext,
+    );
+
+    const payload = JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body));
+    const responseJsonSchema = payload.generationConfig.responseJsonSchema;
+    expect(payload.generationConfig.responseMimeType).toBe("application/json");
+    expect(responseJsonSchema.$schema).toBeUndefined();
+    expect(responseJsonSchema.properties.questions.items.properties.difficulty.enum)
+      .toEqual(["foundational", "intermediate", "senior", "advanced"]);
+    expect(responseJsonSchema.properties.questions.maxItems).toBe(5);
+  });
+
   it("keeps evidence ids traceable to candidate evidence when job-description requirements shape the prompt", async () => {
     vi.stubEnv("GEMINI_API_KEY", "private-test-key");
     vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");

@@ -649,14 +649,58 @@ function validateGroundedModelEvaluation(
     : { evaluation: normalized, trusted: true };
 }
 
+/**
+ * Converts a request schema into the JSON Schema Gemini enforces during
+ * decoding, cached per Zod schema because every `modelJson` call would
+ * otherwise re-convert the same object.
+ *
+ * `responseMimeType: "application/json"` alone only guarantees syntactically
+ * valid JSON, not our shape: the model routinely invents out-of-enum values
+ * (for example `difficulty: "medium"`), which `schema.parse` then rejects on
+ * both the first and the repair attempt, silently degrading every generator
+ * to its deterministic fallback. Sending the schema makes the provider
+ * constrain decoding instead.
+ *
+ * Returns null when a schema has no JSON Schema representation (Gemini then
+ * gets the prompt alone, as before) so an unconvertible schema degrades
+ * rather than throwing.
+ */
+const responseJsonSchemaCache = new WeakMap<z.ZodType, Record<string, unknown> | null>();
+
+function responseJsonSchemaFor(schema: z.ZodType): Record<string, unknown> | null {
+  const cached = responseJsonSchemaCache.get(schema);
+  if (cached !== undefined) return cached;
+  let converted: Record<string, unknown> | null = null;
+  try {
+    // `io: "input"` describes what the model must send: fields with a Zod
+    // `.default()` stay optional rather than becoming required output fields.
+    // The `$schema` dialect marker is dropped -- Gemini takes the schema body
+    // only.
+    const jsonSchema: Record<string, unknown> = z.toJSONSchema(schema, { io: "input" });
+    delete jsonSchema.$schema;
+    converted = jsonSchema;
+  } catch {
+    converted = null;
+  }
+  responseJsonSchemaCache.set(schema, converted);
+  return converted;
+}
+
 async function modelJson<T>(operation: string, prompt: string, schema: z.ZodType<T>): Promise<T | null> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return null;
   try {
     const model = geminiModel();
+    const responseJsonSchema = responseJsonSchemaFor(schema);
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
       method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: `${prompt}\nReturn only valid JSON.` }] }], generationConfig: { responseMimeType: "application/json" } }),
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: `${prompt}\nReturn only valid JSON.` }] }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          ...(responseJsonSchema ? { responseJsonSchema } : {}),
+        },
+      }),
       signal: AbortSignal.timeout(45_000),
     });
     if (!response.ok) {
@@ -676,8 +720,13 @@ async function modelJson<T>(operation: string, prompt: string, schema: z.ZodType
     }
     try {
       return schema.parse(JSON.parse(output));
-    } catch {
-      console.warn("[gemini] invalid model output", { operation, state: "unknown", status: response.status, model });
+    } catch (error) {
+      // Log the failing field paths and codes only -- never the model text or
+      // the parsed values, which carry candidate CV content.
+      const issues = error instanceof z.ZodError
+        ? error.issues.slice(0, 5).map((issue) => `${issue.path.join(".") || "<root>"}:${issue.code}`)
+        : ["<unparseable-json>"];
+      console.warn("[gemini] invalid model output", { operation, state: "unknown", status: response.status, model, issues });
       return null;
     }
   } catch (error) {
