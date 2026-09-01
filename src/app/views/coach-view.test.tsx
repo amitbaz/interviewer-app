@@ -160,4 +160,34 @@ describe("CoachView", () => {
     expect(screen.queryByRole("button", { name: /add observation/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /new observation/i })).not.toBeInTheDocument();
   });
+
+  // Design section 4.4 lists review state as its own field Coach must
+  // display, distinct from trend/type -- without it, an unreviewed and a
+  // confirmed observation render identically. This proves the two are
+  // actually distinguishable in the rendered output, per card, not just that
+  // *a* label string appears somewhere on the page.
+  it("shows each observation's review state, distinguishing unreviewed from confirmed", () => {
+    renderCoach([
+      observation({ id: "obs-unreviewed", claim: "Skips tradeoffs.", reviewState: "unreviewed", effectiveText: "Skips tradeoffs." }),
+      observation({ id: "obs-confirmed", claim: "Rushes through system design.", reviewState: "confirmed", confirmedAt: "2026-08-25T10:00:00.000Z", effectiveText: "Rushes through system design." }),
+    ]);
+
+    const unreviewedCard = screen.getByText("Skips tradeoffs.").closest("li");
+    const confirmedCard = screen.getByText("Rushes through system design.").closest("li");
+    if (!unreviewedCard || !confirmedCard) throw new Error("Expected both observation cards to render as <li> elements.");
+
+    expect(within(unreviewedCard).getByText("Unreviewed")).toBeInTheDocument();
+    expect(within(unreviewedCard).queryByText("Confirmed")).not.toBeInTheDocument();
+    expect(within(confirmedCard).getByText("Confirmed")).toBeInTheDocument();
+    expect(within(confirmedCard).queryByText("Unreviewed")).not.toBeInTheDocument();
+  });
+
+  // Mirrors StoriesView hiding "Confirm story" once a story is no longer a
+  // draft (stories-view.tsx:312) -- an already-confirmed observation should
+  // not silently accept a redundant re-confirm.
+  it("does not offer to confirm an already-confirmed observation", () => {
+    renderCoach([observation({ reviewState: "confirmed", confirmedAt: "2026-08-25T10:00:00.000Z" })]);
+
+    expect(screen.queryByRole("button", { name: "Confirm" })).not.toBeInTheDocument();
+  });
 });

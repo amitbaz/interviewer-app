@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useState } from "react";
-import type { CoachObservation, CoachObservationSummary, CoachObservationTrend, CoachObservationType } from "@/lib/types";
+import type { CoachObservation, CoachObservationReviewState, CoachObservationSummary, CoachObservationTrend, CoachObservationType } from "@/lib/types";
 
 /**
  * Props for {@link CoachView}. Follows the shell's mutation-callback pattern
@@ -45,6 +45,14 @@ const TREND_LABELS: Record<CoachObservationTrend, string> = {
   worsening: "Worsening",
 };
 
+/** Mirrors the `REVIEW_STATE_LABELS` pattern in `stories-view.tsx` -- design section 4.4 requires review state as its own displayed field, distinct from trend or type. */
+const REVIEW_STATE_LABELS: Record<CoachObservationReviewState, string> = {
+  unreviewed: "Unreviewed",
+  confirmed: "Confirmed",
+  corrected: "Corrected",
+  dismissed: "Dismissed",
+};
+
 const secondaryButtonClass = "rounded-full border border-[var(--line)] px-3 py-1.5 text-xs font-semibold disabled:opacity-50";
 const inputClass = "mt-1 w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none focus:border-[var(--pine)]";
 
@@ -68,7 +76,6 @@ function ObservationCard({
   const [correcting, setCorrecting] = useState(false);
   const [correction, setCorrection] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const isCorrected = item.reviewState === "corrected";
 
   async function confirm() {
     if (!onConfirm) return;
@@ -108,10 +115,9 @@ function ObservationCard({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[.1em] text-[var(--ink-muted)]">
-            {TYPE_LABELS[item.observationType]} · {TREND_LABELS[item.trend]}
+            <span>{TYPE_LABELS[item.observationType]}</span> · <span>{TREND_LABELS[item.trend]}</span> · <span>{REVIEW_STATE_LABELS[item.reviewState]}</span>
           </p>
           <p className="mt-1 text-sm leading-6">{item.effectiveText}</p>
-          {isCorrected && <p className="mt-1 text-xs text-[var(--ink-muted)]">Corrected by you</p>}
         </div>
         <p className="whitespace-nowrap text-xs text-[var(--ink-muted)]">
           {Math.round(item.confidence * 100)}% confidence · {Math.round(item.importance * 100)}% importance
@@ -143,7 +149,7 @@ function ObservationCard({
 
       {!readOnly && (
         <div className="mt-3 flex flex-wrap gap-2">
-          <button disabled={busy} onClick={confirm} className={secondaryButtonClass}>Confirm</button>
+          {item.reviewState !== "confirmed" && <button disabled={busy} onClick={confirm} className={secondaryButtonClass}>Confirm</button>}
           <button disabled={busy} onClick={() => { setCorrecting((current) => !current); setError(null); }} className={secondaryButtonClass}>Correct</button>
           <button disabled={busy} onClick={dismiss} className={secondaryButtonClass}>Dismiss</button>
         </div>
@@ -164,12 +170,16 @@ function ObservationCard({
 /**
  * Coach: the inspectable long-term-memory review surface (design section 4.4).
  * Every observation shows its current effective guidance (the user's
- * correction when corrected, otherwise the original claim), its type and
- * trend, confidence/importance in a restrained secondary presentation, and an
- * expandable `Why does Relay think this?` detail that always keeps the
- * original claim and supporting evidence visible -- even once corrected.
- * Confirm/Correct/Dismiss are the complete review surface; Release 2 never
- * lets the browser create or reconcile an observation.
+ * correction when corrected, otherwise the original claim), its type, trend,
+ * and review state (Unreviewed/Confirmed/Corrected/Dismissed -- so an
+ * observation the user has already acted on is visibly distinct from one
+ * they haven't), confidence/importance in a restrained secondary
+ * presentation, and an expandable `Why does Relay think this?` detail that
+ * always keeps the original claim and supporting evidence visible -- even
+ * once corrected. Confirm/Correct/Dismiss are the complete review surface
+ * (Confirm hides itself once already confirmed, matching
+ * `StoriesView`'s "Confirm story"); Release 2 never lets the browser create
+ * or reconcile an observation.
  */
 export function CoachView({ active, history, busy, onConfirm, onCorrect, onDismiss }: CoachViewProps) {
   const isEmpty = active.length === 0 && history.length === 0;
