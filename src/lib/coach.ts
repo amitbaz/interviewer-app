@@ -448,7 +448,21 @@ function supportedClaims(answerSentences: string[], question: BlueprintQuestion,
   }).slice(0, 3);
 }
 
+/**
+ * True when `question` has a persisted source-evidence target. A `discovery`
+ * question from `buildExperienceDiscoveryBlueprint` (spec §8) intentionally
+ * carries `evidenceIds: []`: the candidate's answer to it IS the source
+ * evidence, newly supplied in this session rather than read from the CV. A
+ * career detail can only be "unsupported" relative to evidence the question
+ * actually targets, so callers must skip unsupported-claim detection when
+ * this returns false. Keyed strictly on `evidenceIds` -- no other signal.
+ */
+function hasSourceEvidenceTarget(question: BlueprintQuestion): boolean {
+  return question.evidenceIds.length > 0;
+}
+
 function unsupportedClaims(answerSentences: string[], question: BlueprintQuestion, signals: string[]): string[] {
+  if (!hasSourceEvidenceTarget(question)) return [];
   const rubricTokens = questionTokens(question);
   return answerSentences.filter((sentence) => {
     if (!sentence) return false;
@@ -598,7 +612,13 @@ function groundedModelEvaluation(
       .filter((claim) => claimMatchesAnswer(claim, answerSentences, question))
       .slice(0, 3),
     expectedSignalsPresent: normalized.expectedSignalsPresent.slice(0, question.expectedSignals.length),
-    unsupportedClaims: normalized.unsupportedClaims.slice(0, 3),
+    // A discovery question (no evidenceIds) has no source evidence to be
+    // "unsupported" against -- the candidate's answer supplies it. Discard
+    // whatever the model returned there rather than trust its judgment; see
+    // `hasSourceEvidenceTarget`.
+    unsupportedClaims: hasSourceEvidenceTarget(question)
+      ? normalized.unsupportedClaims.slice(0, 3)
+      : [],
   };
 }
 
@@ -1437,6 +1457,9 @@ function turnPrompt(
     "Return only valid JSON.",
     "Ground the scoring in the exact question objective, expected signals, and the candidate's answer.",
     "Do not praise, coach, reveal scores, or invent facts.",
+    hasSourceEvidenceTarget(question)
+      ? ""
+      : "Grounding rule: question.evidenceIds is empty, so this is a discovery/general objective. Treat first-person career details in the candidate's answer as newly supplied session evidence. Do not mark them unsupported merely because they were absent from the source profile. Never invent missing details; improved answers may only reuse facts actually supplied by the candidate or already grounded by the question context.",
     "If shouldFollowUp is true, the question must probe the answered plan without changing its objective.",
     "If shouldFollowUp is false, the question should ask the supplied next plan without changing its objective or evidence target.",
     `Question: ${JSON.stringify(question)}`,
