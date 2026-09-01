@@ -4,7 +4,6 @@ import type {
   InterviewBlueprint,
   InterviewSession,
   Opportunity,
-  PlannedQuestion,
   PracticePlan,
   PracticePlanStatus,
   PracticeRecommendation,
@@ -178,21 +177,6 @@ const blueprint: InterviewBlueprint = {
   createdAt: "2026-08-31T09:00:00.000Z",
   questions: [],
 };
-
-function question(sequence: number, answer: string | null, isFollowUp = false): PlannedQuestion {
-  return {
-    id: `question-${sequence}`,
-    sequence,
-    category: "experience",
-    competencyId: null,
-    competencyName: null,
-    difficulty: "senior",
-    isFollowUp,
-    prompt: `Question ${sequence}`,
-    answer,
-    createdAt: "2026-08-31T09:00:00.000Z",
-  };
-}
 
 function session(overrides: Partial<InterviewSession> = {}): InterviewSession {
   return {

@@ -317,6 +317,17 @@ export function ApplicationsView({ opportunities, busy, onCreate, onUpdate, onTr
                   <div>
                     <h2 className="text-2xl font-semibold">{selected.company}</h2>
                     <p className="text-[var(--ink-muted)]">{selected.role}</p>
+                    {selected.location && <p className="mt-1 text-sm text-[var(--ink-muted)]">{selected.location}</p>}
+                    {selected.jobUrl && (
+                      <a
+                        href={selected.jobUrl}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="mt-1 inline-block break-all text-sm font-semibold text-[var(--pine)] underline"
+                      >
+                        Open job posting
+                      </a>
+                    )}
                   </div>
                   <button onClick={() => { setEditDraft(draftFromOpportunity(selected)); setEditing(true); }} className={secondaryButtonClass}>
                     Edit details

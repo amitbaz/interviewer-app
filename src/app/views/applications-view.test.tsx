@@ -147,6 +147,31 @@ describe("ApplicationsView", () => {
     expect(screen.getByText("Own the checkout platform end to end.")).toBeInTheDocument();
   });
 
+  /**
+   * Design section 4.2 requires the detail panel to "open the job URL when
+   * present". Both fields were editable and persisted but never rendered, so a
+   * user could record a posting URL and then had no way to reach it.
+   */
+  it("renders the location and an openable job URL in the detail panel", () => {
+    renderApplications([opportunity({ location: "Berlin, hybrid", jobUrl: "https://jobs.example.com/staff-engineer" })]);
+
+    fireEvent.click(screen.getByRole("button", { name: /Northwind.*Staff Engineer/ }));
+
+    expect(screen.getByText("Berlin, hybrid")).toBeInTheDocument();
+    const link = screen.getByRole("link", { name: "Open job posting" });
+    expect(link).toHaveAttribute("href", "https://jobs.example.com/staff-engineer");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", expect.stringContaining("noopener"));
+  });
+
+  it("omits the job URL affordance when no URL is recorded", () => {
+    renderApplications([opportunity({ jobUrl: null })]);
+
+    fireEvent.click(screen.getByRole("button", { name: /Northwind.*Staff Engineer/ }));
+
+    expect(screen.queryByRole("link", { name: "Open job posting" })).not.toBeInTheDocument();
+  });
+
   it("transitions an opportunity to the next lifecycle status", async () => {
     const { onTransition } = renderApplications([opportunity({ status: "considering" })]);
 
