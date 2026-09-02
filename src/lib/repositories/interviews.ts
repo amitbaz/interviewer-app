@@ -2,16 +2,21 @@ import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type {
+  AssistanceRecord,
   BlueprintQuestion,
+  CoverageTarget,
   Evaluation,
   FollowUpDraft,
   HandsOnCheckpoint,
   HandsOnExercise,
+  Intent,
   InterviewBlueprint,
+  InterviewMode,
   InterviewSession,
   Message,
   PlannedQuestion,
   PracticeSessionContext,
+  RoundId,
   SessionCareerContext,
 } from "@/lib/types";
 import { RepositoryError } from "@/lib/repositories/profile";
@@ -76,9 +81,13 @@ function mapQuestion(row: Row, competencyNames: Map<string, string>): PlannedQue
     competencyName,
     difficulty: row.difficulty as PlannedQuestion["difficulty"],
     isFollowUp: Boolean(row.is_follow_up),
-    prompt: stringValue(row.prompt),
+    /** Null until the interviewer authors it at reveal time (spec §9.1). */
+    prompt: stringValue(row.prompt) || null,
     answer: typeof row.answer === "string" ? row.answer : null,
     createdAt: stringValue(row.created_at),
+    askedIntent: (row.asked_intent as Intent | null) ?? null,
+    assistance: Array.isArray(row.assistance) ? (row.assistance as AssistanceRecord[]) : [],
+    nonAnswer: row.non_answer === true,
     objective: typeof row.objective === "string" && row.objective.trim() ? row.objective.trim() : undefined,
     evidenceIds: stringArray(row.evidence_ids),
     expectedSignals: stringArray(row.expected_signals),
@@ -179,7 +188,9 @@ function transcriptFor(questions: PlannedQuestion[], answerTimes: Map<string, st
     const interviewer = {
       id: `${question.id}:question`,
       role: "interviewer" as const,
-      content: question.prompt,
+      // Null until the interviewer authors it (revealFirstQuestion or a
+      // later turn); render an empty bubble rather than widen Message.
+      content: question.prompt ?? "",
       createdAt: question.createdAt,
     };
     if (!question.answer) return [interviewer];
@@ -235,6 +246,35 @@ export function mapSession(
     .sort((left, right) => Number(left.sequence ?? 0) - Number(right.sequence ?? 0))
     .map((question) => mapBlueprintQuestion(question, competencyNames))
     .filter((question): question is BlueprintQuestion => question !== null);
+  /**
+   * Reconstructs each coverage target directly from its own
+   * `interview_questions` row, using the row's database `id` as the
+   * target's `id`. This is the SAME id at creation time and on every later
+   * reload (a row's primary key never changes), which is what lets
+   * `deriveCoverageState` keep matching a persisted `askedIntent.targetId`
+   * against this array's targets after the session round-trips through the
+   * database on every stateless turn (spec §9.2). Follow-up rows never
+   * become targets -- they carry a `parent_question_id` and are inserted by
+   * `record_conversation_turn`, not by the target-creating blueprint RPC.
+   */
+  const targets: CoverageTarget[] = [...questionRows]
+    .sort((left, right) => Number(left.sequence ?? 0) - Number(right.sequence ?? 0))
+    .filter((questionRow) => !questionRow.is_follow_up)
+    .map((questionRow) => {
+      const question = mapQuestion(questionRow, competencyNames);
+      return {
+        id: question.id,
+        competencyId: question.competencyId,
+        competencyName: question.competencyName,
+        category: question.category,
+        evidenceIds: question.evidenceIds ?? [],
+        difficulty: question.difficulty,
+        objective: question.objective ?? "",
+        expectedSignals: question.expectedSignals ?? [],
+        rubricCriteria: question.rubricCriteria ?? [],
+        required: questionRow.required === true,
+      };
+    });
   const answerTimes = new Map(questionRows.map((question) => [
     stringValue(question.id),
     typeof question.answered_at === "string" ? question.answered_at : stringValue(question.created_at),
@@ -252,6 +292,7 @@ export function mapSession(
     return mapEvaluation(evaluation, question ?? {
       id: "", sequence: 0, category: "communication", competencyId: null, competencyName: null,
       difficulty: "foundational", isFollowUp: false, prompt: "", answer: null, createdAt: "",
+      askedIntent: null, assistance: [], nonAnswer: false,
     });
     });
   const checkpoints = [...checkpointRows]
@@ -262,6 +303,8 @@ export function mapSession(
     ...sessionEvaluationRows.map((evaluation) => mapSessionEvaluation(evaluation, competencyNames)),
   ];
   const kind = row.kind === "hands-on" ? "hands-on" : "conversation";
+  const roundId = (stringValue(row.round_id) || "tech-lead") as RoundId;
+  const mode = (stringValue(row.mode) || "real") as InterviewMode;
   const blueprintMaxFollowUps = row.blueprint_max_follow_ups === null || row.blueprint_max_follow_ups === undefined
     ? 3
     : Number(row.blueprint_max_follow_ups);
@@ -287,6 +330,13 @@ export function mapSession(
       maxQuestions: Number.isFinite(blueprintMaxQuestions) ? blueprintMaxQuestions : 8,
       createdAt: stringValue(row.created_at),
       questions: blueprintQuestions,
+      roundId,
+      // Fixed by `generateInterviewBlueprint` (spec §9.1) and never persisted
+      // as its own column -- every blueprint this release creates uses the
+      // same turn budget, so reconstructing it as a constant is exact, not
+      // a guess.
+      turnBudget: 8,
+      targets,
     } satisfies InterviewBlueprint
     : null;
 
@@ -294,7 +344,10 @@ export function mapSession(
     id: stringValue(row.id),
     userId: stringValue(row.user_id),
     kind,
+    roundId,
+    mode,
     status: row.status === "complete" ? "complete" : "active",
+    degraded: row.degraded === true,
     startedAt: stringValue(row.started_at),
     completedAt: typeof row.completed_at === "string" ? row.completed_at : null,
     exercise: jsonRecord(row.exercise),
@@ -439,35 +492,50 @@ export async function createSessionWithPlan(
 }
 
 /**
- * Persists the full five-question blueprint before the interview starts so
- * later turns can reuse the exact objective and evidence targets.
+ * Persists a round's coverage targets before the interview starts, one
+ * `interview_questions` row per target (via `p_blueprint.targets`), so later
+ * turns can reuse the exact objective and evidence targets and so a reload
+ * can reconstruct `blueprint.targets` with stable ids (see `mapSession`).
+ *
+ * `options` carries only `roundId`/`mode` -- deliberately not
+ * `opportunityId`. Setting Career Brain context is `linkSessionCareerContext`'s
+ * job alone (see its doc comment): no session-creation function ever writes
+ * `opportunity_id`, so this one does not gain that parameter either.
+ *
+ * `assertConversationPlan(blueprint.questions)` still runs first as a cheap
+ * legacy sanity check -- every blueprint this release produces still carries
+ * the same five-entry backbone shape in `questions` (now with `prompt: null`)
+ * alongside the real `targets` payload below.
  */
 export async function createSessionWithBlueprint(
   supabase: SupabaseClient,
   userId: string,
   blueprint: InterviewBlueprint,
+  options: { roundId: RoundId; mode: InterviewMode },
 ): Promise<InterviewSession> {
   assertConversationPlan(blueprint.questions);
   const { data, error } = await supabase.rpc("create_conversation_session_with_blueprint", {
     p_blueprint: {
+      roundId: options.roundId,
+      mode: options.mode,
       status: blueprint.status,
       fallback_reason: blueprint.fallbackReason,
       max_follow_ups: blueprint.maxFollowUps,
       max_questions: blueprint.maxQuestions,
-      questions: blueprint.questions.map((question) => ({
-        sequence: question.sequence,
-        category: question.category,
-        competency_id: persistableCompetencyId(question.competencyId),
-        competency_name: question.competencyName ?? null,
-        difficulty: question.difficulty,
-        prompt: question.prompt,
-        objective: question.objective,
-        evidence_ids: question.evidenceIds,
-        expected_signals: question.expectedSignals,
-        missing_signal_prompts: question.missingSignalPrompts,
-        rubric_criteria: question.rubricCriteria ?? [],
-        follow_up_limit: question.followUpLimit,
-        source_confidence: question.sourceConfidence,
+      targets: blueprint.targets.map((target, index) => ({
+        sequence: index + 1,
+        category: target.category,
+        competency_id: persistableCompetencyId(target.competencyId),
+        competency_name: target.competencyName ?? null,
+        difficulty: target.difficulty,
+        objective: target.objective,
+        evidence_ids: target.evidenceIds,
+        expected_signals: target.expectedSignals,
+        missing_signal_prompts: [],
+        rubric_criteria: target.rubricCriteria,
+        follow_up_limit: 0,
+        source_confidence: null,
+        required: target.required,
       })),
     },
   });
@@ -605,6 +673,14 @@ export type ConversationTurnPersistence = {
   nextQuestionId: string | null;
   nextPrompt: string | null;
   followUp: FollowUpDraft | null;
+  /** The director intent the just-answered question was asked under. */
+  askedIntent: Intent | null;
+  /** Every rescue actually granted on the just-answered question this turn. */
+  assistance: AssistanceRecord[];
+  /** True when the candidate did not attempt the question; skips scoring. */
+  nonAnswer: boolean;
+  /** True when this turn fell back to a deterministic evaluation or line. */
+  degraded: boolean;
 };
 
 /** Atomically records answer evidence and persists the exact next interviewer question. */
@@ -630,6 +706,10 @@ export async function recordConversationTurn(
     p_next_question_id: next.nextQuestionId,
     p_next_prompt: next.nextPrompt,
     p_follow_up: next.followUp,
+    p_asked_intent: next.askedIntent,
+    p_assistance: next.assistance,
+    p_non_answer: next.nonAnswer,
+    p_degraded: next.degraded,
   });
   if (error || !data) throw new RepositoryError("Could not record your interview turn.", error?.code ?? "NO_OWNED_ROW");
   const result = Array.isArray(data) ? data[0] as Row | undefined : data as Row;
@@ -638,6 +718,56 @@ export async function recordConversationTurn(
   const session = await getSession(supabase, userId, sessionId);
   if (!session) throw new RepositoryError("Could not reload the updated interview session.", "NO_OWNED_ROW");
   return session;
+}
+
+/**
+ * Writes the interviewer's opening line onto the first question row. The
+ * blueprint creates rows with a null prompt (spec §9.1), so a session is not
+ * showable until this runs. A direct table write scoped by both `id` and
+ * `user_id` -- the same pattern `completeSession` and
+ * `linkSessionCareerContext` already use for owned-row writes elsewhere in
+ * this file -- backed by `interview_questions`' `update_own` RLS policy.
+ */
+export async function revealFirstQuestion(
+  supabase: SupabaseClient,
+  userId: string,
+  session: InterviewSession,
+  opening: { intent: Intent; prompt: string; targetId: string },
+): Promise<InterviewSession> {
+  const first = session.questions.find((question) => question.answer === null);
+  if (!first) throw new RepositoryError("The new interview has no question to reveal.", "NO_OWNED_ROW");
+  const { error } = await supabase
+    .from("interview_questions")
+    .update({ prompt: opening.prompt, asked_intent: opening.intent, asked_at: new Date().toISOString() })
+    .eq("id", first.id)
+    .eq("user_id", userId);
+  if (error) throw new RepositoryError("Could not start your interview.", error.code);
+  const refreshed = await getSession(supabase, userId, session.id);
+  if (!refreshed) throw new RepositoryError("Could not reload the new interview session.", "NO_OWNED_ROW");
+  return refreshed;
+}
+
+/**
+ * Maps a coverage target to the question row that will carry it.
+ *
+ * Every target reconstructed by `mapSession` uses its own question row's
+ * database id as `target.id` (see that function's doc comment), and every
+ * `Intent.targetId` the director produces comes from that same reconstructed
+ * target list. So for any `targetId` this is actually called with, it IS a
+ * question row id already -- the direct lookup below is exact, not a guess,
+ * and returns null (rather than misrouting to a different row) whenever
+ * that row does not exist or is no longer unanswered.
+ *
+ * This deliberately does not fall back to matching by `competencyName`: a
+ * round can and does probe the same competency through more than one
+ * target (`buildCoverageTargets` in `interview-planner.ts` assigns several
+ * targets the same `competencyName` whenever a candidate has more relevant
+ * competencies than backbone slots), so a name-based fallback could silently
+ * hand the authored prompt to the wrong unanswered row instead of failing
+ * loudly.
+ */
+export function questionIdForTarget(session: InterviewSession, targetId: string): string | null {
+  return session.questions.find((question) => question.id === targetId && question.answer === null)?.id ?? null;
 }
 
 export async function saveHandsOnCheckpoint(
