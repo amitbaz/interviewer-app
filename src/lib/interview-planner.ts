@@ -1,14 +1,18 @@
+import { roundFor } from "@/lib/interview-rounds";
 import type {
   BlueprintQuestion,
   Competency,
   CompetencyScope,
+  CoverageTarget,
   Difficulty,
   EvidenceItem,
   InterviewBlueprint,
+  Opportunity,
   PlannedQuestion,
   ProfileDraft,
   ProfileReadiness,
   QuestionCategory,
+  RoundId,
 } from "@/lib/types";
 
 const difficulties: Difficulty[] = ["foundational", "intermediate", "senior", "advanced"];
@@ -20,13 +24,6 @@ const discoveryCategories: QuestionCategory[] = ["introduction", "experience", "
 const plannerTimestamp = "1970-01-01T00:00:00.000Z";
 const defaultMaxFollowUps = 3;
 const defaultMaxQuestions = 8;
-
-function roleDescriptor(role: string | null): string {
-  const normalized = role?.trim().toLowerCase();
-  if (!normalized) return "engineering";
-  if (normalized.includes("software engineer")) return "engineering";
-  return normalized.replace(/\b(engineer|developer)\b/g, "").replace(/\s+/g, " ").trim() || "engineering";
-}
 
 function normalizedSeniority(seniority: string): Difficulty {
   const value = seniority.toLowerCase();
@@ -89,22 +86,6 @@ function selectCompetency(
   const candidates = categoryMatches.length ? categoryMatches : eligible;
 
   return [...candidates].sort((left, right) => priority(right, referenceTime) - priority(left, referenceTime) || left.id.localeCompare(right.id))[0] ?? null;
-}
-
-function promptFor(category: QuestionCategory, competency: Competency | null): string {
-  const subject = competency?.name ?? "your recent work";
-  const templates: Record<QuestionCategory, string> = {
-    introduction: "Give me a concise introduction to yourself and the engineering work you have owned recently.",
-    experience: `Tell me about a meaningful project involving ${subject}. What was your role and impact?`,
-    technical: `Walk me through a technical decision involving ${subject}. What trade-offs did you consider?`,
-    practical: `Describe how you would apply ${subject} to a realistic delivery constraint.`,
-    architecture: `Design an approach involving ${subject}. Start with the requirements you would clarify.`,
-    "system-design": `Design a system involving ${subject}. Start with the requirements you would clarify.`,
-    behavioral: `Tell me about a collaboration challenge related to ${subject}. How did you make progress?`,
-    communication: `Explain a complex ${subject} decision to a non-specialist stakeholder.`,
-  };
-
-  return templates[category];
 }
 
 function categorySignals(category: QuestionCategory): string[] {
@@ -250,7 +231,10 @@ function scoreCompetencyForCategory(
     competencyName: competency.name,
     difficulty: chooseDifficulty(competency, competency.expectedLevel),
     isFollowUp: false,
-    prompt: promptFor(category, competency),
+    // Prompt text is authored live by the interviewer call (spec §9.1); this
+    // synthetic question exists only to score evidence relevance, never to
+    // be shown, so it carries no prompt.
+    prompt: null,
     answer: null,
     createdAt: plannerTimestamp,
   };
@@ -264,7 +248,6 @@ function fallbackQuestionPlan(
   competencies: Competency[],
   seniority: string,
   evidence: EvidenceItem[],
-  role: string | null,
 ): PlannedQuestion {
   const candidates = fallbackCandidateCompetencies(category, competencies);
   const selected = [...candidates].sort((left, right) => {
@@ -282,9 +265,8 @@ function fallbackQuestionPlan(
     competencyName: selected?.name ?? null,
     difficulty: selected ? chooseDifficulty(selected, seniority) : normalizedSeniority(seniority),
     isFollowUp: false,
-    prompt: category === "introduction"
-      ? `Give me a concise introduction to yourself and the ${roleDescriptor(role)} work you have owned recently.`
-      : promptFor(category, selected),
+    // Prompt text is authored live by the interviewer call, not pre-written here (spec §9.1).
+    prompt: null,
     answer: null,
     createdAt: plannerTimestamp,
   };
@@ -298,24 +280,6 @@ function blueprintObjective(category: QuestionCategory, competencyName: string |
   if (category === "technical") return `${prefix} the core technical decision behind ${subject}.`;
   if (category === "architecture") return `${prefix} system design choices around ${subject}.`;
   return `${prefix} collaboration and delivery around ${subject}.`;
-}
-
-function blueprintPrompt(question: PlannedQuestion, item: EvidenceItem | null, role: string | null): string {
-  const subject = item?.projectOrEmployer ?? question.competencyName ?? "your recent engineering work";
-  if (question.category === "introduction") {
-    return `Give me a concise introduction to yourself and the ${roleDescriptor(role)} work you have owned recently.`;
-  }
-  if (question.category === "experience") {
-    return `Tell me about ${subject}. What was your role, what decision did you own, and what changed because of it?`;
-  }
-  if (question.category === "technical") {
-    const decision = item?.decision ?? "technical decision";
-    return `Walk me through the ${decision} on ${subject}. What trade-offs did you consider?`;
-  }
-  if (question.category === "architecture") {
-    return `How did you shape the approach for ${subject}? Start with the requirements and constraints you clarified.`;
-  }
-  return `How did you align the team around ${subject}? What disagreement or delivery challenge did you handle?`;
 }
 
 function evidenceForQuestion(question: PlannedQuestion, evidence: EvidenceItem[]): EvidenceItem | null {
@@ -342,10 +306,10 @@ function defaultBlueprintQuestion(
 ): BlueprintQuestion {
   const evidenceIds = item ? [item.id] : [];
   const competencyName = planned.competencyName;
-  const prompt = blueprintPrompt(planned, item, null);
   return {
+    // `planned.prompt` is already null: prompt text is authored live by the
+    // interviewer call, not pre-written here (spec §9.1).
     ...planned,
-    prompt,
     objective: blueprintObjective(planned.category, competencyName, item),
     evidenceIds,
     expectedSignals: categorySignals(planned.category),
@@ -391,19 +355,27 @@ export function buildInterviewPlan(
       competencyName: competency?.name ?? null,
       difficulty: competency ? chooseDifficulty(competency, seniority) : normalizedSeniority(seniority),
       isFollowUp: false,
-      prompt: category === "introduction"
-        ? "Give me a concise introduction to yourself and the engineering work you have owned recently."
-        : promptFor(category, competency),
+      // Prompt text is authored live by the interviewer call, not pre-written here (spec §9.1).
+      prompt: null,
       answer: null,
       createdAt: plannerTimestamp,
     };
   });
 }
 
-/** Ensures an AI-generated blueprint uses the exact backbone and only owned evidence ids. */
+/**
+ * Ensures an AI-generated blueprint uses the exact legacy backbone and only
+ * owned evidence ids, and that its coverage targets (spec §9.1) are usable by
+ * the director: at least one, each with rubric material, unique ids, and at
+ * least one marked `required` so a round always has an opening move.
+ *
+ * `evidence` defaults to `[]` so callers validating a blueprint purely for its
+ * coverage-target shape (no legacy evidence-anchored questions in play) don't
+ * need to thread it through.
+ */
 export function validateInterviewBlueprint(
   blueprint: InterviewBlueprint,
-  evidence: EvidenceItem[],
+  evidence: EvidenceItem[] = [],
 ): InterviewBlueprint {
   if (blueprint.questions.length !== categories.length) {
     throw new Error("Interview blueprint must contain the exact five-question backbone.");
@@ -422,7 +394,6 @@ export function validateInterviewBlueprint(
       throw new Error("Interview blueprint must preserve the exact five-question backbone.");
     }
     if (!question.objective.trim()) throw new Error("Interview blueprint questions need an objective.");
-    if (!question.prompt.trim()) throw new Error("Interview blueprint questions need prompt text.");
     if (!question.expectedSignals.length) throw new Error("Interview blueprint questions need expected signals.");
     if (!question.missingSignalPrompts.length) throw new Error("Interview blueprint questions need missing-signal prompts.");
     if (!question.rubricCriteria?.length) throw new Error("Interview blueprint questions need scoring criteria.");
@@ -445,7 +416,85 @@ export function validateInterviewBlueprint(
     throw new Error("Interview blueprint exceeds the total follow-up budget.");
   }
 
+  if (blueprint.targets.length === 0) throw new Error("An interview blueprint needs at least one coverage target.");
+  if (!blueprint.targets.some((target) => target.required)) {
+    throw new Error("An interview blueprint needs at least one required coverage target.");
+  }
+  if (new Set(blueprint.targets.map((target) => target.id)).size !== blueprint.targets.length) {
+    throw new Error("Interview blueprint coverage targets need unique ids.");
+  }
+  for (const target of blueprint.targets) {
+    if (!target.rubricCriteria.length) throw new Error("Every coverage target needs rubric criteria.");
+  }
+
   return blueprint;
+}
+
+/**
+ * Builds what the round must find out, not what it will say. Prompt text is
+ * authored live by the interviewer call (spec §9.1).
+ *
+ * When anchored to an opportunity, every gap becomes a required target: a tech
+ * lead's real agenda is the places the candidate looks thin against the spec,
+ * and that list is already computed.
+ *
+ * Every target carries a 3-element `expectedSignals` array. This is load-bearing,
+ * not incidental: `deriveCoverageState`'s `statusFor` (`src/lib/interview-coverage.ts`)
+ * can never mark a target `satisfied` when `expectedSignals` is empty, so an
+ * empty array would strand that target open for the rest of the round.
+ */
+export function buildCoverageTargets(
+  profile: Pick<ProfileDraft, "role" | "competencies">,
+  evidence: EvidenceItem[],
+  opportunity: Pick<Opportunity, "gaps" | "jobDescription"> | null,
+  roundId: RoundId,
+): CoverageTarget[] {
+  const round = roundFor(roundId);
+  const gapTargets: CoverageTarget[] = (opportunity?.gaps ?? []).map((gap, index) => ({
+    id: `gap-${index}`,
+    competencyId: null,
+    competencyName: gap,
+    category: "experience",
+    evidenceIds: [],
+    difficulty: "senior",
+    objective: `Establish whether the candidate has real experience with ${gap}.`,
+    expectedSignals: [gap, "ownership", "outcome"],
+    rubricCriteria: [
+      `Name a concrete example involving ${gap}.`,
+      "Describe the decision they personally made.",
+      "Explain the outcome or trade-off.",
+    ],
+    required: true,
+  }));
+
+  const competencyTargets: CoverageTarget[] = [...profile.competencies]
+    .sort((left, right) => right.relevance - left.relevance)
+    .slice(0, Math.max(1, 5 - gapTargets.length))
+    .map((competency, index) => ({
+      id: `competency-${index}`,
+      // ProfileDraft's competency scope carries only a name and relevance, no
+      // stable id, so this stays null until a real Competency is threaded through.
+      competencyId: null,
+      competencyName: competency.name,
+      category: "experience",
+      evidenceIds: evidence
+        .filter((item) => item.technologies.some((tech) => competency.name.toLowerCase().includes(tech.toLowerCase())))
+        .map((item) => item.id),
+      difficulty: "senior",
+      objective: `Establish the candidate's real ownership within ${competency.name}.`,
+      expectedSignals: [competency.name, "ownership", "outcome"],
+      rubricCriteria: [
+        `Name a concrete example from ${competency.name}.`,
+        "Describe the ownership or decision involved.",
+        "Explain the outcome or trade-off.",
+      ],
+      required: index === 0,
+    }));
+
+  const all = [...gapTargets, ...competencyTargets];
+  // A round with no repertoire for a category cannot cover it; drop rather than
+  // plan something the director may never issue.
+  return round.moves.includes("open") ? all : [];
 }
 
 /**
@@ -467,7 +516,6 @@ export function buildFallbackInterviewBlueprint(
     competencies,
     seniority,
     evidence,
-    profile.role ?? null,
   ));
   return {
     status: "limited-grounding",
@@ -494,29 +542,6 @@ export function appendFollowUp(plan: PlannedQuestion[], followUp: PlannedQuestio
 function selectDiscoveryScopeName(competencies: CompetencyScope[]): string | null {
   if (!competencies.length) return null;
   return [...competencies].sort((left, right) => right.relevance - left.relevance || left.name.localeCompare(right.name))[0].name;
-}
-
-/**
- * Discovery-oriented prompt text. Unlike `blueprintPrompt`, these prompts
- * never reference evidence-derived facts (project names, ownership,
- * decisions, outcomes) -- the whole point of discovery is to surface those
- * facts from the candidate's answer rather than assume them up front.
- */
-function discoveryPrompt(category: QuestionCategory, role: string | null, subject: string): string {
-  switch (category) {
-    case "introduction":
-      return `Give me a concise introduction to yourself and the ${roleDescriptor(role)} work you have mainly been doing recently. You do not need a polished story yet.`;
-    case "experience":
-      return "Think of one piece of work you remember clearly, even if it does not feel like a strong interview story yet. What was happening, and what part were you personally responsible for?";
-    case "technical":
-      return `Choose one real technical problem or decision from your work${subject ? ` involving ${subject}` : ""}. What options or constraints shaped what you did?`;
-    case "architecture":
-      return "Think of a real feature, system, or project you worked on. What requirements or constraints mattered most, and how did the technical approach take shape?";
-    case "behavioral":
-      return "Think of a time collaboration, ambiguity, disagreement, or delivery pressure made the work harder. What did you do, and what happened next?";
-    default:
-      return `Tell me about a real example from your ${roleDescriptor(role)} work.`;
-  }
 }
 
 /**
@@ -631,7 +656,8 @@ export function buildExperienceDiscoveryBlueprint(
       competencyName: category === "introduction" ? null : selectedScopeName,
       difficulty: normalizedSeniority(profile.seniority ?? ""),
       isFollowUp: false,
-      prompt: discoveryPrompt(category, profile.role, selectedScopeName ?? ""),
+      // Prompt text is authored live by the interviewer call (spec §9.1).
+      prompt: null,
       answer: null,
       createdAt,
       objective: discoveryObjective(category),

@@ -5,7 +5,7 @@ import { applyEvaluation } from "@/lib/competencies";
 import { geminiFailureState, geminiModel, geminiRequestError } from "@/lib/gemini";
 import { deriveCoverageState, rescuesSpentInSession, targetIdOf } from "@/lib/interview-coverage";
 import { decideIntent } from "@/lib/interview-director";
-import { buildExperienceDiscoveryBlueprint, buildFallbackInterviewBlueprint, validateInterviewBlueprint } from "@/lib/interview-planner";
+import { buildCoverageTargets, buildExperienceDiscoveryBlueprint, buildFallbackInterviewBlueprint, validateInterviewBlueprint } from "@/lib/interview-planner";
 import { modePolicyFor, roundFor } from "@/lib/interview-rounds";
 import type { InterviewRound } from "@/lib/interview-rounds";
 import { deterministicLine, validateInterviewerLine } from "@/lib/interviewer-voice";
@@ -35,6 +35,7 @@ import type {
   ProfileReadiness,
   QuestionCategory,
   RescueStyle,
+  RoundId,
   GroundedEvaluation,
 } from "@/lib/types";
 
@@ -920,23 +921,40 @@ export async function extractEngineeringEvidence(cvText: string, coverLetter: st
 }
 
 /**
- * Generates the persisted five-question interview blueprint from the validated
- * profile and extracted evidence. `assessProfileReadiness(evidence)` is the
- * single decision point: when the profile lacks enough source-backed detail,
- * this returns a deterministic discovery blueprint (`buildExperienceDiscoveryBlueprint`)
+ * Generates the persisted interview blueprint from the validated profile and
+ * extracted evidence. `assessProfileReadiness(evidence)` is the single
+ * decision point: when the profile lacks enough source-backed detail, this
+ * returns a deterministic discovery blueprint (`buildExperienceDiscoveryBlueprint`)
  * with zero model calls. Otherwise it asks the model for a grounded blueprint,
  * retries once on malformed or unsupported output, then falls back to a
  * deterministic limited-grounding plan (`buildFallbackInterviewBlueprint`) if
  * both attempts fail.
+ *
+ * `options.roundId` and `options.opportunity` drive the coverage plan (spec
+ * §9.1): every blueprint this function returns -- whichever of the three
+ * strategies above produced it -- carries `roundId`, a fixed `turnBudget` of
+ * 8, and `targets` computed once from the same inputs, via `withCoveragePlan`
+ * below. That single merge point is deliberate: it is the one place this
+ * function guarantees the coverage-plan fields land, so no return path can
+ * silently omit them.
  */
 export async function generateInterviewBlueprint(
   profile: Pick<ProfileDraft, "role" | "seniority" | "summary" | "narrative" | "expertise" | "characteristics" | "competencies">,
   evidence: EvidenceItem[],
+  options: { roundId: RoundId; opportunity: Pick<Opportunity, "gaps" | "jobDescription"> | null },
 ): Promise<InterviewBlueprint> {
   const createdAt = new Date().toISOString();
+  const targets = buildCoverageTargets(profile, evidence, options.opportunity, options.roundId);
+  const withCoveragePlan = (blueprint: InterviewBlueprint): InterviewBlueprint => ({
+    ...blueprint,
+    roundId: options.roundId,
+    turnBudget: 8,
+    targets,
+  });
+
   const readiness = assessProfileReadiness(evidence);
   if (!readiness.ready) {
-    return buildExperienceDiscoveryBlueprint(profile, evidence, readiness, new Date(createdAt));
+    return withCoveragePlan(buildExperienceDiscoveryBlueprint(profile, evidence, readiness, new Date(createdAt)));
   }
   const competencyContext = profile.competencies.map((competency) => ({
     name: competency.name,
@@ -959,13 +977,16 @@ export async function generateInterviewBlueprint(
     const result = await modelJson("interview blueprint", prompt(repair), blueprintDraftSchema);
     if (!result) continue;
     try {
-      return validateInterviewBlueprint(normalizeBlueprint(result, createdAt), evidence);
+      // The coverage plan must land before validation, not after: `validateInterviewBlueprint`
+      // now requires a non-empty `targets` with a required entry (spec §9.1),
+      // and the model's own JSON never carries one.
+      return validateInterviewBlueprint(withCoveragePlan(normalizeBlueprint(result, createdAt)), evidence);
     } catch {
       continue;
     }
   }
 
-  return buildFallbackInterviewBlueprint(
+  return withCoveragePlan(buildFallbackInterviewBlueprint(
     {
       role: profile.role,
       seniority: profile.seniority,
@@ -978,7 +999,7 @@ export async function generateInterviewBlueprint(
     fallbackBlueprintCompetencies(profile),
     evidence,
     new Date(createdAt),
-  );
+  ));
 }
 
 /**

@@ -1,13 +1,24 @@
 import { describe, expect, it } from "vitest";
 import {
   appendFollowUp,
+  buildCoverageTargets,
   buildExperienceDiscoveryBlueprint,
   buildFallbackInterviewBlueprint,
   buildInterviewPlan,
   chooseDifficulty,
   validateInterviewBlueprint,
 } from "@/lib/interview-planner";
-import type { Competency, EvidenceItem, InterviewBlueprint, PlannedQuestion, ProfileDraft } from "@/lib/types";
+import type {
+  BlueprintQuestion,
+  Competency,
+  CoverageTarget,
+  EvidenceItem,
+  InterviewBlueprint,
+  Opportunity,
+  PlannedQuestion,
+  ProfileDraft,
+  QuestionCategory,
+} from "@/lib/types";
 
 const weakSystemDesign: Competency = {
   id: "system-design",
@@ -101,6 +112,77 @@ const sparseProfile: ProfileDraft = {
   competencies: [{ name: "React", relevance: 1 }],
 };
 
+// Shared fixtures for the coverage-target tests below. `sampleProfile`
+// deliberately mirrors `profile`'s shape (role + competencies only) rather
+// than reusing it directly, so it stays valid if `profile` grows fields
+// `buildCoverageTargets` doesn't need.
+function sampleProfile(): Pick<ProfileDraft, "role" | "competencies"> {
+  return { role: profile.role, competencies: profile.competencies };
+}
+
+function sampleEvidence(): EvidenceItem[] {
+  return evidence;
+}
+
+function sampleOpportunity(): Pick<Opportunity, "gaps" | "jobDescription"> {
+  return { gaps: [], jobDescription: "Own platform reliability and testing culture." };
+}
+
+const backboneCategories: QuestionCategory[] = ["introduction", "experience", "technical", "architecture", "behavioral"];
+
+/** A minimal, valid legacy five-question backbone: no evidence anchoring, no prompt text. */
+function sampleBlueprintQuestions(): BlueprintQuestion[] {
+  return backboneCategories.map((category, index) => ({
+    id: `sample-question-${index + 1}`,
+    sequence: index + 1,
+    category,
+    competencyId: null,
+    competencyName: null,
+    difficulty: "senior",
+    isFollowUp: false,
+    prompt: null,
+    answer: null,
+    createdAt: "2026-08-29T00:00:00.000Z",
+    objective: category === "introduction"
+      ? "Establish recent engineering ownership."
+      : "General objective: Establish real ownership and impact.",
+    evidenceIds: [],
+    expectedSignals: ["ownership"],
+    missingSignalPrompts: ["Name the ownership decision."],
+    rubricCriteria: ["Name a concrete example.", "Describe the ownership.", "Explain the outcome."],
+    followUpLimit: 0,
+    sourceConfidence: null,
+  }));
+}
+
+const singleRequiredTarget: CoverageTarget = {
+  id: "target-minimal",
+  competencyId: null,
+  competencyName: "React",
+  category: "experience",
+  evidenceIds: [],
+  difficulty: "senior",
+  objective: "Establish the candidate's ownership of React work.",
+  expectedSignals: ["ownership", "outcome"],
+  rubricCriteria: ["Name a concrete example.", "Describe the ownership.", "Explain the outcome."],
+  required: true,
+};
+
+function sampleBlueprint(overrides: Partial<InterviewBlueprint> = {}): InterviewBlueprint {
+  return {
+    status: "grounded",
+    fallbackReason: null,
+    maxFollowUps: 3,
+    maxQuestions: 8,
+    createdAt: "2026-08-29T00:00:00.000Z",
+    questions: sampleBlueprintQuestions(),
+    roundId: "tech-lead",
+    turnBudget: 8,
+    targets: [singleRequiredTarget],
+    ...overrides,
+  };
+}
+
 describe("adaptive interview planning", () => {
   it("builds a five-question backbone that prioritizes weak system design", () => {
     const plan = buildInterviewPlan([strongReact, weakSystemDesign], "Senior");
@@ -109,8 +191,6 @@ describe("adaptive interview planning", () => {
     expect(plan.map((question) => question.category)).toEqual([
       "introduction", "experience", "technical", "architecture", "behavioral",
     ]);
-    expect(plan[0].prompt).toContain("engineering work");
-    expect(plan[0].prompt).not.toContain("frontend");
     for (let index = 1; index < plan.length; index += 1) {
       const previous = plan[index - 1].competencyId;
       const current = plan[index].competencyId;
@@ -181,6 +261,9 @@ describe("adaptive interview planning", () => {
       maxFollowUps: 3,
       maxQuestions: 8,
       createdAt: "2026-08-29T00:00:00.000Z",
+      roundId: "tech-lead",
+      turnBudget: 8,
+      targets: [singleRequiredTarget],
       questions: [
         {
           id: "question-1",
@@ -306,6 +389,9 @@ describe("adaptive interview planning", () => {
       maxFollowUps: 3,
       maxQuestions: 8,
       createdAt: "2026-08-29T00:00:00.000Z",
+      roundId: "tech-lead",
+      turnBudget: 8,
+      targets: [singleRequiredTarget],
       questions: [
         {
           id: "question-1",
@@ -413,6 +499,9 @@ describe("adaptive interview planning", () => {
       maxFollowUps: 3,
       maxQuestions: 8,
       createdAt: "2026-08-29T00:00:00.000Z",
+      roundId: "tech-lead",
+      turnBudget: 8,
+      targets: [singleRequiredTarget],
       questions: [
         {
           id: "question-1",
@@ -533,7 +622,11 @@ describe("adaptive interview planning", () => {
         expect.stringContaining("decision"),
       ]),
     });
-    expect(validateInterviewBlueprint(blueprint, evidence)).toEqual(blueprint);
+    // buildFallbackInterviewBlueprint doesn't populate roundId/turnBudget/targets itself --
+    // that merge happens once, at coach.ts's `generateInterviewBlueprint` boundary (spec
+    // §9.1) -- so validate a coverage-plan-bearing copy rather than the raw fallback output.
+    const grounded = { ...blueprint, roundId: "tech-lead" as const, turnBudget: 8, targets: [singleRequiredTarget] };
+    expect(validateInterviewBlueprint(grounded, evidence)).toEqual(grounded);
   });
 
   it("matches fallback evidence to the selected competency instead of the evidence array position", () => {
@@ -592,9 +685,10 @@ describe("adaptive interview planning", () => {
     ]);
     expect(result.questions).toHaveLength(5);
     expect(result.questions.every((item) => item.evidenceIds.length === 0)).toBe(true);
-    expect(result.questions[1].prompt).toContain("even if it does not feel like a strong interview story yet");
-    expect(result.questions[1].prompt).toContain("personally responsible");
-    expect(validateInterviewBlueprint(result, [])).toEqual(result);
+    // buildExperienceDiscoveryBlueprint doesn't populate roundId/turnBudget/targets itself --
+    // see the comment on the fallback test above.
+    const grounded = { ...result, roundId: "tech-lead" as const, turnBudget: 8, targets: [singleRequiredTarget] };
+    expect(validateInterviewBlueprint(grounded, [])).toEqual(grounded);
   });
 
   it("never anchors discovery questions to evidence, even when a partial match exists", () => {
@@ -638,6 +732,50 @@ describe("adaptive interview planning", () => {
     expect(serialized).not.toContain("evidence-1");
     expect(serialized).not.toContain("30%");
     expect(serialized).not.toContain("led the migration");
-    expect(validateInterviewBlueprint(result, evidence)).toEqual(result);
+    // buildExperienceDiscoveryBlueprint doesn't populate roundId/turnBudget/targets itself --
+    // see the comment on the fallback test above.
+    const grounded = { ...result, roundId: "tech-lead" as const, turnBudget: 8, targets: [singleRequiredTarget] };
+    expect(validateInterviewBlueprint(grounded, evidence)).toEqual(grounded);
+  });
+});
+
+describe("buildCoverageTargets", () => {
+  it("produces targets with rubric material and no prompt text", () => {
+    const targets = buildCoverageTargets(sampleProfile(), sampleEvidence(), null, "tech-lead");
+    expect(targets.length).toBeGreaterThan(0);
+    for (const target of targets) {
+      expect(target.objective.length).toBeGreaterThan(0);
+      expect(target.rubricCriteria.length).toBeGreaterThan(0);
+      // Task 3 ledger item: an empty `expectedSignals` can never reach
+      // "satisfied" in `deriveCoverageState` (src/lib/interview-coverage.ts),
+      // which would strand the target open for the rest of the round.
+      expect(target.expectedSignals.length).toBeGreaterThan(0);
+      expect(target).not.toHaveProperty("prompt");
+    }
+  });
+
+  it("makes every opportunity gap a required target when anchored", () => {
+    const opportunity = { ...sampleOpportunity(), gaps: ["Testing strategy", "Observability"] };
+    const targets = buildCoverageTargets(sampleProfile(), sampleEvidence(), opportunity, "tech-lead");
+    const required = targets.filter((target) => target.required).map((target) => target.competencyName);
+    expect(required).toEqual(expect.arrayContaining(["Testing strategy", "Observability"]));
+  });
+
+  it("gives every target a unique id", () => {
+    const targets = buildCoverageTargets(sampleProfile(), sampleEvidence(), null, "tech-lead");
+    expect(new Set(targets.map((target) => target.id)).size).toBe(targets.length);
+  });
+});
+
+describe("validateInterviewBlueprint (coverage targets)", () => {
+  it("accepts a blueprint whose questions have no prompt text", () => {
+    const blueprint = sampleBlueprint({ targets: buildCoverageTargets(sampleProfile(), sampleEvidence(), null, "tech-lead") });
+    expect(() => validateInterviewBlueprint(blueprint)).not.toThrow();
+  });
+
+  it("rejects a blueprint with no required target", () => {
+    const targets = buildCoverageTargets(sampleProfile(), sampleEvidence(), null, "tech-lead")
+      .map((target) => ({ ...target, required: false }));
+    expect(() => validateInterviewBlueprint(sampleBlueprint({ targets }))).toThrow(/required/i);
   });
 });

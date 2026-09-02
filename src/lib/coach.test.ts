@@ -1239,8 +1239,12 @@ describe("generateInterviewBlueprint", () => {
       }],
     }), { status: 200, headers: { "Content-Type": "application/json" } }));
 
-    await expect(generateInterviewBlueprint(blueprintProfile, blueprintEvidence)).resolves.toMatchObject({
+    const blueprint = await generateInterviewBlueprint(blueprintProfile, blueprintEvidence, { roundId: "tech-lead", opportunity: null });
+
+    expect(blueprint).toMatchObject({
       status: "grounded",
+      roundId: "tech-lead",
+      turnBudget: 8,
       questions: expect.arrayContaining([
         expect.objectContaining({
           sequence: 2,
@@ -1250,6 +1254,12 @@ describe("generateInterviewBlueprint", () => {
         }),
       ]),
     });
+    // The coverage plan (spec §9.1) must land on the model-validated success
+    // path too, not only on the discovery and fallback paths -- this is the
+    // path most likely to omit it silently, since the model's own JSON never
+    // includes targets.
+    expect(blueprint.targets.length).toBeGreaterThan(0);
+    expect(blueprint.targets.some((target) => target.required)).toBe(true);
     expect(fetchSpy).toHaveBeenCalled();
   });
 
@@ -1263,11 +1273,14 @@ describe("generateInterviewBlueprint", () => {
         competencies: [{ name: "React", relevance: 1 }],
       },
       [],
+      { roundId: "tech-lead", opportunity: null },
     );
 
     expect(result.status).toBe("limited-grounding");
     expect(result.questions).toHaveLength(5);
-    expect(result.questions[1].prompt).toContain("strong interview story");
+    expect(result.roundId).toBe("tech-lead");
+    expect(result.turnBudget).toBe(8);
+    expect(result.targets.length).toBeGreaterThan(0);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -1410,7 +1423,7 @@ describe("generateInterviewBlueprint", () => {
         }],
       }), { status: 200, headers: { "Content-Type": "application/json" } }));
 
-    const blueprint = await generateInterviewBlueprint(blueprintProfile, blueprintEvidence);
+    const blueprint = await generateInterviewBlueprint(blueprintProfile, blueprintEvidence, { roundId: "tech-lead", opportunity: null });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(blueprint.status).toBe("grounded");
@@ -1424,7 +1437,7 @@ describe("generateInterviewBlueprint", () => {
       .mockResolvedValueOnce(new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "{}" }] } }] }), { status: 200, headers: { "Content-Type": "application/json" } }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "{}" }] } }] }), { status: 200, headers: { "Content-Type": "application/json" } }));
 
-    const blueprint = await generateInterviewBlueprint(blueprintProfile, blueprintEvidence);
+    const blueprint = await generateInterviewBlueprint(blueprintProfile, blueprintEvidence, { roundId: "tech-lead", opportunity: null });
 
     expect(blueprint.status).toBe("limited-grounding");
     expect(blueprint.fallbackReason).toContain("Gemini");
