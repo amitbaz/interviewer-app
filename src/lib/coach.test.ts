@@ -377,7 +377,16 @@ describe("nextTurn — regressions from the observed session", () => {
   });
 
   it("does not ask the same follow-up twice across different targets", async () => {
-    stubGemini(
+    // A bare `prompt` string comparison would be tautological here: each call
+    // stubs its own hard-coded `line`, and `prompt` is a direct passthrough of
+    // that stub, so the assertion would pass even if `nextTurn` collapsed both
+    // calls onto the same target internally. Assert instead on production
+    // state `nextTurn` computes itself (`targetId`, `intent.kind`) and on the
+    // `Subject:` line `speakIntent` builds from the real resolved target, via
+    // the captured request bodies -- none of that is supplied by the stub.
+    const capturedFirst: string[] = [];
+    stubGeminiCapturing(
+      capturedFirst,
       { read: "answered", evaluation: sampleGroundedEvaluation() },
       { line: "What decision did you personally make on Competency a?" },
     );
@@ -385,13 +394,26 @@ describe("nextTurn — regressions from the observed session", () => {
       answeredQuestion: answeredQuestion("q1", { kind: "open", targetId: "a" }),
     }));
 
-    stubGemini(
+    const capturedSecond: string[] = [];
+    stubGeminiCapturing(
+      capturedSecond,
       { read: "answered", evaluation: sampleGroundedEvaluation() },
       { line: "What decision did you personally make on Competency b?" },
     );
     const second = await nextTurn(nextTurnInput({
       answeredQuestion: answeredQuestion("q2", { kind: "open", targetId: "b" }),
     }));
+
+    expect(first.targetId).toBe("a");
+    expect(second.targetId).toBe("b");
+    expect(first.targetId).not.toBe(second.targetId);
+    expect(first.intent.kind).not.toBe("advance");
+    expect(second.intent.kind).not.toBe("advance");
+
+    const firstInterviewerCall = capturedFirst[capturedFirst.length - 1];
+    const secondInterviewerCall = capturedSecond[capturedSecond.length - 1];
+    expect(firstInterviewerCall).toContain("Subject: Competency a");
+    expect(secondInterviewerCall).toContain("Subject: Competency b");
 
     expect(first.prompt).not.toBe(second.prompt);
   });
