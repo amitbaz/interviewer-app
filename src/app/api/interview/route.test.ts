@@ -260,6 +260,10 @@ describe("POST /api/interview", () => {
   });
 
   it("starts a session with the requested round and mode", async () => {
+    // Deliberately empty and DISTINCT from the reloaded session's blueprint
+    // below: this is the pre-persistence blueprint `generateInterviewBlueprint`
+    // returns, whose `targets` (if it had any) would carry transient
+    // gap-0/competency-0 ids. `openingTurn` must never see this one.
     const blueprint = {
       status: "grounded" as const,
       fallbackReason: null,
@@ -271,13 +275,36 @@ describe("POST /api/interview", () => {
       turnBudget: 8,
       targets: [],
     };
+    // The RELOADED blueprint `createSessionWithBlueprint` returns on the
+    // session, with a real, non-empty, database-row-id-shaped target --
+    // distinct from `blueprint` above so a regression that passes the wrong
+    // blueprint to `openingTurn` (Fix 2) is actually caught below.
+    const reloadedBlueprint = {
+      ...blueprint,
+      targets: [
+        {
+          id: "question-1",
+          competencyId: null,
+          competencyName: null,
+          category: "introduction" as const,
+          evidenceIds: [],
+          difficulty: "senior" as const,
+          objective: "Establish recent engineering context.",
+          expectedSignals: ["ownership"],
+          rubricCriteria: ["Name one concrete example."],
+          required: true,
+        },
+      ],
+    };
+    const createdSession = session([question(1, null)]);
+    createdSession.blueprint = reloadedBlueprint;
     const revealed = {
       ...session([{ ...question(1, null), prompt: "Tell me about your background." }]),
       mode: "coach" as const,
       roundId: "tech-lead" as const,
     };
     mocks.generateInterviewBlueprint.mockResolvedValue(blueprint);
-    mocks.createSessionWithBlueprint.mockResolvedValue(session([question(1, null)]));
+    mocks.createSessionWithBlueprint.mockResolvedValue(createdSession);
     mocks.openingTurn.mockResolvedValue({
       intent: { kind: "open", targetId: "question-1" },
       prompt: "Tell me about your background.",
@@ -294,6 +321,12 @@ describe("POST /api/interview", () => {
     expect(body.session.questions[0].prompt).toBeTruthy();
     expect(mocks.generateInterviewBlueprint).toHaveBeenCalledWith(profile, [], { roundId: "tech-lead", opportunity: null });
     expect(mocks.createSessionWithBlueprint).toHaveBeenCalledWith(expect.anything(), "user-1", blueprint, { roundId: "tech-lead", mode: "coach" });
+    // Fix 2's regression guard: `openingTurn` must receive the RELOADED
+    // `session.blueprint` (stable, row-id-shaped targets), never the
+    // pre-persistence `blueprint` variable above (empty/transient-id targets).
+    expect(mocks.openingTurn).toHaveBeenCalledWith(expect.objectContaining({ blueprint: reloadedBlueprint }));
+    expect(mocks.openingTurn).not.toHaveBeenCalledWith(expect.objectContaining({ blueprint }));
+    expect(mocks.revealFirstQuestion).toHaveBeenCalledWith(expect.anything(), "user-1", createdSession, expect.anything());
   });
 
   it("rejects a round that is specified but not implemented", async () => {
