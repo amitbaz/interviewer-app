@@ -4,6 +4,8 @@ import { z } from "zod";
 import { applyEvaluation } from "@/lib/competencies";
 import { geminiFailureState, geminiModel, geminiRequestError } from "@/lib/gemini";
 import { buildExperienceDiscoveryBlueprint, buildFallbackInterviewBlueprint, validateInterviewBlueprint } from "@/lib/interview-planner";
+import type { InterviewRound } from "@/lib/interview-rounds";
+import { deterministicLine, validateInterviewerLine } from "@/lib/interviewer-voice";
 import { MAX_CV_PDF_BYTES } from "@/lib/upload-limits";
 import type {
   BlueprintQuestion,
@@ -14,8 +16,10 @@ import type {
   Evaluation,
   FollowUpDraft,
   HandsOnExercise,
+  Intent,
   InterviewBlueprint,
   InterviewSession,
+  ModePolicy,
   Opportunity,
   PlannedQuestion,
   PracticeBlueprintContext,
@@ -26,6 +30,7 @@ import type {
   ProfileReadiness,
   ProfileSource,
   QuestionCategory,
+  RescueStyle,
   GroundedEvaluation,
 } from "@/lib/types";
 
@@ -50,11 +55,13 @@ const groundedEvaluationSchema = z.object({
   unsupportedClaims: z.array(z.string()).default([]),
   dimensionReasons: z.object(dimensionReasonShape),
 });
-const turnSchema = z.object({
-  question: z.string().min(1),
-  shouldFollowUp: z.boolean(),
+// The assessor scores privately and reports a coarse read. It no longer
+// authors questions: speech is a separate call that never sees this rubric.
+const assessorSchema = z.object({
+  read: z.enum(["answered", "partial", "evasive", "stuck"]),
   evaluation: groundedEvaluationSchema,
 });
+const interviewerLineSchema = z.object({ line: z.string().min(1) });
 const evidenceSchema = z.object({
   id: z.string().min(1).optional(),
   sourceKind: z.enum(["cv", "cover_letter", "summary"]).nullable().optional(),
@@ -1528,43 +1535,38 @@ function resolveFollowUpLimit(question: BlueprintQuestion, blueprint: InterviewB
   );
 }
 
-function turnPrompt(
+/**
+ * The assessor prompt. Scores privately against the rubric and classifies the
+ * answer. It authors no candidate-facing text, so the rubric can appear here
+ * safely -- that is the whole point of the split (spec §6.1).
+ */
+function assessorPrompt(
   question: BlueprintQuestion,
   profile: Pick<ProfileDraft, "role" | "seniority" | "expertise" | "narrative">,
   answer: string,
   transcript: string,
-  source: ProfileSource | null,
-  nextPlannedQuestion: PlannedQuestion | null,
-  canFollowUp: boolean,
-  blueprint: InterviewBlueprint | null,
 ): string {
-  const nextRubric = nextPlannedQuestion ? groundedQuestion(nextPlannedQuestion, blueprint) : null;
   return [
     "You are an experienced senior software-engineering interviewer.",
     "Privately evaluate the latest answer against the exact question rubric.",
     "Return only valid JSON.",
     "Ground the scoring in the exact question objective, expected signals, and the candidate's answer.",
     "Do not praise, coach, reveal scores, or invent facts.",
+    "Classify the answer with `read`:",
+    "  answered  - a genuine attempt that addressed the question",
+    "  partial   - a genuine attempt that left the objective largely uncovered",
+    "  evasive   - talked at length without engaging the question",
+    "  stuck     - did not attempt the question: said they do not know, cannot",
+    "              find words, are blanking, or asked to move on.",
+    "`stuck` is about the absence of an attempt, never about a weak attempt.",
     hasSourceEvidenceTarget(question)
       ? ""
       : "Grounding rule: question.evidenceIds is empty, so this is a discovery/general objective. Treat first-person career details in the candidate's answer as newly supplied session evidence. Do not mark them unsupported merely because they were absent from the source profile. Never invent missing details; improved answers may only reuse facts actually supplied by the candidate or already grounded by the question context.",
-    "If shouldFollowUp is true, the question must probe the answered plan without changing its objective.",
-    "If shouldFollowUp is false, the question should ask the supplied next plan without changing its objective or evidence target.",
     `Question: ${JSON.stringify(question)}`,
     `Rubric criteria: ${JSON.stringify(question.rubricCriteria ?? [])}`,
     `Profile: ${JSON.stringify(profile)}`,
-    `Can follow up: ${JSON.stringify(canFollowUp)}`,
     `Transcript: ${transcript}`,
     `Latest answer: ${answer}`,
-    source ? `CV excerpt: ${cvExcerpt(source, question)}` : "",
-    nextRubric ? `Next plan: ${JSON.stringify({
-      category: nextPlannedQuestion?.category,
-      competency: nextPlannedQuestion?.competencyName,
-      difficulty: nextPlannedQuestion?.difficulty,
-      objective: nextRubric.objective,
-      expectedSignals: nextRubric.expectedSignals,
-      rubricCriteria: nextRubric.rubricCriteria ?? [],
-    })}` : "",
   ].filter(Boolean).join("\n");
 }
 
@@ -1587,16 +1589,18 @@ async function evaluateTurn(
     && followUpCountForQuestion < followUpLimit;
   const result = await modelJson(
     "answer evaluation",
-    turnPrompt(rubric, profile, answer, transcript, source, nextPlannedQuestion, canFollowUp, blueprint),
-    turnSchema,
+    assessorPrompt(rubric, profile, answer, transcript),
+    assessorSchema,
   );
   const modelEvaluation = result
     ? validateGroundedModelEvaluation(rubric, answer, result.evaluation)
     : null;
   const evaluation = modelEvaluation?.evaluation ?? groundedEvaluationFor(rubric, answer);
-  const shouldFollowUp = canFollowUp && (modelEvaluation?.trusted
-    ? result?.shouldFollowUp ?? false
-    : shouldAskFollowUp(rubric, evaluation));
+  // The assessor no longer authors a follow-up decision or question text --
+  // both are now the director's and the interviewer call's job (Task 7). Until
+  // that rewiring lands, keep deciding with the same deterministic heuristic
+  // this function already used as its untrusted-model fallback.
+  const shouldFollowUp = canFollowUp && shouldAskFollowUp(rubric, evaluation);
   const question = shouldFollowUp
     ? deterministicFollowUp(answeredQuestion)
     : (nextPlannedQuestion
@@ -1619,6 +1623,122 @@ export async function evaluateAnswer(
 
 export function initialQuestion(profile: Pick<ProfileDraft, "role">, planned: PlannedQuestion, source: ProfileSource): string {
   return promptForPlan(planned, source, profile.role);
+}
+
+export type SpeakContext = {
+  round: InterviewRound;
+  policy: ModePolicy;
+  competencyName: string | null;
+  evidence: EvidenceItem[];
+  opportunity: Pick<Opportunity, "company" | "role" | "jobDescription"> | null;
+  transcript: string;
+  askedPrompts: string[];
+  /** Strings the line must not echo; never themselves sent to the model. */
+  forbiddenRubricText: string[];
+};
+
+/**
+ * Structured evidence only. The interviewer refers to what a CV says; it never
+ * recites it, and `sourceExcerpt` -- which carries raw CV text including
+ * contact details -- is deliberately excluded (spec §11.2).
+ */
+function evidenceForSpeech(evidence: EvidenceItem[]): Array<Record<string, unknown>> {
+  return evidence.slice(0, 6).map((item) => ({
+    projectOrEmployer: item.projectOrEmployer,
+    ownership: item.ownership,
+    technologies: item.technologies,
+    decision: item.decision,
+    constraint: item.constraint,
+    outcome: item.outcome,
+  }));
+}
+
+function intentInstruction(intent: Intent, policy: ModePolicy): string {
+  switch (intent.kind) {
+    case "open":
+      return "Open a new thread on the subject below. Ask what they worked on, in your own words.";
+    case "probe":
+      return `Press on "${intent.aspect}" in what they just said: "${intent.basis}". Ask for the missing specific.`;
+    case "challenge":
+      return `They claimed "${intent.claim}" without support. Ask how they know, without accusing them.`;
+    case "rescue":
+      return rescueInstruction(intent.style, intent.hook, policy);
+    case "advance":
+      return "Close the current thread briefly and open the new subject below.";
+    case "hypothetical":
+      return `Pose one short hypothetical grounded in what they described: "${intent.basis}".`;
+    case "candidate-questions":
+      return "Signal that you have covered what you wanted and invite their questions.";
+    case "close":
+      return "Close the conversation.";
+  }
+}
+
+function rescueInstruction(style: RescueStyle, hook: string | null, policy: ModePolicy): string {
+  const acknowledge = policy.acknowledgeStruggle
+    ? "Acknowledge the difficulty in at most one short clause first. "
+    : "Do not acknowledge the difficulty. ";
+  switch (style) {
+    case "narrow":
+      return `${acknowledge}They could not answer. Ask a much smaller version of the same question.`;
+    case "hook":
+      return `${acknowledge}They could not answer. Hand them a concrete starting point${hook ? ` from their work on ${hook}` : ""} and ask them to start there.`;
+    case "reframe":
+      return `${acknowledge}They could not answer. Ask for the same material as a story about one specific occasion.`;
+    case "park":
+      return `${acknowledge}They could not answer. Say you will come back to it, and move to the new subject below.`;
+  }
+}
+
+/**
+ * Authors one line of interviewer speech for an already-decided intent.
+ *
+ * This call NEVER receives the objective, expected signals, rubric criteria, or
+ * any score. That exclusion is structural, not filtered, and is the fix for the
+ * rubric leak that commit 02ec2c1 worked around by removing model-authored
+ * questions altogether.
+ */
+export async function speakIntent(intent: Intent, context: SpeakContext): Promise<string> {
+  const prompt = [
+    context.round.personaStake,
+    `Your manner: ${context.round.register}`,
+    `You never raise: ${context.round.outOfScope.join(", ")}.`,
+    "Say one thing only, in at most two sentences, ending with exactly one question.",
+    "Never quote a CV or job description. Never state the candidate's contact details.",
+    context.policy.pushback === "firm"
+      ? "Do not praise, encourage, or hint."
+      : "You may acknowledge difficulty in one short clause. Never coach or hint at an answer.",
+    `Your move: ${intentInstruction(intent, context.policy)}`,
+    context.competencyName ? `Subject: ${context.competencyName}` : "",
+    `What you know about their work: ${JSON.stringify(evidenceForSpeech(context.evidence))}`,
+    context.opportunity
+      ? `You are hiring for ${context.opportunity.role} at ${context.opportunity.company}. Role context: ${(context.opportunity.jobDescription ?? "").slice(0, 1200)}`
+      : "",
+    `Conversation so far:\n${context.transcript}`,
+    context.askedPrompts.length
+      ? `Already asked -- do not repeat or paraphrase these:\n${context.askedPrompts.join("\n")}`
+      : "",
+  ].filter(Boolean).join("\n");
+
+  const lineContext = {
+    forbiddenRubricText: context.forbiddenRubricText,
+    askedPrompts: context.askedPrompts,
+    policy: context.policy,
+  };
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const result = await modelJson(
+      "interviewer line",
+      attempt === 0 ? prompt : `${prompt}\nYour previous attempt broke a rule. Try again, shorter and more direct.`,
+      interviewerLineSchema,
+    );
+    if (!result) break;
+    const violation = validateInterviewerLine(result.line, lineContext);
+    if (!violation) return result.line.trim();
+    console.warn("[gemini] interviewer line rejected", { operation: "interviewer line", intent: intent.kind, violation });
+  }
+
+  return deterministicLine(intent, context.competencyName);
 }
 
 function deterministicFollowUp(planned: PlannedQuestion): string {

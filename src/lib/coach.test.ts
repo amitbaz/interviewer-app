@@ -12,7 +12,10 @@ import {
   generatePracticeBlueprint,
   initialQuestion,
   nextTurn,
+  speakIntent,
 } from "@/lib/coach";
+import { modePolicyFor, roundFor } from "@/lib/interview-rounds";
+import { deterministicLine } from "@/lib/interviewer-voice";
 import type {
   BlueprintQuestion,
   EvidenceItem,
@@ -699,6 +702,10 @@ describe("initialQuestion", () => {
     expect(evaluation.dimensionReasons.relevance).toContain("does not directly answer");
   });
 
+  // The follow-up decision (and the nextQuestion/followUp routing it drives)
+  // moved to the director and is no longer part of this call's contract --
+  // covered by Task 7's tests once the director is wired in. This test's
+  // subject is evaluation grounding, so it asserts only the evaluation.
   it("preserves grounded coaching fields while stripping ungrounded model claims", async () => {
     vi.stubEnv("GEMINI_API_KEY", "private-test-key");
     vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
@@ -709,6 +716,7 @@ describe("initialQuestion", () => {
             text: JSON.stringify({
               question: "How would you phase the migration?",
               shouldFollowUp: false,
+              read: "answered",
               evaluation: {
                 score: 8.4,
                 competency: "Ignored by normalization",
@@ -771,8 +779,6 @@ describe("initialQuestion", () => {
       "I phased the rollout carefully, compared alternatives with the team, made the trade-off explicit, and measured the impact after each milestone. ".repeat(2),
     );
 
-    expect(turn.followUp).toBeNull();
-    expect(turn.nextQuestion).toBe("Design an approach involving System design. Start with the requirements you would clarify.");
     expect(turn.evaluation.competencyId).toBe("react-id");
     expect(turn.evaluation.competency).toBe("React architecture");
     expect(turn.evaluation.score).toBe(8.4);
@@ -851,6 +857,7 @@ describe("initialQuestion", () => {
               text: JSON.stringify({
                 question: "What was the outcome of that work?",
                 shouldFollowUp: false,
+                read: "answered",
                 evaluation: {
                   score: 7.2,
                   competency: "Ignored by normalization",
@@ -1091,6 +1098,7 @@ describe("initialQuestion", () => {
             text: JSON.stringify({
               question: "How would you phase the migration?",
               shouldFollowUp: false,
+              read: "answered",
               evaluation: {
                 score: 9.9,
                 competency: "Ignored by normalization",
@@ -2440,5 +2448,102 @@ describe("assessProfileReadiness", () => {
       ready: true,
       missing: [],
     });
+  });
+});
+
+describe("speakIntent", () => {
+  it("never puts rubric text in the interviewer prompt", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    const captured: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      captured.push(String(init.body));
+      return new Response(JSON.stringify({
+        candidates: [{ content: { parts: [{ text: JSON.stringify({ line: "What did you own there?" }) }] } }],
+      }), { status: 200 });
+    }));
+
+    await speakIntent(
+      { kind: "probe", targetId: "a", aspect: "ownership", basis: "the migration" },
+      {
+        round: roundFor("tech-lead"),
+        policy: modePolicyFor("real"),
+        competencyName: "Frontend Architecture",
+        evidence: [],
+        opportunity: null,
+        transcript: "interviewer: hello\ncandidate: hi",
+        askedPrompts: [],
+        forbiddenRubricText: ["Probe Frontend Architecture with concrete evidence.", "ownership signal"],
+      },
+    );
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).not.toContain("Probe Frontend Architecture with concrete evidence.");
+    expect(captured[0]).not.toContain("ownership signal");
+    expect(captured[0]).not.toContain("rubricCriteria");
+    expect(captured[0]).not.toContain("expectedSignals");
+  });
+
+  it("falls back to the deterministic line when validation fails twice", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: JSON.stringify({ line: "Mail me at a@b.com. What did you own?" }) }] } }],
+    }), { status: 200 })));
+
+    const line = await speakIntent(
+      { kind: "probe", targetId: "a", aspect: "ownership", basis: "x" },
+      {
+        round: roundFor("tech-lead"),
+        policy: modePolicyFor("real"),
+        competencyName: "Frontend Architecture",
+        evidence: [],
+        opportunity: null,
+        transcript: "",
+        askedPrompts: [],
+        forbiddenRubricText: [],
+      },
+    );
+
+    expect(line).toBe(deterministicLine({ kind: "probe", targetId: "a", aspect: "ownership", basis: "x" }, "Frontend Architecture"));
+  });
+
+  it("never sends raw CV text, only structured evidence fields", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    const captured: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+      captured.push(String(init.body));
+      return new Response(JSON.stringify({
+        candidates: [{ content: { parts: [{ text: JSON.stringify({ line: "What did you own there?" }) }] } }],
+      }), { status: 200 });
+    }));
+
+    await speakIntent(
+      { kind: "open", targetId: "a" },
+      {
+        round: roundFor("tech-lead"),
+        policy: modePolicyFor("real"),
+        competencyName: "Frontend Architecture",
+        evidence: [{
+          id: "e1",
+          sourceKind: "cv",
+          sourceExcerpt: "Amit Baz | +49 177 2276319 | amitbaz2@gmail.com",
+          projectOrEmployer: "Acme",
+          ownership: "Owned the design system migration",
+          technologies: ["React"],
+          decision: null,
+          constraint: null,
+          outcome: null,
+          recency: null,
+          confidence: 0.8,
+        } as EvidenceItem],
+        opportunity: null,
+        transcript: "",
+        askedPrompts: [],
+        forbiddenRubricText: [],
+      },
+    );
+
+    expect(captured[0]).toContain("Owned the design system migration");
+    expect(captured[0]).not.toContain("amitbaz2@gmail.com");
+    expect(captured[0]).not.toContain("2276319");
   });
 });
