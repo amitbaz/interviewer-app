@@ -204,7 +204,7 @@ function interviewerTranscript(questions: PlannedQuestion[]): Message[] {
       const interviewer: Message = {
         id: `${question.id}:question`,
         role: "interviewer",
-        content: question.prompt,
+        content: question.prompt!,
         createdAt: question.createdAt,
       };
       if (!question.answer) return [interviewer];
@@ -266,6 +266,11 @@ function applyConversationTurn(
       followUpLimit: followUp.followUpLimit,
       sourceConfidence: followUp.sourceConfidence,
       parentQuestionId: answered.id,
+      // A freshly derived follow-up hasn't gone through the director's
+      // intent/assistance pipeline yet in this hand-rolled RPC stand-in.
+      askedIntent: null,
+      assistance: [],
+      nonAnswer: false,
     };
     questions = [...questions, followUpQuestion].sort((left, right) => left.sequence - right.sequence);
   } else if (next.nextQuestionId) {
@@ -383,6 +388,10 @@ describe("Release 2 flow: recommendation through practice-plan completion", () =
         id: "session-1",
         userId,
         kind: "conversation",
+        // A planned practice session, not a round-based real interview.
+        roundId: "tech-lead",
+        mode: "coach",
+        degraded: false,
         status: "active",
         startedAt: NOW_ISO,
         completedAt: null,
@@ -509,6 +518,9 @@ describe("Release 2 flow: recommendation through practice-plan completion", () =
         prompt: `Backbone prompt ${index + 1}`,
         answer: null,
         createdAt: NOW_ISO,
+        askedIntent: null,
+        assistance: [],
+        nonAnswer: false,
       }));
 
     expect(() => assertConversationPlan(backbone)).not.toThrow();

@@ -5,7 +5,7 @@ import { applyEvaluation } from "@/lib/competencies";
 import { geminiFailureState, geminiModel, geminiRequestError } from "@/lib/gemini";
 import { deriveCoverageState, rescuesSpentInSession, targetIdOf } from "@/lib/interview-coverage";
 import { decideIntent } from "@/lib/interview-director";
-import { buildCoverageTargets, buildExperienceDiscoveryBlueprint, buildFallbackInterviewBlueprint, validateInterviewBlueprint } from "@/lib/interview-planner";
+import { buildCoverageTargets, buildExperienceDiscoveryBlueprint, buildFallbackInterviewBlueprint, defaultMaxQuestions, validateInterviewBlueprint } from "@/lib/interview-planner";
 import { modePolicyFor, roundFor } from "@/lib/interview-rounds";
 import type { InterviewRound } from "@/lib/interview-rounds";
 import { deterministicLine, validateInterviewerLine } from "@/lib/interviewer-voice";
@@ -858,6 +858,10 @@ function normalizeBlueprintQuestion(
     rubricCriteria: value.rubricCriteria.map((criteria) => criteria.trim()),
     followUpLimit: value.followUpLimit,
     sourceConfidence: value.sourceConfidence ?? null,
+    // A model-authored base question predates the director's intent/assistance pipeline.
+    askedIntent: null,
+    assistance: [],
+    nonAnswer: false,
   };
 }
 
@@ -872,6 +876,13 @@ function normalizeBlueprint(
     maxQuestions: value.maxQuestions,
     createdAt,
     questions: value.questions.map((question) => normalizeBlueprintQuestion(question, createdAt)),
+    // Shared by both callers: `generateInterviewBlueprint`'s `withCoveragePlan`
+    // overwrites these with the real round-derived values, and
+    // `generatePracticeBlueprint`'s practice-plan path never consumes the
+    // round/coverage-target system at all.
+    roundId: "tech-lead",
+    turnBudget: defaultMaxQuestions,
+    targets: [],
   };
 }
 
@@ -1126,7 +1137,7 @@ function validatePracticeBlueprint(
       throw new Error("Practice blueprint questions must be contiguous base questions.");
     }
     if (!question.objective.trim()) throw new Error("Practice blueprint questions need an objective.");
-    if (!question.prompt.trim()) throw new Error("Practice blueprint questions need prompt text.");
+    if (!question.prompt!.trim()) throw new Error("Practice blueprint questions need prompt text.");
     if (!question.expectedSignals.length) throw new Error("Practice blueprint questions need expected signals.");
     if (!question.missingSignalPrompts.length) throw new Error("Practice blueprint questions need missing-signal prompts.");
     if (!question.rubricCriteria?.length) throw new Error("Practice blueprint questions need scoring criteria.");
@@ -1314,6 +1325,10 @@ function buildFallbackPracticeBlueprint(
       rubricCriteria: fallbackPracticeRubricCriteria(category, subject),
       followUpLimit: category === "introduction" ? 0 : 1,
       sourceConfidence: item?.confidence ?? null,
+      // A fallback practice question predates the director's intent/assistance pipeline.
+      askedIntent: null,
+      assistance: [],
+      nonAnswer: false,
     };
   });
 
@@ -1324,6 +1339,10 @@ function buildFallbackPracticeBlueprint(
     maxQuestions: 8,
     createdAt,
     questions,
+    // Practice-plan blueprints never consume the round/coverage-target system.
+    roundId: "tech-lead",
+    turnBudget: defaultMaxQuestions,
+    targets: [],
   });
 }
 

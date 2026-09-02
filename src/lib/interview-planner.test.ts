@@ -152,6 +152,9 @@ function sampleBlueprintQuestions(): BlueprintQuestion[] {
     rubricCriteria: ["Name a concrete example.", "Describe the ownership.", "Explain the outcome."],
     followUpLimit: 0,
     sourceConfidence: null,
+    askedIntent: null,
+    assistance: [],
+    nonAnswer: false,
   }));
 }
 
@@ -217,6 +220,9 @@ describe("adaptive interview planning", () => {
       prompt: "What trade-off would change your implementation?",
       answer: null,
       createdAt: "2026-08-29T00:00:00.000Z",
+      askedIntent: null,
+      assistance: [],
+      nonAnswer: false,
     };
 
     const withOne = appendFollowUp(plan, followUp);
@@ -283,6 +289,9 @@ describe("adaptive interview planning", () => {
           followUpLimit: 0,
           sourceConfidence: null,
           rubricCriteria: ["Establish the candidate's recent engineering ownership."],
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-2",
@@ -306,6 +315,9 @@ describe("adaptive interview planning", () => {
             "Describe the candidate's role and ownership.",
             "Explain the decision, trade-off, and outcome.",
           ],
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-3",
@@ -329,6 +341,9 @@ describe("adaptive interview planning", () => {
             "Explain the constraint or rejected alternative.",
             "Describe the trade-off and result.",
           ],
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-4",
@@ -352,6 +367,9 @@ describe("adaptive interview planning", () => {
             "Describe the system-level decision or architecture choice.",
             "State the outcome or reliability impact.",
           ],
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-5",
@@ -375,6 +393,9 @@ describe("adaptive interview planning", () => {
             "Describe how the team aligned on the decision.",
             "State what changed because of the collaboration.",
           ],
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
       ],
     };
@@ -411,6 +432,9 @@ describe("adaptive interview planning", () => {
           followUpLimit: 0,
           sourceConfidence: null,
           rubricCriteria: ["Establish recent ownership."],
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-2",
@@ -430,6 +454,9 @@ describe("adaptive interview planning", () => {
           rubricCriteria: ["Name the decision and impact."],
           followUpLimit: 1,
           sourceConfidence: 0.9,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-3",
@@ -449,6 +476,9 @@ describe("adaptive interview planning", () => {
           followUpLimit: 1,
           sourceConfidence: 0.9,
           rubricCriteria: ["Name the technical trade-off.", "Describe the outcome."],
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-4",
@@ -468,6 +498,9 @@ describe("adaptive interview planning", () => {
           followUpLimit: 1,
           sourceConfidence: 0.9,
           rubricCriteria: ["Name the constraint.", "Explain the architecture choice."],
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-5",
@@ -487,6 +520,9 @@ describe("adaptive interview planning", () => {
           followUpLimit: 0,
           sourceConfidence: 0.9,
           rubricCriteria: ["Describe the team alignment.", "State the outcome."],
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
       ],
     }, evidence)).toThrow("clearly labeled general objective");
@@ -521,6 +557,9 @@ describe("adaptive interview planning", () => {
           rubricCriteria: ["Establish recent ownership."],
           followUpLimit: 0,
           sourceConfidence: null,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-2",
@@ -540,6 +579,9 @@ describe("adaptive interview planning", () => {
           rubricCriteria: ["Name the decision and impact."],
           followUpLimit: 1,
           sourceConfidence: 0.9,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-3",
@@ -559,6 +601,9 @@ describe("adaptive interview planning", () => {
           rubricCriteria: ["Name the technical trade-off.", "Describe the outcome."],
           followUpLimit: 1,
           sourceConfidence: 0.9,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-4",
@@ -578,6 +623,9 @@ describe("adaptive interview planning", () => {
           rubricCriteria: ["Name the constraint.", "Explain the architecture choice."],
           followUpLimit: 1,
           sourceConfidence: 0.9,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-5",
@@ -597,6 +645,9 @@ describe("adaptive interview planning", () => {
           rubricCriteria: ["Describe the team alignment.", "State the outcome."],
           followUpLimit: 0,
           sourceConfidence: 0.9,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
       ],
     }, evidence)).toThrow("unknown evidence");

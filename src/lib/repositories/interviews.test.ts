@@ -608,10 +608,10 @@ describe("mapSession", () => {
 
   it("rejects a plan that is not the exact five-question backbone before persistence", () => {
     expect(() => assertConversationPlan([
-      { id: "1", sequence: 1, category: "introduction", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "one", answer: null, createdAt: "" },
-      { id: "2", sequence: 2, category: "experience", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "two", answer: null, createdAt: "" },
-      { id: "3", sequence: 3, category: "technical", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "three", answer: null, createdAt: "" },
-      { id: "4", sequence: 4, category: "architecture", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "four", answer: null, createdAt: "" },
+      { id: "1", sequence: 1, category: "introduction", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "one", answer: null, createdAt: "", askedIntent: null, assistance: [], nonAnswer: false },
+      { id: "2", sequence: 2, category: "experience", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "two", answer: null, createdAt: "", askedIntent: null, assistance: [], nonAnswer: false },
+      { id: "3", sequence: 3, category: "technical", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "three", answer: null, createdAt: "", askedIntent: null, assistance: [], nonAnswer: false },
+      { id: "4", sequence: 4, category: "architecture", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "four", answer: null, createdAt: "", askedIntent: null, assistance: [], nonAnswer: false },
     ])).toThrow("five-question backbone");
   });
 
@@ -699,6 +699,9 @@ describe("mapSession", () => {
           missingSignalPrompts: ["Name the recent engineering area you owned."],
           followUpLimit: 0,
           sourceConfidence: null,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-2",
@@ -717,6 +720,9 @@ describe("mapSession", () => {
           missingSignalPrompts: ["Name the trade-off."],
           followUpLimit: 1,
           sourceConfidence: 0.94,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-3",
@@ -735,6 +741,9 @@ describe("mapSession", () => {
           missingSignalPrompts: ["What option did you reject?"],
           followUpLimit: 1,
           sourceConfidence: 0.94,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-4",
@@ -753,6 +762,9 @@ describe("mapSession", () => {
           missingSignalPrompts: ["What alert trade-off mattered most?"],
           followUpLimit: 1,
           sourceConfidence: 0.91,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-5",
@@ -771,6 +783,9 @@ describe("mapSession", () => {
           missingSignalPrompts: ["Who did you need alignment from?"],
           followUpLimit: 0,
           sourceConfidence: 0.91,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
       ],
       roundId: "tech-lead",
@@ -935,6 +950,9 @@ describe("mapSession", () => {
       missingSignalPrompts: ["Prompt"],
       followUpLimit: 1,
       sourceConfidence: 0.8,
+      askedIntent: null,
+      assistance: [],
+      nonAnswer: false,
     });
     const supabase = {
       rpc: async (name: string, payload: unknown) => {
@@ -1353,7 +1371,14 @@ function practiceBlueprint(questionCount: number): InterviewBlueprint {
       rubricCriteria: ["Meet the objective."],
       followUpLimit: 0,
       sourceConfidence: null,
+      askedIntent: null,
+      assistance: [],
+      nonAnswer: false,
     })),
+    // A practice-plan blueprint never consumes the round/coverage-target system.
+    roundId: "tech-lead",
+    turnBudget: 8,
+    targets: [],
   };
 }
 

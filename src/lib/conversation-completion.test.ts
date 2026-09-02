@@ -15,6 +15,10 @@ function question(sequence: number, answer: string | null, isFollowUp = false): 
     prompt: `Question ${sequence}`,
     answer,
     createdAt: "2026-08-31T09:00:00.000Z",
+    // This fixture predates the director's intent/assistance pipeline.
+    askedIntent: null,
+    assistance: [],
+    nonAnswer: false,
   };
 }
 
@@ -23,6 +27,9 @@ function session(overrides: Partial<InterviewSession> = {}): InterviewSession {
     id: "session-1",
     userId: "user-1",
     kind: "conversation",
+    roundId: "tech-lead",
+    mode: "real",
+    degraded: false,
     status: "active",
     startedAt: "2026-08-31T09:00:00.000Z",
     completedAt: null,

@@ -176,6 +176,9 @@ const blueprint: InterviewBlueprint = {
   maxQuestions: 6,
   createdAt: "2026-08-31T09:00:00.000Z",
   questions: [],
+  roundId: "tech-lead",
+  turnBudget: 8,
+  targets: [],
 };
 
 function session(overrides: Partial<InterviewSession> = {}): InterviewSession {
@@ -183,6 +186,9 @@ function session(overrides: Partial<InterviewSession> = {}): InterviewSession {
     id: "session-1",
     userId: "user-1",
     kind: "conversation",
+    roundId: "tech-lead",
+    mode: "real",
+    degraded: false,
     status: "active",
     startedAt: "2026-08-31T09:00:00.000Z",
     completedAt: null,

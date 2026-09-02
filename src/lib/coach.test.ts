@@ -45,6 +45,9 @@ const planned = (overrides: Partial<PlannedQuestion>): PlannedQuestion => ({
   prompt: "Generic prompt",
   answer: null,
   createdAt: "2026-08-29T10:00:00.000Z",
+  askedIntent: null,
+  assistance: [],
+  nonAnswer: false,
   ...overrides,
 });
 
@@ -181,6 +184,9 @@ const groundedBlueprint = (question: PlannedQuestion, overrides: Partial<Intervi
       ...overrides,
     },
   ],
+  roundId: "tech-lead",
+  turnBudget: 8,
+  targets: [],
 });
 
 /**
@@ -599,7 +605,7 @@ describe("nextTurn / evaluateAnswer", () => {
 
     const evaluation = await evaluateAnswer(
       question,
-      { status: "grounded", fallbackReason: null, maxFollowUps: 3, maxQuestions: 8, createdAt: "2026-08-29T10:00:00.000Z", questions: [question] },
+      { status: "grounded", fallbackReason: null, maxFollowUps: 3, maxQuestions: 8, createdAt: "2026-08-29T10:00:00.000Z", questions: [question], roundId: "tech-lead", turnBudget: 8, targets: [] },
       blueprintProfile,
       "I enjoy mentoring, reading docs, and learning new tools every week.",
       "interviewer: Tell me about the checkout migration.",
@@ -719,6 +725,9 @@ describe("nextTurn / evaluateAnswer", () => {
       maxQuestions: 8,
       createdAt: "2026-08-29T10:00:00.000Z",
       questions: [discoveryQuestion],
+      roundId: "tech-lead",
+      turnBudget: 8,
+      targets: [],
     };
 
     it("scores a relevant discovery answer without treating newly supplied facts as unsupported", async () => {
@@ -966,7 +975,7 @@ describe("nextTurn / evaluateAnswer", () => {
 
     const evaluation = await evaluateAnswer(
       question,
-      { status: "grounded", fallbackReason: null, maxFollowUps: 3, maxQuestions: 8, createdAt: "2026-08-29T10:00:00.000Z", questions: [question] },
+      { status: "grounded", fallbackReason: null, maxFollowUps: 3, maxQuestions: 8, createdAt: "2026-08-29T10:00:00.000Z", questions: [question], roundId: "tech-lead", turnBudget: 8, targets: [] },
       blueprintProfile,
       "I led the checkout migration, split bundles by route, accepted extra QA during rollout, and measured a 28% bundle-size drop.",
       "interviewer: Tell me about the checkout migration.",
@@ -1610,7 +1619,7 @@ describe("generatePracticeBlueprint", () => {
     for (const question of grounded) {
       expect(question.objective).toContain("Owned frontend architecture");
       expect(question.objective.match(/Build your self-presentation foundation/g) ?? []).toHaveLength(1);
-      expect(question.prompt.match(/Build your self-presentation foundation/g) ?? []).toHaveLength(1);
+      expect(question.prompt!.match(/Build your self-presentation foundation/g) ?? []).toHaveLength(1);
     }
   });
 

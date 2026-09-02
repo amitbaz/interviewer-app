@@ -23,7 +23,7 @@ const categories: QuestionCategory[] = ["introduction", "experience", "technical
 const discoveryCategories: QuestionCategory[] = ["introduction", "experience", "technical", "architecture", "behavioral"];
 const plannerTimestamp = "1970-01-01T00:00:00.000Z";
 const defaultMaxFollowUps = 3;
-const defaultMaxQuestions = 8;
+export const defaultMaxQuestions = 8;
 
 function normalizedSeniority(seniority: string): Difficulty {
   const value = seniority.toLowerCase();
@@ -237,6 +237,11 @@ function scoreCompetencyForCategory(
     prompt: null,
     answer: null,
     createdAt: plannerTimestamp,
+    // Synthetic scoring-only question: never asked, so it never went through
+    // the director's intent pipeline.
+    askedIntent: null,
+    assistance: [],
+    nonAnswer: false,
   };
   const evidenceScore = evidence.reduce((best, item) => Math.max(best, scoreEvidenceForQuestion(question, item)), 0);
   return evidenceScore + competency.relevance;
@@ -269,6 +274,10 @@ function fallbackQuestionPlan(
     prompt: null,
     answer: null,
     createdAt: plannerTimestamp,
+    // Not yet asked, so it predates the director's intent/assistance pipeline.
+    askedIntent: null,
+    assistance: [],
+    nonAnswer: false,
   };
 }
 
@@ -359,6 +368,10 @@ export function buildInterviewPlan(
       prompt: null,
       answer: null,
       createdAt: plannerTimestamp,
+      // Not yet asked, so it predates the director's intent/assistance pipeline.
+      askedIntent: null,
+      assistance: [],
+      nonAnswer: false,
     };
   });
 }
@@ -524,6 +537,13 @@ export function buildFallbackInterviewBlueprint(
     maxQuestions: defaultMaxQuestions,
     createdAt: now.toISOString(),
     questions: plan.map((question) => defaultBlueprintQuestion(question, evidenceForQuestion(question, evidence))),
+    // `generateInterviewBlueprint`'s `withCoveragePlan` is the single merge
+    // point that overwrites roundId/turnBudget/targets with the real
+    // round-derived values before this blueprint reaches a caller; these are
+    // inert placeholders that satisfy the type only.
+    roundId: "tech-lead",
+    turnBudget: defaultMaxQuestions,
+    targets: [],
   };
 }
 
@@ -667,6 +687,10 @@ export function buildExperienceDiscoveryBlueprint(
       rubricCriteria: discoveryRubricCriteria(category),
       followUpLimit: category === "introduction" || category === "behavioral" ? 0 : 1,
       sourceConfidence: null,
+      // Not yet asked, so it predates the director's intent/assistance pipeline.
+      askedIntent: null,
+      assistance: [],
+      nonAnswer: false,
     };
   });
 
@@ -679,5 +703,12 @@ export function buildExperienceDiscoveryBlueprint(
     maxQuestions: defaultMaxQuestions,
     createdAt,
     questions,
+    // `generateInterviewBlueprint`'s `withCoveragePlan` is the single merge
+    // point that overwrites roundId/turnBudget/targets with the real
+    // round-derived values before this blueprint reaches a caller; these are
+    // inert placeholders that satisfy the type only.
+    roundId: "tech-lead",
+    turnBudget: defaultMaxQuestions,
+    targets: [],
   };
 }

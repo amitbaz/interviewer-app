@@ -131,6 +131,10 @@ function question(sequence: number, answer: string | null): PlannedQuestion {
     prompt: `Question ${sequence}`,
     answer,
     createdAt: "2026-08-29T10:00:00.000Z",
+    // This fixture predates the director's intent/assistance pipeline.
+    askedIntent: null,
+    assistance: [],
+    nonAnswer: false,
   };
 }
 
@@ -143,6 +147,9 @@ function session(
     id: "session-1",
     userId: "user-1",
     kind: "conversation",
+    roundId: "tech-lead",
+    mode: "real",
+    degraded: false,
     status,
     startedAt: "2026-08-29T10:00:00.000Z",
     completedAt: status === "complete" ? "2026-08-29T11:00:00.000Z" : null,
@@ -220,6 +227,9 @@ describe("POST /api/interview", () => {
           sourceConfidence: null,
         },
       ],
+      roundId: "tech-lead" as const,
+      turnBudget: 8,
+      targets: [],
     };
     const persisted = session([{ ...question(1, null), id: "database-question-1" }]);
     persisted.blueprint = {
@@ -459,8 +469,14 @@ describe("POST /api/interview", () => {
           ],
           followUpLimit: 1,
           sourceConfidence: 0.9,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
       ],
+      roundId: "tech-lead" as const,
+      turnBudget: 8,
+      targets: [],
     };
     // The reloaded session's own `questions` rows already carry the
     // blueprint-shaped fields directly (Task 10's `mapQuestion`), not just
@@ -541,6 +557,9 @@ describe("POST /api/interview", () => {
           ],
           followUpLimit: 1,
           sourceConfidence: 0.94,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           sequence: 2,
@@ -564,8 +583,14 @@ describe("POST /api/interview", () => {
           id: "question-2",
           isFollowUp: false,
           createdAt: "2026-08-29T10:00:00.000Z",
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
       ],
+      roundId: "tech-lead" as const,
+      turnBudget: 8,
+      targets: [],
     };
     const activeSession = session([question(1, null), question(2, null)]);
     activeSession.blueprint = persistedBlueprint;
@@ -637,8 +662,14 @@ describe("POST /api/interview", () => {
           missingSignalPrompts: ["Name one concrete example."],
           followUpLimit: 0,
           sourceConfidence: null,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
       ],
+      roundId: "tech-lead" as const,
+      turnBudget: 8,
+      targets: [],
     };
     const persisted = session([
       {
