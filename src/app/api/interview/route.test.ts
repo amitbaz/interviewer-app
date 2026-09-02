@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
   createHandsOnSession: vi.fn(),
   createSessionWithPlan: vi.fn(),
   createSessionWithBlueprint: vi.fn(),
+  revealFirstQuestion: vi.fn(),
+  questionIdForTarget: vi.fn(),
   recordConversationTurn: vi.fn(),
   saveHandsOnCheckpoint: vi.fn(),
   completeSession: vi.fn(),
@@ -16,7 +18,7 @@ const mocks = vi.hoisted(() => ({
   buildInterviewPlan: vi.fn(),
   generateInterviewBlueprint: vi.fn(),
   nextTurn: vi.fn(),
-  initialQuestion: vi.fn(),
+  openingTurn: vi.fn(),
   summarizeSession: vi.fn(),
   evaluateHandsOn: vi.fn(),
   handsOnCheckpoint: vi.fn(),
@@ -24,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   generatePracticeBlueprint: vi.fn(),
   assessProfileReadiness: vi.fn(),
   updatePracticePlan: vi.fn(),
+  getOpportunity: vi.fn(),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({ requireUser: mocks.requireUser }));
@@ -39,6 +42,8 @@ vi.mock("@/lib/repositories/interviews", () => ({
   createSessionWithBlueprint: mocks.createSessionWithBlueprint,
   createSessionWithPracticeBlueprint: vi.fn(),
   createHandsOnPracticeSession: vi.fn(),
+  revealFirstQuestion: mocks.revealFirstQuestion,
+  questionIdForTarget: mocks.questionIdForTarget,
   recordConversationTurn: mocks.recordConversationTurn,
   saveHandsOnCheckpoint: mocks.saveHandsOnCheckpoint,
   completeSession: mocks.completeSession,
@@ -52,9 +57,10 @@ vi.mock("@/lib/repositories/practice-plans", async () => {
   return { ...actual, updatePracticePlan: mocks.updatePracticePlan };
 });
 vi.mock("@/lib/interview-planner", () => ({ buildInterviewPlan: mocks.buildInterviewPlan }));
+vi.mock("@/lib/repositories/opportunities", () => ({ getOpportunity: mocks.getOpportunity }));
 vi.mock("@/lib/coach", () => ({
   nextTurn: mocks.nextTurn,
-  initialQuestion: mocks.initialQuestion,
+  openingTurn: mocks.openingTurn,
   completeSession: mocks.summarizeSession,
   evaluateHandsOn: mocks.evaluateHandsOn,
   handsOnCheckpoint: mocks.handsOnCheckpoint,
@@ -62,6 +68,20 @@ vi.mock("@/lib/coach", () => ({
   generateInterviewBlueprint: mocks.generateInterviewBlueprint,
   generatePracticeBlueprint: mocks.generatePracticeBlueprint,
   assessProfileReadiness: mocks.assessProfileReadiness,
+  // The `dimensions` tuple `coach.ts` exports as `EVALUATION_DIMENSIONS`,
+  // duplicated here only because this module is mocked wholesale -- keep in
+  // sync with `coach.ts`'s internal `dimensions` constant.
+  EVALUATION_DIMENSIONS: [
+    "correctness",
+    "depth",
+    "clarity",
+    "structure",
+    "practicalExperience",
+    "tradeOffAwareness",
+    "communication",
+    "confidence",
+    "relevance",
+  ] as const,
 }));
 
 import { GET, POST } from "@/app/api/interview/route";
@@ -145,12 +165,21 @@ function plannedSession(questions: PlannedQuestion[], status: InterviewSession["
   return session(questions, status, "plan-1");
 }
 
+function jsonRequest(body: Record<string, unknown>): Request {
+  return new Request("http://localhost/api/interview", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
 describe("POST /api/interview", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.requireUser.mockResolvedValue({ supabase: { client: true }, user: { id: "user-1" } });
     mocks.getProfile.mockResolvedValue(profile);
     mocks.updatePracticePlan.mockResolvedValue({ id: "plan-1", status: "completed" });
+    mocks.getOpportunity.mockResolvedValue(null);
+    mocks.questionIdForTarget.mockReturnValue(null);
   });
 
   it("returns 401 before reading a request body when authentication is absent", async () => {
@@ -197,20 +226,23 @@ describe("POST /api/interview", () => {
       ...blueprint,
       questions: blueprint.questions.map((item) => ({ ...item, id: "database-question-1" })),
     };
+    const revealed = { ...persisted, mode: "real" as const, roundId: "tech-lead" as const };
 
     mocks.getProfile.mockResolvedValue(sparseProfile);
     mocks.generateInterviewBlueprint.mockResolvedValue(blueprint);
     mocks.createSessionWithBlueprint.mockResolvedValue(persisted);
-    mocks.initialQuestion.mockReturnValue(blueprint.questions[0].prompt);
+    mocks.openingTurn.mockResolvedValue({
+      intent: { kind: "open", targetId: "database-question-1" },
+      prompt: blueprint.questions[0].prompt,
+      targetId: "database-question-1",
+    });
+    mocks.revealFirstQuestion.mockResolvedValue(revealed);
 
-    const response = await POST(new Request("http://localhost/api/interview", {
-      method: "POST",
-      body: JSON.stringify({ action: "start", mode: "conversation" }),
-    }));
+    const response = await POST(jsonRequest({ action: "start", mode: "conversation" }));
 
     expect(response.status).toBe(200);
-    expect(mocks.generateInterviewBlueprint).toHaveBeenCalledWith(sparseProfile, []);
-    expect(mocks.createSessionWithBlueprint).toHaveBeenCalled();
+    expect(mocks.generateInterviewBlueprint).toHaveBeenCalledWith(sparseProfile, [], { roundId: "tech-lead", opportunity: null });
+    expect(mocks.createSessionWithBlueprint).toHaveBeenCalledWith(expect.anything(), "user-1", blueprint, { roundId: "tech-lead", mode: "real" });
     expect((await response.json()).session.blueprint.status).toBe("limited-grounding");
   });
 
@@ -225,6 +257,81 @@ describe("POST /api/interview", () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "Create your profile first." });
     expect(mocks.generateInterviewBlueprint).not.toHaveBeenCalled();
+  });
+
+  it("starts a session with the requested round and mode", async () => {
+    const blueprint = {
+      status: "grounded" as const,
+      fallbackReason: null,
+      maxFollowUps: 3,
+      maxQuestions: 8,
+      createdAt: "2026-08-29T10:00:00.000Z",
+      questions: [],
+      roundId: "tech-lead" as const,
+      turnBudget: 8,
+      targets: [],
+    };
+    const revealed = {
+      ...session([{ ...question(1, null), prompt: "Tell me about your background." }]),
+      mode: "coach" as const,
+      roundId: "tech-lead" as const,
+    };
+    mocks.generateInterviewBlueprint.mockResolvedValue(blueprint);
+    mocks.createSessionWithBlueprint.mockResolvedValue(session([question(1, null)]));
+    mocks.openingTurn.mockResolvedValue({
+      intent: { kind: "open", targetId: "question-1" },
+      prompt: "Tell me about your background.",
+      targetId: "question-1",
+    });
+    mocks.revealFirstQuestion.mockResolvedValue(revealed);
+
+    const response = await POST(jsonRequest({ action: "start", roundId: "tech-lead", mode: "coach" }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.session.mode).toBe("coach");
+    expect(body.session.roundId).toBe("tech-lead");
+    expect(body.session.questions[0].prompt).toBeTruthy();
+    expect(mocks.generateInterviewBlueprint).toHaveBeenCalledWith(profile, [], { roundId: "tech-lead", opportunity: null });
+    expect(mocks.createSessionWithBlueprint).toHaveBeenCalledWith(expect.anything(), "user-1", blueprint, { roundId: "tech-lead", mode: "coach" });
+  });
+
+  it("rejects a round that is specified but not implemented", async () => {
+    const response = await POST(jsonRequest({ action: "start", roundId: "founder", mode: "real" }));
+
+    expect(response.status).toBe(400);
+    expect(mocks.generateInterviewBlueprint).not.toHaveBeenCalled();
+  });
+
+  it("defaults to real mode when none is given", async () => {
+    const revealed = {
+      ...session([{ ...question(1, null), prompt: "Tell me about your background." }]),
+      mode: "real" as const,
+      roundId: "tech-lead" as const,
+    };
+    mocks.generateInterviewBlueprint.mockResolvedValue({
+      status: "grounded" as const,
+      fallbackReason: null,
+      maxFollowUps: 3,
+      maxQuestions: 8,
+      createdAt: "2026-08-29T10:00:00.000Z",
+      questions: [],
+      roundId: "tech-lead" as const,
+      turnBudget: 8,
+      targets: [],
+    });
+    mocks.createSessionWithBlueprint.mockResolvedValue(session([question(1, null)]));
+    mocks.openingTurn.mockResolvedValue({
+      intent: { kind: "open", targetId: "question-1" },
+      prompt: "Tell me about your background.",
+      targetId: "question-1",
+    });
+    mocks.revealFirstQuestion.mockResolvedValue(revealed);
+
+    const response = await POST(jsonRequest({ action: "start" }));
+    const body = await response.json();
+
+    expect(body.session.mode).toBe("real");
   });
 
   it("logs the underlying failure while keeping the public error generic", async () => {
@@ -244,14 +351,18 @@ describe("POST /api/interview", () => {
     consoleError.mockRestore();
   });
 
-  it("keeps the session active when the fifth backbone answer creates a persisted follow-up", async () => {
+  it("keeps the session active when the fifth backbone answer still has a next target", async () => {
     const current = session([1, 2, 3, 4, 5].map((sequence) => question(sequence, sequence < 5 ? "answered" : null)));
     const followUp = question(6, null);
     mocks.getSession.mockResolvedValue(current);
     mocks.nextTurn.mockResolvedValue({
       evaluation: { score: 5, competencyId: "react-id", competency: "React architecture", dimensions: {}, strengths: [], needsWork: ["Clarify"] },
-      nextQuestion: null,
-      followUp: { ...followUp, prompt: "Which trade-off did you choose?" },
+      nonAnswer: false,
+      intent: { kind: "probe", targetId: "question-5", aspect: "tradeoff", basis: "short answer" },
+      prompt: "Which trade-off did you choose?",
+      assistance: null,
+      targetId: "question-5",
+      degraded: false,
     });
     mocks.recordConversationTurn.mockResolvedValue(session([
       ...current.questions.slice(0, 4),
@@ -274,7 +385,13 @@ describe("POST /api/interview", () => {
       "question-5",
       "short answer",
       expect.anything(),
-      expect.objectContaining({ followUp: expect.objectContaining({ prompt: "Which trade-off did you choose?" }) }),
+      expect.objectContaining({
+        followUp: null,
+        nextPrompt: "Which trade-off did you choose?",
+        askedIntent: { kind: "probe", targetId: "question-5", aspect: "tradeoff", basis: "short answer" },
+        nonAnswer: false,
+        degraded: false,
+      }),
     );
     expect(mocks.completeSession).not.toHaveBeenCalled();
   });
@@ -312,11 +429,15 @@ describe("POST /api/interview", () => {
         },
       ],
     };
+    // The reloaded session's own `questions` rows already carry the
+    // blueprint-shaped fields directly (Task 10's `mapQuestion`), not just
+    // `session.blueprint.questions` -- mirror that here rather than only the
+    // bare `question()` fixture shape.
     const persisted = session([
       {
         ...question(1, null),
+        ...blueprint.questions[0],
         id: "database-question-1",
-        prompt: "Tell me about the migration.",
       },
     ]);
     persisted.blueprint = {
@@ -326,17 +447,19 @@ describe("POST /api/interview", () => {
 
     mocks.generateInterviewBlueprint.mockResolvedValue(blueprint);
     mocks.createSessionWithBlueprint.mockResolvedValue(persisted);
-    mocks.initialQuestion.mockReturnValue("Tell me about the migration.");
+    mocks.openingTurn.mockResolvedValue({
+      intent: { kind: "open", targetId: "database-question-1" },
+      prompt: "Tell me about the migration.",
+      targetId: "database-question-1",
+    });
+    mocks.revealFirstQuestion.mockResolvedValue(persisted);
 
-    const response = await POST(new Request("http://localhost/api/interview", {
-      method: "POST",
-      body: JSON.stringify({ action: "start" }),
-    }));
+    const response = await POST(jsonRequest({ action: "start" }));
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(mocks.generateInterviewBlueprint).toHaveBeenCalledWith(profile, []);
-    expect(mocks.createSessionWithBlueprint).toHaveBeenCalledWith(expect.anything(), "user-1", blueprint);
+    expect(mocks.generateInterviewBlueprint).toHaveBeenCalledWith(profile, [], { roundId: "tech-lead", opportunity: null });
+    expect(mocks.createSessionWithBlueprint).toHaveBeenCalledWith(expect.anything(), "user-1", blueprint, { roundId: "tech-lead", mode: "real" });
     expect(body.session.blueprint.questions[0].objective).toBe("Understand the candidate's recent work.");
     expect(body.session.blueprint.questions[0].id).toBe("database-question-1");
     expect(body.session.questions[0]).toMatchObject({
@@ -416,8 +539,12 @@ describe("POST /api/interview", () => {
     mocks.getSession.mockResolvedValue(activeSession);
     mocks.nextTurn.mockResolvedValue({
       evaluation: { score: 8, competencyId: "react-id", competency: "React architecture", dimensions: {}, strengths: ["Specific"], needsWork: [] },
-      nextQuestion: null,
-      followUp: null,
+      nonAnswer: false,
+      intent: { kind: "advance", targetId: "question-2", reason: "satisfied" },
+      prompt: "How would you shape observability?",
+      assistance: null,
+      targetId: "question-2",
+      degraded: false,
     });
     mocks.recordConversationTurn.mockResolvedValue(session([question(1, "A complete answer."), question(2, null)]));
 
@@ -427,9 +554,10 @@ describe("POST /api/interview", () => {
     }));
 
     expect(response.status).toBe(200);
-    expect(mocks.nextTurn).toHaveBeenCalledWith(
+    expect(mocks.nextTurn).toHaveBeenCalledWith({
       profile,
-      expect.objectContaining({
+      session: expect.anything(),
+      answeredQuestion: expect.objectContaining({
         id: "question-1",
         objective: "Probe the migration ownership and impact.",
         evidenceIds: ["evidence-1"],
@@ -444,26 +572,11 @@ describe("POST /api/interview", () => {
         sourceConfidence: 0.94,
         prompt: "Tell me about the checkout migration.",
       }),
-      expect.objectContaining({
-        id: "question-2",
-        objective: "Probe the system design decision.",
-        evidenceIds: ["evidence-2"],
-        expectedSignals: ["decision", "constraint"],
-        missingSignalPrompts: ["Name the design constraint."],
-        rubricCriteria: [
-          "Name the system design challenge.",
-          "Describe the constraint or alternative.",
-          "Explain the trade-off and result.",
-        ],
-        followUpLimit: 1,
-        sourceConfidence: 0.91,
-        prompt: "How would you shape observability?",
-      }),
-      profile.source,
-      expect.anything(),
-      "A complete answer.",
-      persistedBlueprint,
-    );
+      answer: "A complete answer.",
+      blueprint: persistedBlueprint,
+      evidence: [],
+      opportunity: null,
+    });
   });
 
   it("falls back to a limited-grounding blueprint without failing the start request", async () => {
@@ -505,11 +618,14 @@ describe("POST /api/interview", () => {
 
     mocks.generateInterviewBlueprint.mockResolvedValue(limitedBlueprint);
     mocks.createSessionWithBlueprint.mockResolvedValue(persisted);
+    mocks.openingTurn.mockResolvedValue({
+      intent: { kind: "open", targetId: "blueprint-question-1" },
+      prompt: "Tell me about yourself.",
+      targetId: "blueprint-question-1",
+    });
+    mocks.revealFirstQuestion.mockResolvedValue(persisted);
 
-    const response = await POST(new Request("http://localhost/api/interview", {
-      method: "POST",
-      body: JSON.stringify({ action: "start" }),
-    }));
+    const response = await POST(jsonRequest({ action: "start" }));
     const body = await response.json();
 
     expect(response.status).toBe(200);
@@ -524,8 +640,12 @@ describe("POST /api/interview", () => {
     mocks.getSession.mockResolvedValue(current);
     mocks.nextTurn.mockResolvedValue({
       evaluation: { score: 8, competencyId: "react-id", competency: "React architecture", dimensions: {}, strengths: ["Specific"], needsWork: [] },
-      nextQuestion: null,
-      followUp: null,
+      nonAnswer: false,
+      intent: { kind: "close" },
+      prompt: "Do you have any questions for me?",
+      assistance: null,
+      targetId: null,
+      degraded: false,
     });
     mocks.recordConversationTurn.mockResolvedValue(answered);
     mocks.summarizeSession.mockReturnValue({ overallScore: 8, summary: "Complete" });
@@ -663,8 +783,12 @@ describe("POST /api/interview", () => {
     mocks.getSession.mockResolvedValue(current);
     mocks.nextTurn.mockResolvedValue({
       evaluation: { score: 8, competencyId: "react-id", competency: "React architecture", dimensions: {}, strengths: [], needsWork: [] },
-      nextQuestion: null,
-      followUp: null,
+      nonAnswer: false,
+      intent: { kind: "close" },
+      prompt: "Do you have any questions for me?",
+      assistance: null,
+      targetId: null,
+      degraded: false,
     });
     mocks.recordConversationTurn.mockResolvedValue(answered);
     mocks.summarizeSession.mockReturnValue({ overallScore: 8, summary: "Complete" });

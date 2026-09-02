@@ -40,6 +40,8 @@ import type {
 } from "@/lib/types";
 
 const dimensions = ["correctness", "depth", "clarity", "structure", "practicalExperience", "tradeOffAwareness", "communication", "confidence", "relevance"] as const;
+/** The fixed set of scoring dimensions, exported for callers (e.g. `route.ts`'s `emptyEvaluationFor`) that need to build a placeholder `Evaluation` without duplicating this list. */
+export const EVALUATION_DIMENSIONS = dimensions;
 const dimensionShape = Object.fromEntries(dimensions.map((dimension) => [dimension, z.number().min(0).max(10)])) as Record<(typeof dimensions)[number], z.ZodNumber>;
 const dimensionReasonShape = Object.fromEntries(dimensions.map((dimension) => [dimension, z.string().min(1)])) as Record<(typeof dimensions)[number], z.ZodString>;
 const profileSchema = z.object({
