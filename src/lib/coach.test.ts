@@ -10,15 +10,20 @@ import {
   evaluateAnswer,
   generateInterviewBlueprint,
   generatePracticeBlueprint,
-  initialQuestion,
   nextTurn,
+  openingTurn,
   speakIntent,
 } from "@/lib/coach";
+import type { NextTurnInput } from "@/lib/coach";
 import { modePolicyFor, roundFor } from "@/lib/interview-rounds";
 import { deterministicLine } from "@/lib/interviewer-voice";
 import type {
   BlueprintQuestion,
+  CoverageTarget,
+  Evaluation,
   EvidenceItem,
+  GroundedEvaluation,
+  Intent,
   InterviewBlueprint,
   InterviewSession,
   Opportunity,
@@ -41,26 +46,6 @@ const planned = (overrides: Partial<PlannedQuestion>): PlannedQuestion => ({
   answer: null,
   createdAt: "2026-08-29T10:00:00.000Z",
   ...overrides,
-});
-
-const session = (questions: PlannedQuestion[]): InterviewSession => ({
-  id: "session-1",
-  userId: "user-1",
-  kind: "conversation",
-  status: "active",
-  startedAt: "2026-08-29T10:00:00.000Z",
-  completedAt: null,
-  exercise: {},
-  resultSummary: {},
-  overallScore: null,
-  questions,
-  checkpoints: [],
-  evaluations: [],
-  messages: [],
-  createdAt: "2026-08-29T10:00:00.000Z",
-  updatedAt: "2026-08-29T10:00:00.000Z",
-  practicePlanId: null,
-  opportunityId: null,
 });
 
 const dimensionKeys = [
@@ -198,27 +183,276 @@ const groundedBlueprint = (question: PlannedQuestion, overrides: Partial<Intervi
   ],
 });
 
+/**
+ * Stubs `fetch` to return the assessor response on the first Gemini call and
+ * the interviewer-line response on every call after, mirroring the two-call
+ * shape `nextTurn` makes (assessor, then `speakIntent`). Also stubs a Gemini
+ * API key so `modelJson` actually reaches the stubbed `fetch` instead of
+ * short-circuiting to its no-key fallback.
+ */
+function stubGemini(assessor: unknown, line: unknown) {
+  vi.stubEnv("GEMINI_API_KEY", "test-key");
+  const responses = [assessor, line];
+  let call = 0;
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+    candidates: [{ content: { parts: [{ text: JSON.stringify(responses[Math.min(call++, 1)]) }] } }],
+  }), { status: 200 })));
+}
+
+/** As `stubGemini`, but also records each request body onto `sink` in call order. */
+function stubGeminiCapturing(sink: string[], assessor: unknown, line: unknown) {
+  vi.stubEnv("GEMINI_API_KEY", "test-key");
+  const responses = [assessor, line];
+  let call = 0;
+  vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
+    sink.push(String(init.body));
+    return new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: JSON.stringify(responses[Math.min(call++, 1)]) }] } }],
+    }), { status: 200 });
+  }));
+}
+
+const dimensionReasonSample = Object.fromEntries(dimensionKeys.map((key) => [key, "Reasoned."])) as GroundedEvaluation["dimensionReasons"];
+const dimensionScoreSample = Object.fromEntries(dimensionKeys.map((key) => [key, 7])) as GroundedEvaluation["dimensions"];
+
+/** A schema-valid assessor evaluation payload, matching `groundedEvaluationSchema`. */
+function sampleGroundedEvaluation(overrides: Partial<GroundedEvaluation> = {}): GroundedEvaluation {
+  return {
+    score: 7,
+    competencyId: null,
+    competency: "Communication",
+    relevance: 7,
+    dimensions: dimensionScoreSample,
+    strengths: ["Specific example"],
+    needsWork: ["Add one trade-off"],
+    missingPoints: ["Name the trade-off you accepted."],
+    betterStructure: ["Start with the constraint, then the plan."],
+    improvedAnswer: "I would start with the constraint, explain the plan, and close with the trade-off.",
+    supportedClaims: ["I made a concrete decision and measured the result."],
+    expectedSignalsPresent: ["ownership"],
+    unsupportedClaims: [],
+    dimensionReasons: dimensionReasonSample,
+    ...overrides,
+  };
+}
+
+function coverageTarget(id: string, overrides: Partial<CoverageTarget> = {}): CoverageTarget {
+  return {
+    id,
+    competencyId: `competency-${id}`,
+    competencyName: `Competency ${id}`,
+    category: "experience",
+    evidenceIds: [],
+    difficulty: "senior",
+    objective: `Establish the candidate's ownership within Competency ${id}.`,
+    expectedSignals: ["ownership", "trade-off", "impact"],
+    rubricCriteria: [
+      `Name a concrete example from Competency ${id}.`,
+      "Describe the ownership or decision involved.",
+      "Explain the outcome or trade-off.",
+    ],
+    required: id === "a",
+    ...overrides,
+  };
+}
+
+function nextTurnBlueprint(overrides: Partial<InterviewBlueprint> = {}): InterviewBlueprint {
+  return {
+    status: "grounded",
+    fallbackReason: null,
+    maxFollowUps: 3,
+    maxQuestions: 8,
+    createdAt: "2026-08-29T10:00:00.000Z",
+    questions: [],
+    roundId: "tech-lead",
+    turnBudget: 8,
+    targets: [coverageTarget("a"), coverageTarget("b")],
+    ...overrides,
+  };
+}
+
+/** A `PlannedQuestion` this pipeline authored: `askedIntent` carries the intent that produced it. */
+function answeredQuestion(id: string, intent: Intent, overrides: Partial<PlannedQuestion> = {}): PlannedQuestion {
+  const targetId = "targetId" in intent ? intent.targetId : null;
+  return {
+    id,
+    sequence: 1,
+    category: "experience",
+    competencyId: targetId ? `competency-${targetId}` : null,
+    competencyName: targetId ? `Competency ${targetId}` : null,
+    difficulty: "senior",
+    isFollowUp: false,
+    prompt: "Prior interviewer prompt.",
+    answer: null,
+    createdAt: "2026-08-29T10:00:00.000Z",
+    askedIntent: intent,
+    assistance: [],
+    nonAnswer: false,
+    ...overrides,
+  };
+}
+
+function nextTurnSession(overrides: Partial<InterviewSession> = {}): InterviewSession {
+  return {
+    id: "session-1",
+    userId: "user-1",
+    kind: "conversation",
+    roundId: "tech-lead",
+    mode: "real",
+    status: "active",
+    degraded: false,
+    startedAt: "2026-08-29T10:00:00.000Z",
+    completedAt: null,
+    exercise: {},
+    resultSummary: {},
+    overallScore: null,
+    questions: [],
+    checkpoints: [],
+    evaluations: [],
+    messages: [],
+    createdAt: "2026-08-29T10:00:00.000Z",
+    updatedAt: "2026-08-29T10:00:00.000Z",
+    practicePlanId: null,
+    opportunityId: null,
+    ...overrides,
+  };
+}
+
+/** A full `NextTurnInput`, defaulting the session's questions to just the answered question. */
+function nextTurnInput(overrides: Partial<NextTurnInput> = {}): NextTurnInput {
+  const answered = overrides.answeredQuestion ?? answeredQuestion("q1", { kind: "open", targetId: "a" });
+  return {
+    profile: { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "Owns frontend platforms." },
+    session: nextTurnSession({ questions: [answered] }),
+    answeredQuestion: answered,
+    answer: "I led the checkout migration, split bundles by route, and measured a 28% drop in bundle size.",
+    blueprint: nextTurnBlueprint(),
+    evidence: blueprintEvidence,
+    opportunity: null,
+    ...overrides,
+  };
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
 });
 
-describe("initialQuestion", () => {
-  it("grounds an experience prompt in the planned competency and CV context", () => {
-    const question = initialQuestion(
-      { role: "Frontend Engineer" },
-      {
-        id: "question-1", sequence: 2, category: "experience", competencyId: "react-id",
-        competencyName: "React architecture", difficulty: "senior", isFollowUp: false,
-        prompt: "", answer: null, createdAt: "",
-      },
-      { cvText: "At Acme I led a React migration for the checkout team.", coverLetter: "" },
-    );
+describe("nextTurn — regressions from the observed session", () => {
+  it("rescues instead of probing harder when the candidate blanks", async () => {
+    stubGemini({ read: "stuck", evaluation: sampleGroundedEvaluation() }, { line: "Let's make it smaller — what is one screen you changed?" });
 
-    expect(question).toContain("React architecture");
-    expect(question).toContain("Acme");
+    const result = await nextTurn(nextTurnInput({ answer: "i am having a blackout" }));
+
+    expect(result.intent.kind).toBe("rescue");
+    expect(result.nonAnswer).toBe(true);
+    expect(result.evaluation).toBeNull();
+    expect(result.assistance).not.toBeNull();
   });
 
+  it("never lets an unpunctuated CV header reach a question", async () => {
+    const captured: string[] = [];
+    stubGeminiCapturing(captured, { read: "answered", evaluation: sampleGroundedEvaluation() }, { line: "What did you own there?" });
+
+    await nextTurn(nextTurnInput({
+      evidence: [{
+        id: "e1",
+        sourceKind: "cv",
+        sourceExcerpt: "Amit Baz Senior Product Engineer | Berlin, Germany | +49 177 2276319 | amitbaz2@gmail.com",
+        projectOrEmployer: "Acme",
+        ownership: "Owned frontend architecture",
+        technologies: ["React"],
+        decision: null,
+        constraint: null,
+        outcome: null,
+        recency: null,
+        confidence: 0.9,
+      } as EvidenceItem],
+    }));
+
+    const interviewerCall = captured[captured.length - 1];
+    expect(interviewerCall).not.toContain("2276319");
+    expect(interviewerCall).not.toContain("amitbaz2@gmail.com");
+  });
+
+  it("does not ask the same follow-up twice across different targets", async () => {
+    stubGemini(
+      { read: "answered", evaluation: sampleGroundedEvaluation() },
+      { line: "What decision did you personally make on Competency a?" },
+    );
+    const first = await nextTurn(nextTurnInput({
+      answeredQuestion: answeredQuestion("q1", { kind: "open", targetId: "a" }),
+    }));
+
+    stubGemini(
+      { read: "answered", evaluation: sampleGroundedEvaluation() },
+      { line: "What decision did you personally make on Competency b?" },
+    );
+    const second = await nextTurn(nextTurnInput({
+      answeredQuestion: answeredQuestion("q2", { kind: "open", targetId: "b" }),
+    }));
+
+    expect(first.prompt).not.toBe(second.prompt);
+  });
+});
+
+describe("nextTurn — director wiring", () => {
+  it("keeps working the same target while it remains unsatisfied", async () => {
+    const result = await nextTurn(nextTurnInput({
+      answeredQuestion: answeredQuestion("q1", { kind: "open", targetId: "a" }),
+    }));
+
+    // A non-stuck read produces a real evaluation (controller ruling 3).
+    expect(result.evaluation).not.toBeNull();
+    expect(result.intent.kind).not.toBe("advance");
+    expect(result.targetId).toBe("a");
+  });
+
+  it("advances to the next target once the current one is satisfied", async () => {
+    const priorQuestion = answeredQuestion("q1", { kind: "open", targetId: "a" }, { answer: "I owned the migration end to end." });
+    const currentQuestion = answeredQuestion("q2", { kind: "probe", targetId: "a", aspect: "specifics", basis: "I owned the migration end to end." }, { answer: "It cut load time by 20%." });
+    const priorEvaluation: Evaluation = {
+      score: 8,
+      questionId: priorQuestion.id,
+      competencyId: null,
+      competency: "Competency a",
+      dimensions: {},
+      strengths: [],
+      needsWork: [],
+      missingPoints: [],
+      betterStructure: [],
+      improvedAnswer: "",
+      expectedSignalsPresent: ["ownership", "trade-off", "impact"],
+    };
+
+    const result = await nextTurn(nextTurnInput({
+      answeredQuestion: currentQuestion,
+      session: nextTurnSession({ questions: [priorQuestion, currentQuestion], evaluations: [priorEvaluation] }),
+    }));
+
+    expect(result.intent.kind).toBe("advance");
+    expect(result.targetId).toBe("b");
+  });
+});
+
+describe("openingTurn", () => {
+  it("opens on the blueprint's first coverage target", async () => {
+    const result = await openingTurn({
+      profile: { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "Owns frontend platforms." },
+      session: nextTurnSession(),
+      blueprint: nextTurnBlueprint(),
+      evidence: blueprintEvidence,
+      opportunity: null,
+    });
+
+    expect(result.intent).toEqual({ kind: "open", targetId: "a" });
+    expect(result.targetId).toBe("a");
+    expect(result.prompt.length).toBeGreaterThan(0);
+  });
+});
+
+describe("nextTurn / evaluateAnswer", () => {
   it("falls back to a backend-oriented software-engineering profile when Gemini is unavailable", async () => {
     vi.stubEnv("GEMINI_API_KEY", "");
 
@@ -234,135 +468,6 @@ describe("initialQuestion", () => {
       expect.objectContaining({ name: "Node.js" }),
       expect.objectContaining({ name: "Postgres" }),
     ]));
-  });
-
-  it("bounds a single long CV sentence before placing it in an interview prompt", () => {
-    const cvText = `React migration ${"confidential detail ".repeat(80)}TAIL_MARKER.`;
-    const question = initialQuestion(
-      { role: "Frontend Engineer" },
-      planned({ category: "experience" }),
-      { cvText, coverLetter: "" },
-    );
-
-    expect(question.length).toBeLessThan(700);
-    expect(question).not.toContain("TAIL_MARKER");
-  });
-
-  it("frames the first interviewer prompt around the candidate's engineering role", () => {
-    const question = initialQuestion(
-      { role: "Backend Engineer" },
-      planned({ category: "introduction" }),
-      { cvText: "Built backend systems and APIs.", coverLetter: "" },
-    );
-
-    expect(question).toContain("backend work");
-    expect(question).not.toContain("frontend");
-  });
-
-  it("identifies the evaluator as a software-engineering interviewer", async () => {
-    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
-    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
-      candidates: [{
-        content: {
-          parts: [{
-            text: JSON.stringify({
-              question: "How would you design the backend rollout?",
-              shouldFollowUp: false,
-              evaluation: {
-                score: 7,
-                competency: "Ignored by normalization",
-                relevance: 7,
-                dimensions: {
-                  correctness: 7,
-                  depth: 7,
-                  clarity: 7,
-                  structure: 7,
-                  practicalExperience: 7,
-                  tradeOffAwareness: 7,
-                  communication: 7,
-                  confidence: 7,
-                  relevance: 7,
-                },
-                strengths: ["Specific example"],
-                needsWork: ["Add one trade-off"],
-                missingPoints: ["Call out the risk"],
-                betterStructure: ["Start with the constraint, then the plan."],
-                improvedAnswer: "I would start with the constraint, explain the plan, and close with the trade-off.",
-                supportedClaims: ["I would start with the constraint."],
-                expectedSignalsPresent: ["decision"],
-                unsupportedClaims: [],
-                dimensionReasons: {
-                  correctness: "The answer addresses the prompt.",
-                  depth: "It includes a concrete plan.",
-                  clarity: "It is easy to follow.",
-                  structure: "It has a clear sequence.",
-                  practicalExperience: "It refers to shipped work.",
-                  tradeOffAwareness: "It names the trade-off.",
-                  communication: "It is concise.",
-                  confidence: "It is direct.",
-                  relevance: "It answers the backend rollout question.",
-                },
-              },
-            }),
-          }],
-        },
-      }],
-    }), { status: 200, headers: { "Content-Type": "application/json" } }));
-
-    const answeredQuestion = planned({ id: "question-1", sequence: 1, category: "experience", prompt: "Tell me about the rollout." });
-    const nextQuestion = planned({
-      id: "question-2",
-      sequence: 2,
-      category: "architecture",
-      competencyId: "system-design-id",
-      competencyName: "System design",
-      prompt: "Generic architecture prompt",
-    });
-
-    await nextTurn(
-      { role: "Backend Engineer", seniority: "Senior", expertise: ["Node.js"], narrative: "Owns backend platforms." },
-      answeredQuestion,
-      nextQuestion,
-      { cvText: "Built backend systems and APIs.", coverLetter: "" },
-      session([answeredQuestion, nextQuestion]),
-      "I led the backend rollout, accepted a staged release, and measured the result.",
-    );
-
-    expect(fetchSpy).toHaveBeenCalled();
-    const requestBody = JSON.parse(String(fetchSpy.mock.calls[0][1]?.body));
-    expect(requestBody.contents[0].parts[0].text).toContain("software-engineering interviewer");
-    expect(requestBody.contents[0].parts[0].text).not.toContain("senior-frontend interviewer");
-    expect(requestBody.contents[0].parts[0].text).toContain("rubricCriteria");
-  });
-
-  it("returns a generated prompt for the next planned question when no follow-up is warranted", async () => {
-    const answeredQuestion = planned({ id: "question-1", sequence: 1, category: "experience" });
-    const nextQuestion = planned({
-      id: "question-2",
-      sequence: 2,
-      category: "architecture",
-      competencyId: "system-design-id",
-      competencyName: "System design",
-      prompt: "Generic architecture prompt",
-    });
-
-    const turn = await nextTurn(
-      { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "Owns frontend platforms." },
-      answeredQuestion,
-      nextQuestion,
-      { cvText: "At Acme I led a React migration and measured checkout performance.", coverLetter: "" },
-      session([answeredQuestion, nextQuestion]),
-      "I measured the rollout, made the trade-off explicit, and compared alternatives with the team. ".repeat(4),
-    );
-
-    expect(turn.followUp).toBeNull();
-    expect(turn.nextQuestion).toContain("System design");
-    expect(turn.nextQuestion).not.toBe(nextQuestion.prompt);
-    expect(Object.keys(turn.evaluation.dimensions).sort()).toEqual([...dimensionKeys].sort());
-    expect(turn.evaluation.missingPoints).toEqual([expect.any(String)]);
-    expect(turn.evaluation.betterStructure.length).toBeGreaterThan(0);
-    expect(turn.evaluation.improvedAnswer).toEqual(expect.any(String));
   });
 
   it("scores a relevant answer higher than an unrelated answer of the same length", async () => {
@@ -404,222 +509,6 @@ describe("initialQuestion", () => {
     expect(unrelated.expectedSignalsPresent).toEqual([]);
     expect(unrelated.unsupportedClaims.length).toBeGreaterThan(0);
     expect(relevant.dimensionReasons.relevance).toContain("checkout migration");
-  });
-
-  it("does not create a follow-up when the rubric explicitly sets the follow-up limit to zero", async () => {
-    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
-    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
-      candidates: [{
-        content: {
-          parts: [{
-            text: JSON.stringify({
-              question: "How would you shape the observability design for that rollout?",
-              shouldFollowUp: true,
-              evaluation: {
-                score: 7.7,
-                competency: "Ignored by normalization",
-                relevance: 8.1,
-                dimensions: {
-                  correctness: 8,
-                  depth: 7,
-                  clarity: 8,
-                  structure: 8,
-                  practicalExperience: 7,
-                  tradeOffAwareness: 8,
-                  communication: 8,
-                  confidence: 7,
-                  relevance: 8,
-                },
-                strengths: ["Specific collaboration example"],
-                needsWork: ["Name the trade-off earlier"],
-                missingPoints: ["Add the launch constraint."],
-                betterStructure: ["Start with the disagreement, then show the outcome."],
-                improvedAnswer: "I aligned engineering and product on the rollout, named the trade-off, and measured the outcome.",
-                supportedClaims: ["I aligned engineering and product on the rollout."],
-                expectedSignalsPresent: ["ownership", "impact"],
-                unsupportedClaims: [],
-                dimensionReasons: {
-                  correctness: "The answer addresses the rollout question.",
-                  depth: "It includes a concrete coordination example.",
-                  clarity: "It is concise and direct.",
-                  structure: "It follows a clear sequence.",
-                  practicalExperience: "It refers to shipped work.",
-                  tradeOffAwareness: "It names the rollout trade-off.",
-                  communication: "It is easy to follow.",
-                  confidence: "It states the ownership directly.",
-                  relevance: "It answers the rollout prompt.",
-                },
-              },
-            }),
-          }],
-        },
-      }],
-    }), { status: 200, headers: { "Content-Type": "application/json" } }));
-
-    const answeredQuestion = planned({
-      id: "question-1",
-      sequence: 1,
-      category: "experience",
-      prompt: "Tell me about the checkout migration.",
-    });
-    const nextQuestion = planned({
-      id: "question-2",
-      sequence: 2,
-      category: "architecture",
-      competencyId: "system-design-id",
-      competencyName: "System design",
-      prompt: "Generic architecture prompt",
-    });
-    const blueprint = groundedBlueprint(answeredQuestion, { followUpLimit: 0 });
-
-    const turn = await nextTurn(
-      { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "Owns frontend platforms." },
-      answeredQuestion,
-      nextQuestion,
-      { cvText: "At Acme I led the checkout migration and aligned engineering with product.", coverLetter: "" },
-      session([answeredQuestion, nextQuestion]),
-      "I aligned engineering and product on the checkout migration, accepted extra QA during rollout, and measured the impact after launch.",
-      blueprint,
-    );
-
-    expect(turn.followUp).toBeNull();
-    expect(turn.nextQuestion).toBe("Design an approach involving System design. Start with the requirements you would clarify.");
-  });
-
-  it("respects the per-question follow-up cap when the same question already has a follow-up", async () => {
-    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
-    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
-      candidates: [{
-        content: {
-          parts: [{
-            text: JSON.stringify({
-              question: "How would you shape the observability design for that rollout?",
-              shouldFollowUp: true,
-              evaluation: {
-                score: 7.7,
-                competency: "Ignored by normalization",
-                relevance: 8.1,
-                dimensions: {
-                  correctness: 8,
-                  depth: 7,
-                  clarity: 8,
-                  structure: 8,
-                  practicalExperience: 7,
-                  tradeOffAwareness: 8,
-                  communication: 8,
-                  confidence: 7,
-                  relevance: 8,
-                },
-                strengths: ["Specific collaboration example"],
-                needsWork: ["Name the trade-off earlier"],
-                missingPoints: ["Add the launch constraint."],
-                betterStructure: ["Start with the disagreement, then show the outcome."],
-                improvedAnswer: "I aligned engineering and product on the rollout, named the trade-off, and measured the outcome.",
-                supportedClaims: ["I aligned engineering and product on the rollout."],
-                expectedSignalsPresent: ["ownership", "impact"],
-                unsupportedClaims: [],
-                dimensionReasons: {
-                  correctness: "The answer addresses the rollout question.",
-                  depth: "It includes a concrete coordination example.",
-                  clarity: "It is concise and direct.",
-                  structure: "It follows a clear sequence.",
-                  practicalExperience: "It refers to shipped work.",
-                  tradeOffAwareness: "It names the rollout trade-off.",
-                  communication: "It is easy to follow.",
-                  confidence: "It states the ownership directly.",
-                  relevance: "It answers the rollout prompt.",
-                },
-              },
-            }),
-          }],
-        },
-      }],
-    }), { status: 200, headers: { "Content-Type": "application/json" } }));
-
-    const answeredQuestion = groundedBlueprint(planned({
-      id: "question-1",
-      sequence: 1,
-      category: "experience",
-      prompt: "Tell me about the checkout migration.",
-    })).questions[0];
-    const nextQuestion = planned({
-      id: "question-2",
-      sequence: 2,
-      category: "architecture",
-      competencyId: "system-design-id",
-      competencyName: "System design",
-      prompt: "Generic architecture prompt",
-    });
-    const priorFollowUp = {
-      id: "question-1a",
-      sequence: 2,
-      category: "experience" as const,
-      competencyId: answeredQuestion.competencyId,
-      competencyName: answeredQuestion.competencyName,
-      difficulty: answeredQuestion.difficulty,
-      isFollowUp: true,
-      prompt: "Tell me more about the migration trade-off.",
-      answer: "I kept the release staged.",
-      createdAt: "2026-08-29T10:00:00.000Z",
-      parentQuestionId: answeredQuestion.id,
-      objective: answeredQuestion.objective,
-      evidenceIds: answeredQuestion.evidenceIds,
-      expectedSignals: answeredQuestion.expectedSignals,
-      missingSignalPrompts: answeredQuestion.missingSignalPrompts,
-      rubricCriteria: answeredQuestion.rubricCriteria,
-      followUpLimit: answeredQuestion.followUpLimit,
-      sourceConfidence: answeredQuestion.sourceConfidence,
-    } satisfies PlannedQuestion;
-    const blueprint = groundedBlueprint(answeredQuestion);
-
-    const turn = await nextTurn(
-      { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "Owns frontend platforms." },
-      answeredQuestion,
-      nextQuestion,
-      { cvText: "At Acme I led a React migration and measured checkout performance.", coverLetter: "" },
-      session([answeredQuestion, priorFollowUp, nextQuestion]),
-      "I aligned engineering and product on the rollout, accepted extra QA during rollout, and measured the impact after launch.",
-      blueprint,
-    );
-
-    expect(turn.followUp).toBeNull();
-    expect(turn.nextQuestion).toBe("Design an approach involving System design. Start with the requirements you would clarify.");
-  });
-
-  it("does not request a follow-up solely because a relevant answer is concise", async () => {
-    const answeredQuestion = planned({
-      id: "question-1",
-      sequence: 1,
-      category: "experience",
-      prompt: "Tell me about the checkout migration.",
-    });
-    const nextQuestion = planned({
-      id: "question-2",
-      sequence: 2,
-      category: "architecture",
-      competencyId: "system-design-id",
-      competencyName: "System design",
-      prompt: "Generic architecture prompt",
-    });
-    const blueprint = groundedBlueprint(answeredQuestion);
-
-    const turn = await nextTurn(
-      { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "Owns frontend platforms." },
-      answeredQuestion,
-      nextQuestion,
-      { cvText: "At Acme I led a React migration and measured checkout performance.", coverLetter: "" },
-      session([answeredQuestion, nextQuestion]),
-      "I led the checkout migration, split bundles by route, accepted extra QA during rollout, and measured a 28% bundle-size drop.",
-      blueprint,
-    );
-
-    expect(turn.followUp).toBeNull();
-    expect(turn.nextQuestion).toContain("System design");
-    expect(turn.evaluation.relevance).toBeGreaterThan(6);
-    expect(turn.evaluation.relevance).toBeLessThan(8);
-    expect(turn.evaluation.expectedSignalsPresent).toEqual(expect.arrayContaining(["ownership", "trade-off", "impact"]));
   });
 
   it("rejects schema-valid Gemini praise when the answer is unrelated to the exact question", async () => {
@@ -704,8 +593,9 @@ describe("initialQuestion", () => {
 
   // The follow-up decision (and the nextQuestion/followUp routing it drives)
   // moved to the director and is no longer part of this call's contract --
-  // covered by Task 7's tests once the director is wired in. This test's
-  // subject is evaluation grounding, so it asserts only the evaluation.
+  // covered by the "nextTurn — director wiring" tests. This test's subject is
+  // evaluation grounding, so it asserts only the evaluation, via the assessor
+  // call directly (`evaluateAnswer`) rather than the full turn pipeline.
   it("preserves grounded coaching fields while stripping ungrounded model claims", async () => {
     vi.stubEnv("GEMINI_API_KEY", "private-test-key");
     vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
@@ -714,8 +604,6 @@ describe("initialQuestion", () => {
         content: {
           parts: [{
             text: JSON.stringify({
-              question: "How would you phase the migration?",
-              shouldFollowUp: false,
               read: "answered",
               evaluation: {
                 score: 8.4,
@@ -761,35 +649,26 @@ describe("initialQuestion", () => {
     // evidenceIds is non-empty so this question keeps a source-evidence
     // target: the model's unsupportedClaims must still pass through.
     const answeredQuestion = planned({ id: "question-1", sequence: 1, category: "experience", evidenceIds: ["evidence-1"] });
-    const nextQuestion = planned({
-      id: "question-2",
-      sequence: 2,
-      category: "architecture",
-      competencyId: "system-design-id",
-      competencyName: "System design",
-      prompt: "Generic architecture prompt",
-    });
 
-    const turn = await nextTurn(
-      { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "Owns frontend platforms." },
+    const evaluation = await evaluateAnswer(
       answeredQuestion,
-      nextQuestion,
-      { cvText: "At Acme I led a React migration and measured checkout performance.", coverLetter: "" },
-      session([answeredQuestion, nextQuestion]),
+      null,
+      { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "Owns frontend platforms." },
       "I phased the rollout carefully, compared alternatives with the team, made the trade-off explicit, and measured the impact after each milestone. ".repeat(2),
+      "",
     );
 
-    expect(turn.evaluation.competencyId).toBe("react-id");
-    expect(turn.evaluation.competency).toBe("React architecture");
-    expect(turn.evaluation.score).toBe(8.4);
-    expect(turn.evaluation.relevance).toBe(8.7);
-    expect(turn.evaluation.supportedClaims).toEqual(["I phased the rollout carefully."]);
-    expect(turn.evaluation.expectedSignalsPresent).toEqual(["trade-off", "impact"]);
-    expect(turn.evaluation.unsupportedClaims).toEqual(["We shipped it perfectly."]);
-    expect(turn.evaluation.improvedAnswer).toContain("rollback trigger");
-    expect(turn.evaluation.dimensionReasons).toBeDefined();
-    expect(turn.evaluation.dimensionReasons?.correctness).toContain("migration question");
-    expect(turn.evaluation.dimensionReasons?.relevance).toContain("checkout migration question");
+    expect(evaluation.competencyId).toBe("react-id");
+    expect(evaluation.competency).toBe("React architecture");
+    expect(evaluation.score).toBe(8.4);
+    expect(evaluation.relevance).toBe(8.7);
+    expect(evaluation.supportedClaims).toEqual(["I phased the rollout carefully."]);
+    expect(evaluation.expectedSignalsPresent).toEqual(["trade-off", "impact"]);
+    expect(evaluation.unsupportedClaims).toEqual(["We shipped it perfectly."]);
+    expect(evaluation.improvedAnswer).toContain("rollback trigger");
+    expect(evaluation.dimensionReasons).toBeDefined();
+    expect(evaluation.dimensionReasons?.correctness).toContain("migration question");
+    expect(evaluation.dimensionReasons?.relevance).toContain("checkout migration question");
   });
 
   describe("discovery answers with no source evidence target", () => {
@@ -996,96 +875,6 @@ describe("initialQuestion", () => {
       expect(groundedPrompt).not.toContain("Grounding rule:");
     });
 
-    it("still asks a follow-up for a vague discovery answer even though nothing is unsupported", async () => {
-      vi.stubEnv("GEMINI_API_KEY", "");
-
-      const nextQuestion = planned({
-        id: "question-2",
-        sequence: 2,
-        category: "architecture",
-        competencyId: "system-design-id",
-        competencyName: "System design",
-        prompt: "Generic architecture prompt",
-      });
-
-      const turn = await nextTurn(
-        { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "" },
-        discoveryQuestion,
-        nextQuestion,
-        { cvText: "", coverLetter: "" },
-        session([discoveryQuestion, nextQuestion]),
-        "I did some work once.",
-        discoveryBlueprint,
-      );
-
-      expect(turn.followUp).not.toBeNull();
-      expect(turn.evaluation.unsupportedClaims).toEqual([]);
-    });
-  });
-
-  it("requests a bounded follow-up when a weak answer needs clarification", async () => {
-    const answeredQuestion = planned({ id: "question-1", sequence: 1 });
-    const nextQuestion = planned({ id: "question-2", sequence: 2, category: "architecture" });
-
-    const turn = await nextTurn(
-      { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "" },
-      answeredQuestion,
-      nextQuestion,
-      { cvText: "React engineer at Acme.", coverLetter: "" },
-      session([answeredQuestion, nextQuestion]),
-      "I used React.",
-    );
-
-    expect(turn.followUp).toMatchObject({
-      category: "technical",
-      competencyId: "react-id",
-      competencyName: "React architecture",
-      isFollowUp: true,
-    });
-    expect(turn.nextQuestion).toBeNull();
-    expect(Object.keys(turn.evaluation.dimensions).sort()).toEqual([...dimensionKeys].sort());
-    expect(turn.evaluation.missingPoints).toEqual([expect.any(String)]);
-    expect(turn.evaluation.betterStructure.length).toBeGreaterThan(0);
-    expect(turn.evaluation.improvedAnswer).toEqual(expect.any(String));
-  });
-
-  it("preserves the follow-up rubric contract when a clarification is needed", async () => {
-    const answeredQuestion = groundedBlueprint(planned({
-      id: "question-1",
-      sequence: 1,
-      category: "experience",
-      prompt: "Tell me about the checkout migration.",
-    })).questions[0];
-    const nextQuestion = planned({
-      id: "question-2",
-      sequence: 2,
-      category: "architecture",
-      competencyId: "system-design-id",
-      competencyName: "System design",
-      prompt: "Generic architecture prompt",
-    });
-
-    const blueprint = groundedBlueprint(answeredQuestion);
-
-    const turn = await nextTurn(
-      { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "Owns frontend platforms." },
-      answeredQuestion,
-      nextQuestion,
-      { cvText: "At Acme I led a React migration and measured checkout performance.", coverLetter: "" },
-      session([answeredQuestion, nextQuestion]),
-      "I used React.",
-      blueprint,
-    );
-
-    expect(turn.followUp).toMatchObject({
-      objective: answeredQuestion.objective,
-      evidenceIds: answeredQuestion.evidenceIds,
-      expectedSignals: answeredQuestion.expectedSignals,
-      missingSignalPrompts: answeredQuestion.missingSignalPrompts,
-      followUpLimit: answeredQuestion.followUpLimit,
-      sourceConfidence: answeredQuestion.sourceConfidence,
-      rubricCriteria: answeredQuestion.rubricCriteria,
-    });
   });
 
   it("calibrates schema-valid model praise against verified answer signals", async () => {
@@ -1177,8 +966,7 @@ describe("initialQuestion", () => {
         content: {
           parts: [{
             text: JSON.stringify({
-              question: "How would you phase the migration?",
-              shouldFollowUp: false,
+              read: "answered",
               evaluation: {
                 score: 8.4,
                 competency: "Ignored by normalization",
@@ -1196,151 +984,17 @@ describe("initialQuestion", () => {
     }), { status: 200, headers: { "Content-Type": "application/json" } }));
 
     const answeredQuestion = planned({ id: "question-1", sequence: 1, category: "experience" });
-    const nextQuestion = planned({
-      id: "question-2",
-      sequence: 2,
-      category: "architecture",
-      competencyId: "system-design-id",
-      competencyName: "System design",
-      prompt: "Generic architecture prompt",
-    });
 
-    const turn = await nextTurn(
-      { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "Owns frontend platforms." },
+    const evaluation = await evaluateAnswer(
       answeredQuestion,
-      nextQuestion,
-      { cvText: "At Acme I led a React migration and measured checkout performance.", coverLetter: "" },
-      session([answeredQuestion, nextQuestion]),
-      "I phased the rollout carefully, compared alternatives with the team, made the trade-off explicit, and measured the impact after each milestone. ".repeat(2),
-    );
-
-    expect(turn.nextQuestion).toContain("System design");
-    expect(Object.keys(turn.evaluation.dimensions).sort()).toEqual([...dimensionKeys].sort());
-    expect(turn.evaluation.dimensions.structure).not.toBe(9);
-  });
-
-  it("advances a two-question practice blueprint without assuming the five-question backbone", async () => {
-    const firstQuestion = groundedBlueprint(planned({
-      id: "question-1",
-      sequence: 1,
-      category: "experience",
-      prompt: "Tell me about the checkout migration.",
-    })).questions[0];
-    const secondQuestionPlanned = planned({
-      id: "question-2",
-      sequence: 2,
-      category: "technical",
-      competencyId: "react-id",
-      competencyName: "React architecture",
-      prompt: "Generic technical prompt",
-    });
-    const blueprint: InterviewBlueprint = {
-      status: "grounded",
-      fallbackReason: null,
-      maxFollowUps: 1,
-      maxQuestions: 3,
-      createdAt: "2026-08-29T10:00:00.000Z",
-      questions: [
-        firstQuestion,
-        {
-          ...secondQuestionPlanned,
-          objective: "Probe the route-splitting technical decision.",
-          evidenceIds: [],
-          expectedSignals: ["decision", "trade-off"],
-          missingSignalPrompts: ["Name the trade-off you rejected."],
-          rubricCriteria: ["Name the decision.", "Explain the trade-off."],
-          followUpLimit: 1,
-          sourceConfidence: null,
-        },
-      ],
-    };
-
-    const turn = await nextTurn(
+      null,
       { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "Owns frontend platforms." },
-      firstQuestion,
-      secondQuestionPlanned,
-      { cvText: "At Acme I led a React migration and measured checkout performance.", coverLetter: "" },
-      session([firstQuestion, secondQuestionPlanned]),
-      "I led the checkout migration, split bundles by route, accepted extra QA during rollout, and measured a 28% bundle-size drop.",
-      blueprint,
+      "I phased the rollout carefully, compared alternatives with the team, made the trade-off explicit, and measured the impact after each milestone. ".repeat(2),
+      "",
     );
 
-    expect(turn.followUp).toBeNull();
-    expect(turn.nextQuestion).toContain("React architecture");
-  });
-
-  it("gates follow-ups on a three-question blueprint's own maxFollowUps rather than the generic eight-question ceiling", async () => {
-    const firstQuestion = groundedBlueprint(planned({
-      id: "question-1",
-      sequence: 1,
-      category: "experience",
-      prompt: "Tell me about the checkout migration.",
-    })).questions[0];
-    const secondQuestion = {
-      ...planned({ id: "question-2", sequence: 2, category: "technical", prompt: "Second prompt" }),
-      objective: "Probe the technical decision.",
-      evidenceIds: [],
-      expectedSignals: ["decision", "trade-off"],
-      missingSignalPrompts: ["Name the trade-off."],
-      rubricCriteria: ["Name the decision.", "Explain the trade-off."],
-      followUpLimit: 1,
-      sourceConfidence: null,
-    };
-    const thirdQuestionPlanned = planned({ id: "question-3", sequence: 3, category: "behavioral", prompt: "Third prompt" });
-    const blueprint: InterviewBlueprint = {
-      status: "grounded",
-      fallbackReason: null,
-      maxFollowUps: 1,
-      maxQuestions: 4,
-      createdAt: "2026-08-29T10:00:00.000Z",
-      questions: [
-        firstQuestion,
-        secondQuestion,
-        {
-          ...thirdQuestionPlanned,
-          objective: "Probe a collaboration challenge.",
-          evidenceIds: [],
-          expectedSignals: ["collaboration"],
-          missingSignalPrompts: ["Who did you need alignment from?"],
-          rubricCriteria: ["Name the collaboration challenge."],
-          followUpLimit: 1,
-          sourceConfidence: null,
-        },
-      ],
-    };
-    const priorFollowUp = {
-      id: "question-1a",
-      sequence: 4,
-      category: "experience" as const,
-      competencyId: firstQuestion.competencyId,
-      competencyName: firstQuestion.competencyName,
-      difficulty: firstQuestion.difficulty,
-      isFollowUp: true,
-      prompt: "Make that migration example more concrete.",
-      answer: "I kept the release staged.",
-      createdAt: "2026-08-29T10:00:00.000Z",
-      parentQuestionId: firstQuestion.id,
-      objective: firstQuestion.objective,
-      evidenceIds: firstQuestion.evidenceIds,
-      expectedSignals: firstQuestion.expectedSignals,
-      missingSignalPrompts: firstQuestion.missingSignalPrompts,
-      rubricCriteria: firstQuestion.rubricCriteria,
-      followUpLimit: firstQuestion.followUpLimit,
-      sourceConfidence: firstQuestion.sourceConfidence,
-    } satisfies PlannedQuestion;
-
-    const turn = await nextTurn(
-      { role: "Frontend Engineer", seniority: "Senior", expertise: ["React"], narrative: "" },
-      secondQuestion,
-      thirdQuestionPlanned,
-      { cvText: "React engineer at Acme.", coverLetter: "" },
-      session([firstQuestion, priorFollowUp, secondQuestion, thirdQuestionPlanned]),
-      "I used React.",
-      blueprint,
-    );
-
-    expect(turn.followUp).toBeNull();
-    expect(turn.nextQuestion).toContain("collaboration challenge related to React architecture");
+    expect(Object.keys(evaluation.dimensions).sort()).toEqual([...dimensionKeys].sort());
+    expect(evaluation.dimensions.structure).not.toBe(9);
   });
 
   it("sends PDF input without unsupported sampling parameters", async () => {
