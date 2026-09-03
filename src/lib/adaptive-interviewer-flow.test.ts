@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EVALUATION_DIMENSIONS, generateInterviewBlueprint, nextTurn, openingTurn } from "@/lib/coach";
 import { deriveCoverageState } from "@/lib/interview-coverage";
+import { resolveNextQuestionWrite } from "@/lib/interview-turn-write";
 import {
   createSessionWithBlueprint,
-  questionIdForTarget,
   recordConversationTurn,
   revealFirstQuestion,
 } from "@/lib/repositories/interviews";
@@ -162,8 +162,8 @@ function dimensionRecord<T>(value: T): Record<(typeof EVALUATION_DIMENSIONS)[num
  * turn. `expectedSignalsPresent` is set to the CURRENT question's own
  * `expectedSignals` (read off the real, persisted `session.blueprint.targets`
  * entry for the question actually being answered) whenever the scripted read
- * is "answered" -- this is what lets `deriveCoverageState` mark a target
- * `satisfied` deterministically, without depending on the fallback
+ * is "answered" and the turn is not scripted as partial -- this is what lets
+ * `deriveCoverageState` mark a target `satisfied` deterministically, without depending on the fallback
  * text-matching heuristics `groundedEvaluationFor` uses for un-stubbed runs.
  * Every strong scripted answer also contains explicit first-person ownership
  * language ("I owned/led/built ..."), which independently satisfies
@@ -581,6 +581,14 @@ function strongAnswers(): string[] {
 async function runScriptedSession(options: {
   mode: InterviewMode;
   answers: string[];
+  /**
+   * Zero-based indices of answers the assessor reports as covering only the
+   * FIRST of the target's expected signals. A target only leaves `open` when
+   * every signal is present, so such a turn leaves the thread open and forces
+   * the director to take a second turn on the same target -- the follow-up-row
+   * path, which a session of uniformly complete coverage never reaches.
+   */
+  partialCoverageTurns?: number[];
   opportunity?: Pick<Opportunity, "company" | "role" | "jobDescription" | "gaps">;
 }): Promise<InterviewSession> {
   const supabase = makeFakeSupabase();
@@ -619,12 +627,17 @@ async function runScriptedSession(options: {
   });
   session = await revealFirstQuestion(supabase as never, USER_ID, session, opening);
 
-  for (const answer of options.answers) {
+  const partialTurns = new Set(options.partialCoverageTurns ?? []);
+  for (const [index, answer] of options.answers.entries()) {
     const question = session.questions.find((item) => !item.answer);
     if (!question) break;
-    const target = session.blueprint!.targets.find((item) => item.id === question.id) ?? null;
+    // A follow-up row carries its parent's signals, so read them off the row
+    // being answered rather than only off `targets` (which holds base rows).
+    const signals = session.blueprint!.targets.find((item) => item.id === question.id)?.expectedSignals
+      ?? question.expectedSignals
+      ?? [];
     const read: "answered" | "stuck" = isStuckAnswer(answer) ? "stuck" : "answered";
-    pushAssessor(read, target?.expectedSignals ?? []);
+    pushAssessor(read, partialTurns.has(index) ? signals.slice(0, 1) : signals);
     pushLine();
 
     const turn = await nextTurn({
@@ -637,11 +650,10 @@ async function runScriptedSession(options: {
       opportunity,
     });
 
-    // Mirrors `route.ts`'s respond handler: a same-target continuation after
-    // a real answer routes through `followUp` instead of `nextQuestionId`,
-    // and assistance accumulates onto the row's own persisted history
-    // instead of replacing it (see both comments there).
-    const isSameTargetContinuation = turn.targetId === question.id && !turn.nonAnswer;
+    // The route's own resolution, not a re-implementation of it: which row
+    // carries the next prompt is exactly the seam this flow is here to cover,
+    // and a local copy is what let it drift out of step with `route.ts`.
+    const write = resolveNextQuestionWrite(session, question, turn);
 
     session = await recordConversationTurn(
       supabase as never,
@@ -650,12 +662,13 @@ async function runScriptedSession(options: {
       answer,
       turn.evaluation ?? emptyEvaluationFor(question),
       {
-        nextQuestionId: !isSameTargetContinuation && turn.targetId
-          ? questionIdForTarget(session, turn.targetId)
-          : null,
+        nextQuestionId: write.nextQuestionId,
         nextPrompt: turn.prompt,
-        followUp: isSameTargetContinuation ? followUpDraftForContinuation(question, turn.prompt) : null,
+        followUp: write.followUp,
         askedIntent: turn.intent,
+        // Accumulates onto the row's own persisted history, as `route.ts`
+        // does: a rescue re-asks the SAME row, so replacing would lose every
+        // earlier rescue recorded on it.
         assistance: [...question.assistance, ...(turn.assistance ? [turn.assistance] : [])],
         nonAnswer: turn.nonAnswer,
         degraded: turn.degraded,
@@ -666,27 +679,18 @@ async function runScriptedSession(options: {
   return session;
 }
 
-/** Mirrors `route.ts`'s `followUpDraftForContinuation` -- see its doc comment. */
-function followUpDraftForContinuation(question: PlannedQuestion, prompt: string) {
-  return {
-    category: question.category,
-    competencyId: question.competencyId,
-    competencyName: question.competencyName,
-    difficulty: question.difficulty,
-    isFollowUp: true as const,
-    prompt,
-    objective: question.objective ?? "",
-    evidenceIds: question.evidenceIds ?? [],
-    expectedSignals: question.expectedSignals ?? [],
-    missingSignalPrompts: [],
-    rubricCriteria: question.rubricCriteria ?? [],
-    followUpLimit: 1,
-    sourceConfidence: null,
-  };
-}
-
 function coverageAtEnd(session: InterviewSession) {
   return deriveCoverageState(session.blueprint!.targets, session.questions, session.evaluations);
+}
+
+/**
+ * Every question the candidate was actually shown had something in it. A row
+ * answered with a null prompt means the turn that should have authored it
+ * resolved to no write at all, and `transcriptFor` rendered an empty
+ * interviewer bubble the candidate then "answered".
+ */
+function answeredWithNoPrompt(session: InterviewSession): PlannedQuestion[] {
+  return session.questions.filter((question) => question.answer !== null && !question.prompt);
 }
 
 describe("adaptive interviewer flow", () => {
@@ -695,6 +699,29 @@ describe("adaptive interviewer flow", () => {
     const states = coverageAtEnd(session);
     expect(states.filter((state) => state.target.required).every((state) => state.status === "satisfied")).toBe(true);
     expect(session.questions.every((question) => question.assistance.length === 0)).toBe(true);
+    expect(answeredWithNoPrompt(session)).toEqual([]);
+  });
+
+  it("follows a partially covered target onto a second turn without ever blanking a question", async () => {
+    // The first answer leaves the opening target open, so the director probes
+    // the SAME target again. That continuation cannot go back onto the row it
+    // just answered, so it lands on a follow-up row -- and that follow-up row
+    // then carries a different id from the target it belongs to, which is
+    // where an id-based same-target check silently stopped writing a next
+    // question at all and left the candidate an empty bubble.
+    const session = await runScriptedSession({
+      mode: "real",
+      answers: strongAnswers(),
+      partialCoverageTurns: [0, 1],
+    });
+
+    expect(session.questions.some((question) => question.isFollowUp)).toBe(true);
+    expect(answeredWithNoPrompt(session)).toEqual([]);
+    // The thread stayed on its own target: the follow-up row is attributed
+    // through `askedIntent.targetId`, not through the row that carries it.
+    const followUp = session.questions.find((question) => question.isFollowUp);
+    const openingTargetId = session.blueprint!.targets[0].id;
+    expect(followUp?.askedIntent).toMatchObject({ targetId: openingTargetId });
   });
 
   it("rescues a blanking candidate in coach mode and returns to the parked target", async () => {
