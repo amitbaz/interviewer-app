@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveCoverageState, rescuesSpentInSession, targetIdOf } from "@/lib/interview-coverage";
+import { canContinueOnAnsweredRow, deriveCoverageState, rescuesSpentInSession, targetIdOf } from "@/lib/interview-coverage";
 import type { CoverageTarget, Evaluation, PlannedQuestion } from "@/lib/types";
 
 function target(id: string, overrides: Partial<CoverageTarget> = {}): CoverageTarget {
@@ -118,6 +118,34 @@ describe("deriveCoverageState", () => {
     });
     const state = deriveCoverageState([target("a")], [blank], []);
     expect(state[0].status).toBe("open");
+  });
+});
+
+describe("canContinueOnAnsweredRow", () => {
+  const limits = { maxFollowUps: 3, maxQuestions: 8 };
+
+  it("allows one continuation off a coverage-target row", () => {
+    const row = question("q1");
+    expect(canContinueOnAnsweredRow([row], row, limits)).toBe(true);
+  });
+
+  it("refuses a continuation off a follow-up row", () => {
+    // `record_conversation_turn` unconditionally refuses a follow-up whose
+    // parent is itself a follow-up, so there is nowhere to write one.
+    const row = question("follow-1", { isFollowUp: true });
+    expect(canContinueOnAnsweredRow([question("q1"), row], row, limits)).toBe(false);
+  });
+
+  it("refuses a continuation once the session's follow-up budget is spent", () => {
+    const row = question("q1");
+    const followUps = ["f1", "f2", "f3"].map((id) => question(id, { isFollowUp: true }));
+    expect(canContinueOnAnsweredRow([row, ...followUps], row, limits)).toBe(false);
+  });
+
+  it("refuses a continuation once the session's question budget is spent", () => {
+    const row = question("q1");
+    const rows = Array.from({ length: 8 }, (_, index) => question(`q${index + 1}`));
+    expect(canContinueOnAnsweredRow(rows, row, limits)).toBe(false);
   });
 });
 

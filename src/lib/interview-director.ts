@@ -21,6 +21,13 @@ export type DirectorInput = {
   turnsUsed: number;
   turnBudget: number;
   sessionRescues: number;
+  /**
+   * Whether the store can still carry another turn on `currentTargetId` after
+   * a real answer (see `canContinueOnAnsweredRow`). False means a probe or
+   * challenge here would have nowhere to be written, so the round moves on
+   * instead of asking a question the candidate would never see.
+   */
+  canContinueCurrentTarget: boolean;
   /** ISO-8601 timestamp supplied by the caller, stamped onto any `AssistanceRecord` this turn produces. Keeps `decideIntent` pure -- it never reads the clock itself. */
   now: string;
 };
@@ -144,6 +151,12 @@ export function decideIntent(input: DirectorInput): DirectorDecision {
   if (state.status === "unasked") {
     return { intent: { kind: "open", targetId: state.target.id }, assistance: null };
   }
+
+  // Every intent below deepens the current target, and after a real answer
+  // that costs a new row. "line-exhausted" rather than a reason of its own:
+  // from the round's point of view this line of questioning is over, and the
+  // reason is only ever read as an advance's justification.
+  if (!input.canContinueCurrentTarget) return advance(input, "line-exhausted") ?? closing(input);
 
   const unsupported = input.unsupportedClaims[0];
   const alreadyChallenged = state.askedIntents.some((intent) => intent.kind === "challenge" && intent.claim === unsupported);

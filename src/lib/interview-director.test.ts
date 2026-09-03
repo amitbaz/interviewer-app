@@ -41,6 +41,7 @@ function input(overrides: Partial<DirectorInput> = {}): DirectorInput {
     turnsUsed: 1,
     turnBudget: 8,
     sessionRescues: 0,
+    canContinueCurrentTarget: true,
     now: "2026-01-01T00:00:00.000Z",
     ...overrides,
   };
@@ -118,6 +119,40 @@ describe("decideIntent — stuck candidates", () => {
     };
     const decision = decideIntent(input({ read: "stuck", policy: reorderedPolicy }));
     expect(decision.intent).toMatchObject({ kind: "rescue", style: "reframe" });
+  });
+});
+
+describe("decideIntent — continuation budget", () => {
+  it("moves on rather than deepening a target the store cannot carry another turn on", () => {
+    // The persisted model gives an answered row at most one continuation
+    // (a follow-up row), and refuses one whose parent is itself a follow-up.
+    // Probing anyway produced a question with nowhere to be written, which
+    // reached the candidate as an empty interviewer bubble.
+    const decision = decideIntent(input({
+      states: [state("a", { status: "open", turnsSpent: 2, askedIntents: [{ kind: "open", targetId: "a" }] }), state("b")],
+      canContinueCurrentTarget: false,
+    }));
+    expect(decision.intent).toMatchObject({ kind: "advance", targetId: "b" });
+  });
+
+  it("still deepens the current target while the store can carry it", () => {
+    const decision = decideIntent(input({
+      states: [state("a", { status: "open", turnsSpent: 2, askedIntents: [{ kind: "open", targetId: "a" }] }), state("b")],
+      canContinueCurrentTarget: true,
+    }));
+    expect(decision.intent).toMatchObject({ kind: "probe", targetId: "a" });
+  });
+
+  it("keeps rescuing a stuck candidate, which re-asks the same unanswered row", () => {
+    // A non-answer never sets the row's `answer`, so a rescue needs no new row
+    // and the continuation budget does not apply to it.
+    const decision = decideIntent(input({
+      read: "stuck",
+      states: [state("a", { status: "open", turnsSpent: 1, askedIntents: [{ kind: "open", targetId: "a" }] }), state("b")],
+      canContinueCurrentTarget: false,
+      policy: modePolicyFor("coach"),
+    }));
+    expect(decision.intent.kind).toBe("rescue");
   });
 });
 

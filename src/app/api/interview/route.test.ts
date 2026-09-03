@@ -395,7 +395,14 @@ describe("POST /api/interview", () => {
   });
 
   it("routes a same-target continuation through the follow-up branch, not nextQuestionId", async () => {
-    const current = session([1, 2, 3, 4, 5].map((sequence) => question(sequence, sequence < 5 ? "answered" : null)));
+    // Question 5 carries an `askedIntent`, so it is an adaptive coverage-target
+    // row rather than a pre-written one -- the discriminator
+    // `resolveNextQuestionWrite` uses to tell the two session kinds apart.
+    const current = session([1, 2, 3, 4, 5].map((sequence) => (
+      sequence === 5
+        ? { ...question(sequence, null), askedIntent: { kind: "open" as const, targetId: "question-5" } }
+        : question(sequence, "answered")
+    )));
     const followUp = question(6, null);
     mocks.getSession.mockResolvedValue(current);
     mocks.nextTurn.mockResolvedValue({
@@ -457,6 +464,74 @@ describe("POST /api/interview", () => {
       }),
     );
     expect(mocks.completeSession).not.toHaveBeenCalled();
+  });
+
+  it("never derives a follow-up for a planned-practice session's pre-written questions", async () => {
+    // The C1 shape: pre-written prompts and no `askedIntent`, so `mapSession`
+    // hands the director a full set of reconstructed coverage targets the plan
+    // was never designed for, and `decideIntent` advances to the very row being
+    // answered. Persisting that as a follow-up made the RPC raise
+    // "Conversation follow-up limit reached" on the practice introduction
+    // (whose `follow_up_limit` is 0) and returned HTTP 500.
+    const current = plannedSession([question(1, null), question(2, null), question(3, null)]);
+    mocks.getSession.mockResolvedValue(current);
+    mocks.questionIdForTarget.mockReturnValue("question-1");
+    mocks.nextTurn.mockResolvedValue({
+      evaluation: { score: 7, competencyId: null, competency: "Communication", dimensions: {}, strengths: [], needsWork: [] },
+      nonAnswer: false,
+      intent: { kind: "advance", targetId: "question-1", reason: "satisfied" },
+      prompt: "An adaptive line the planned session must not adopt.",
+      assistance: null,
+      targetId: "question-1",
+      degraded: false,
+    });
+    mocks.recordConversationTurn.mockResolvedValue(plannedSession([
+      question(1, "an answer"), question(2, null), question(3, null),
+    ]));
+
+    const response = await POST(jsonRequest({ action: "respond", sessionId: "session-1", answer: "an answer" }));
+
+    expect(response.status).toBe(200);
+    expect(mocks.recordConversationTurn).toHaveBeenCalledWith(
+      expect.anything(),
+      "user-1",
+      "question-1",
+      "an answer",
+      expect.anything(),
+      expect.objectContaining({ nextQuestionId: null, followUp: null }),
+    );
+  });
+
+  it("records a pre-written question the assessor could not score instead of re-asking it", async () => {
+    const current = plannedSession([question(1, null), question(2, null), question(3, null)]);
+    mocks.getSession.mockResolvedValue(current);
+    mocks.nextTurn.mockResolvedValue({
+      evaluation: null,
+      nonAnswer: true,
+      intent: { kind: "rescue", targetId: "question-1", style: "narrow", hook: null },
+      prompt: "A smaller version of the same question?",
+      assistance: { style: "narrow", at: "2026-09-01T09:00:00.000Z" },
+      targetId: "question-1",
+      degraded: false,
+    });
+    mocks.recordConversationTurn.mockResolvedValue(plannedSession([
+      question(1, "i don't know"), question(2, null), question(3, null),
+    ]));
+
+    const response = await POST(jsonRequest({ action: "respond", sessionId: "session-1", answer: "i don't know" }));
+
+    expect(response.status).toBe(200);
+    // A pre-written row carries no new prompt for a rescue to land on, so
+    // leaving it unanswered would show the candidate the identical question
+    // with their answer discarded.
+    expect(mocks.recordConversationTurn).toHaveBeenCalledWith(
+      expect.anything(),
+      "user-1",
+      "question-1",
+      "i don't know",
+      expect.objectContaining({ improvedAnswer: "Not attempted." }),
+      expect.objectContaining({ nonAnswer: false }),
+    );
   });
 
   it("starts a conversation from the generated blueprint and returns the first question", async () => {

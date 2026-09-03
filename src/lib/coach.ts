@@ -3,7 +3,7 @@ import "server-only";
 import { z } from "zod";
 import { applyEvaluation } from "@/lib/competencies";
 import { geminiFailureState, geminiModel, geminiRequestError } from "@/lib/gemini";
-import { deriveCoverageState, rescuesSpentInSession, targetIdOf } from "@/lib/interview-coverage";
+import { canContinueOnAnsweredRow, deriveCoverageState, rescuesSpentInSession, targetIdOf } from "@/lib/interview-coverage";
 import { decideIntent } from "@/lib/interview-director";
 import { buildCoverageTargets, buildExperienceDiscoveryBlueprint, buildFallbackInterviewBlueprint, defaultMaxQuestions, validateInterviewBlueprint } from "@/lib/interview-planner";
 import { modePolicyFor, roundFor } from "@/lib/interview-rounds";
@@ -1802,6 +1802,7 @@ export async function nextTurn(input: NextTurnInput): Promise<NextTurnResult> {
     turnsUsed: session.questions.filter((question) => question.answer !== null).length,
     turnBudget: blueprint.turnBudget,
     sessionRescues: rescuesSpentInSession(session.questions),
+    canContinueCurrentTarget: canContinueOnAnsweredRow(session.questions, answeredQuestion, blueprint),
     // The director stays pure -- it never reads the clock itself (controller
     // ruling 5). This is the one call site allowed to.
     now: new Date().toISOString(),

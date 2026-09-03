@@ -1,4 +1,12 @@
-import type { CoverageTarget, Evaluation, Intent, PlannedQuestion, TargetState, TargetStatus } from "@/lib/types";
+import type {
+  CoverageTarget,
+  Evaluation,
+  Intent,
+  InterviewBlueprint,
+  PlannedQuestion,
+  TargetState,
+  TargetStatus,
+} from "@/lib/types";
 
 /** Session-level intents carry no target; question-level intents all do. */
 export function targetIdOf(intent: Intent): string | null {
@@ -7,6 +15,29 @@ export function targetIdOf(intent: Intent): string | null {
 
 export function rescuesSpentInSession(questions: PlannedQuestion[]): number {
   return questions.reduce((total, question) => total + question.assistance.length, 0);
+}
+
+/**
+ * Whether the store can carry one more turn on the target the answered row
+ * belongs to, after that row has been answered for real.
+ *
+ * Such a turn needs a NEW row -- the just-answered one can no longer take a
+ * prompt -- and `record_conversation_turn` only ever creates one as a
+ * follow-up of the answered row, under three limits it enforces itself:
+ * the parent must not itself be a follow-up, the session's follow-up count
+ * must stay under `maxFollowUps`, and its total question count under
+ * `maxQuestions`. Asking this BEFORE the director decides is what keeps it
+ * from choosing a probe the store cannot land, which would otherwise leave
+ * the candidate looking at an empty interviewer bubble.
+ */
+export function canContinueOnAnsweredRow(
+  questions: PlannedQuestion[],
+  answeredQuestion: PlannedQuestion,
+  limits: Pick<InterviewBlueprint, "maxFollowUps" | "maxQuestions"> | null,
+): boolean {
+  if (answeredQuestion.isFollowUp) return false;
+  if (questions.length >= (limits?.maxQuestions ?? 8)) return false;
+  return questions.filter((question) => question.isFollowUp).length < (limits?.maxFollowUps ?? 3);
 }
 
 function statusFor(
