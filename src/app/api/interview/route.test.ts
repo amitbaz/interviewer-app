@@ -394,7 +394,7 @@ describe("POST /api/interview", () => {
     consoleError.mockRestore();
   });
 
-  it("keeps the session active when the fifth backbone answer still has a next target", async () => {
+  it("routes a same-target continuation through the follow-up branch, not nextQuestionId", async () => {
     const current = session([1, 2, 3, 4, 5].map((sequence) => question(sequence, sequence < 5 ? "answered" : null)));
     const followUp = question(6, null);
     mocks.getSession.mockResolvedValue(current);
@@ -429,7 +429,27 @@ describe("POST /api/interview", () => {
       "short answer",
       expect.anything(),
       expect.objectContaining({
-        followUp: null,
+        // `intent.targetId` ("question-5") equals the just-answered question's
+        // own id -- a same-target continuation. It can't be persisted as
+        // `nextQuestionId` back onto that row (already-answered by this same
+        // call), so it goes through `followUp` instead -- see
+        // `followUpDraftForContinuation`'s doc comment in route.ts.
+        nextQuestionId: null,
+        followUp: {
+          category: "behavioral",
+          competencyId: "react-id",
+          competencyName: "React architecture",
+          difficulty: "senior",
+          isFollowUp: true,
+          prompt: "Which trade-off did you choose?",
+          objective: "",
+          evidenceIds: [],
+          expectedSignals: [],
+          missingSignalPrompts: [],
+          rubricCriteria: [],
+          followUpLimit: 1,
+          sourceConfidence: null,
+        },
         nextPrompt: "Which trade-off did you choose?",
         askedIntent: { kind: "probe", targetId: "question-5", aspect: "tradeoff", basis: "short answer" },
         nonAnswer: false,

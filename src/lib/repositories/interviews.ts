@@ -506,6 +506,14 @@ export async function createSessionWithPlan(
  * legacy sanity check -- every blueprint this release produces still carries
  * the same five-entry backbone shape in `questions` (now with `prompt: null`)
  * alongside the real `targets` payload below.
+ *
+ * `follow_up_limit: 1`, not 0: a same-target continuation (probe/challenge/
+ * hypothetical/non-park rescue) is persisted via `record_conversation_turn`'s
+ * follow-up-row branch (see `recordConversationTurn`'s call site in
+ * `route.ts`), because the just-answered row can never satisfy that branch's
+ * sibling `answer is null` guard. Each row -- a target row here, or a
+ * follow-up row created later -- is the parent of at most one further
+ * continuation in this turn-by-turn model, so 1 is exact, not a placeholder.
  */
 export async function createSessionWithBlueprint(
   supabase: SupabaseClient,
@@ -533,7 +541,7 @@ export async function createSessionWithBlueprint(
         expected_signals: target.expectedSignals,
         missing_signal_prompts: [],
         rubric_criteria: target.rubricCriteria,
-        follow_up_limit: 0,
+        follow_up_limit: 1,
         source_confidence: null,
         required: target.required,
       })),

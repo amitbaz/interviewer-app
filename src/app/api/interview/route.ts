@@ -19,7 +19,7 @@ import {
 import { getOpportunity } from "@/lib/repositories/opportunities";
 import { getProfile } from "@/lib/repositories/profile";
 import { requireUser } from "@/lib/supabase/server";
-import type { Evaluation, InterviewMode, InterviewSession, PlannedQuestion, Profile, RoundId } from "@/lib/types";
+import type { Evaluation, FollowUpDraft, InterviewMode, InterviewSession, PlannedQuestion, Profile, RoundId } from "@/lib/types";
 
 export const runtime = "nodejs";
 
@@ -123,6 +123,19 @@ export async function POST(request: Request) {
         opportunity: session.opportunityId ? await getOpportunity(supabase, user.id, session.opportunityId) : null,
       });
 
+      // A same-target continuation onto a row that was just genuinely
+      // answered can't be written as `nextQuestionId` back onto that row --
+      // see `followUpDraftForContinuation`'s doc comment -- so it goes
+      // through the follow-up branch instead. A non-answer turn never sets
+      // the row's `answer` column (`record_interview_evidence` is skipped
+      // entirely), so a same-target rescue after a non-answer keeps using
+      // the direct `nextQuestionId` update on that same, still-unanswered
+      // row -- exactly as before this fix, and required: routing it through
+      // the follow-up branch too would spend this target's one-hop budget
+      // (below) on a turn that never needed it, and the RPC unconditionally
+      // refuses a follow-up whose parent is itself already a follow-up row.
+      const isSameTargetContinuation = turn.targetId === question.id && !turn.nonAnswer;
+
       const updated = await recordConversationTurn(
         supabase,
         user.id,
@@ -130,11 +143,18 @@ export async function POST(request: Request) {
         answer,
         turn.evaluation ?? emptyEvaluationFor(hydratedQuestion),
         {
-          nextQuestionId: turn.targetId ? questionIdForTarget(session, turn.targetId) : null,
+          nextQuestionId: !isSameTargetContinuation && turn.targetId
+            ? questionIdForTarget(session, turn.targetId)
+            : null,
           nextPrompt: turn.prompt,
-          followUp: null,
+          followUp: isSameTargetContinuation ? followUpDraftForContinuation(hydratedQuestion, turn.prompt) : null,
           askedIntent: turn.intent,
-          assistance: turn.assistance ? [turn.assistance] : [],
+          // Accumulates onto the row's own persisted history, not just this
+          // turn's grant: a non-answer continuation re-asks the SAME row
+          // (see above), so a rescue budget check like `rescuesSpentInSession`
+          // (which sums `question.assistance.length`) would silently lose
+          // every earlier rescue on that row if this replaced instead.
+          assistance: [...question.assistance, ...(turn.assistance ? [turn.assistance] : [])],
           nonAnswer: turn.nonAnswer,
           degraded: turn.degraded,
         },
@@ -253,6 +273,45 @@ function hydratePlannedQuestion(
   question: InterviewSession["questions"][number],
 ): InterviewSession["questions"][number] {
   return session.blueprint?.questions.find((item) => item.id === question.id) ?? question;
+}
+
+/**
+ * Builds the follow-up row payload for a same-target continuation on a row
+ * that was just genuinely answered (probe, challenge, hypothetical, or a
+ * non-park rescue after a real answer) -- the director asking the candidate
+ * to keep deepening the target they just answered.
+ *
+ * This can never be persisted as `nextQuestionId` onto the just-answered row:
+ * `record_conversation_turn`'s next-question branch is guarded by
+ * `answer is null`, and the evidence-recording step earlier in the same RPC
+ * call already set that row's answer. Routing it through the RPC's
+ * follow-up-row branch instead lands the continuation on a brand-new row, so
+ * the guard never applies. `deriveCoverageState` still attributes the new
+ * row back to the original target because it matches on the value inside
+ * `askedIntent.targetId`, not on which physical row carries it.
+ *
+ * Takes the just-answered `PlannedQuestion` itself, not its `CoverageTarget`:
+ * both carry the same objective/evidence/signal data (both are read off the
+ * same persisted row), but the question is always available -- unlike
+ * `session.blueprint.targets`, which a legacy conversation session predating
+ * coverage targets may not carry.
+ */
+function followUpDraftForContinuation(question: PlannedQuestion, prompt: string): FollowUpDraft {
+  return {
+    category: question.category,
+    competencyId: question.competencyId,
+    competencyName: question.competencyName,
+    difficulty: question.difficulty,
+    isFollowUp: true,
+    prompt,
+    objective: question.objective ?? "",
+    evidenceIds: question.evidenceIds ?? [],
+    expectedSignals: question.expectedSignals ?? [],
+    missingSignalPrompts: [],
+    rubricCriteria: question.rubricCriteria ?? [],
+    followUpLimit: 1,
+    sourceConfidence: null,
+  };
 }
 
 function errorResponse(error: unknown) {
