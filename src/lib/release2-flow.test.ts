@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   Evaluation,
   EvidenceItem,
-  FollowUpDraft,
   InterviewSession,
   Message,
   Opportunity,
@@ -39,9 +38,8 @@ import type { ConversationTurnPersistence } from "@/lib/repositories/interviews"
  * `supabase/migrations/202608290010_follow_up_rubric_contract.sql` and
  * `supabase/migrations/202608310001_planned_practice_sessions.sql`) --
  * that DB round trip cannot run in Vitest, and Task 11's ruling bars this
- * branch from touching a live Supabase project. The follow-up-insertion
- * stand-in mirrors the RPC's exact sequence-shift behavior (see
- * `applyConversationTurn` below). The mock for `createSessionWithPracticeBlueprint`
+ * branch from touching a live Supabase project (see `applyConversationTurn`
+ * below). The mock for `createSessionWithPracticeBlueprint`
  * still calls the REAL `assertPracticeConversationBlueprint` before
  * constructing a session, so a `generatePracticeBlueprint` bug that produced
  * an illegal blueprint (wrong count, gapped sequence) is caught exactly as
@@ -99,7 +97,7 @@ vi.mock("@/lib/repositories/practice-plans", async () => {
 
 // `@/lib/coach`, `@/lib/practice-recommendation`, `@/lib/progress`, and
 // `@/lib/practice-service` are deliberately NOT mocked anywhere in this file.
-import { completeSession as summarizeSession, nextTurn } from "@/lib/coach";
+import { completeSession as summarizeSession, EVALUATION_DIMENSIONS, nextTurn } from "@/lib/coach";
 import { canExplicitlyCompleteConversation } from "@/lib/conversation-completion";
 import {
   completeLinkedPracticePlanBestEffort,
@@ -110,6 +108,7 @@ import {
   assertPracticeConversationBlueprint,
   completeSession,
   mapSession,
+  questionIdForTarget,
   recordConversationTurn,
 } from "@/lib/repositories/interviews";
 
@@ -220,14 +219,17 @@ function interviewerTranscript(questions: PlannedQuestion[]): Message[] {
 /**
  * A hand-rolled stand-in for the `record_conversation_turn` Postgres RPC
  * (`supabase/migrations/202608290010_follow_up_rubric_contract.sql`): marks
- * the answered question, and either (a) inserts a new follow-up question at
- * `answered.sequence + 1`, shifting every later question's sequence up by
- * one -- exactly like the RPC's `for ... order by sequence desc` shift loop
- * -- or (b) updates the next base question's prompt text in place, which is
- * what the RPC's `elsif p_next_question_id is not null` branch does. Used as
- * the mocked `recordConversationTurn` implementation below so this test
- * exercises the exact persisted-state transition the real RPC performs,
- * without a live database.
+ * the answered question, and updates the next base question's prompt text in
+ * place, which is what the RPC's `elsif p_next_question_id is not null`
+ * branch does. Used as the mocked `recordConversationTurn` implementation
+ * below so this test exercises the exact persisted-state transition the real
+ * RPC performs, without a live database.
+ *
+ * No longer models the RPC's dynamic follow-up insertion branch: Task 7
+ * removed `NextTurnResult.followUp` -- the director only ever advances to a
+ * pre-existing coverage target, it never derives a new question on the fly
+ * -- so every real `ConversationTurnPersistence.followUp` is always `null`
+ * now (see `route.ts`'s "respond" branch). That branch was dead code here.
  */
 function applyConversationTurn(
   session: InterviewSession,
@@ -242,38 +244,7 @@ function applyConversationTurn(
   const answered = questions.find((question) => question.id === questionId);
   if (!answered) throw new Error(`Unknown question id: ${questionId}`);
 
-  if (next.followUp) {
-    const followUp: FollowUpDraft = next.followUp;
-    questions = questions.map((question) => (
-      question.sequence > answered.sequence ? { ...question, sequence: question.sequence + 1 } : question
-    ));
-    const followUpQuestion: PlannedQuestion = {
-      id: `${answered.id}-follow-up`,
-      sequence: answered.sequence + 1,
-      category: followUp.category,
-      competencyId: followUp.competencyId,
-      competencyName: followUp.competencyName,
-      difficulty: followUp.difficulty,
-      isFollowUp: true,
-      prompt: followUp.prompt,
-      answer: null,
-      createdAt: NOW_ISO,
-      objective: followUp.objective,
-      evidenceIds: followUp.evidenceIds,
-      expectedSignals: followUp.expectedSignals,
-      missingSignalPrompts: followUp.missingSignalPrompts,
-      rubricCriteria: followUp.rubricCriteria,
-      followUpLimit: followUp.followUpLimit,
-      sourceConfidence: followUp.sourceConfidence,
-      parentQuestionId: answered.id,
-      // A freshly derived follow-up hasn't gone through the director's
-      // intent/assistance pipeline yet in this hand-rolled RPC stand-in.
-      askedIntent: null,
-      assistance: [],
-      nonAnswer: false,
-    };
-    questions = [...questions, followUpQuestion].sort((left, right) => left.sequence - right.sequence);
-  } else if (next.nextQuestionId) {
+  if (next.nextQuestionId) {
     const nextQuestionId = next.nextQuestionId;
     questions = questions.map((question) => (
       question.id === nextQuestionId ? { ...question, prompt: next.nextPrompt ?? question.prompt } : question
@@ -288,25 +259,57 @@ function applyConversationTurn(
   };
 }
 
+/**
+ * Placeholder evaluation values for a non-answer turn. Mirrors
+ * `emptyEvaluationFor` in `src/app/api/interview/route.ts`: the RPC skips
+ * evidence recording when `p_non_answer` is true, so these are never
+ * persisted; they exist only to satisfy the RPC's non-null parameters (spec
+ * §11.3). Not imported from `route.ts` because that copy is a private,
+ * unexported helper local to the route module.
+ */
+function emptyEvaluationFor(question: PlannedQuestion): Evaluation {
+  return {
+    questionId: question.id,
+    competencyId: question.competencyId,
+    competency: question.competencyName ?? "Communication",
+    score: 0,
+    relevance: 0,
+    dimensions: Object.fromEntries(EVALUATION_DIMENSIONS.map((key) => [key, 0])) as Evaluation["dimensions"],
+    strengths: [],
+    needsWork: [],
+    missingPoints: ["Not attempted."],
+    betterStructure: ["Not attempted."],
+    improvedAnswer: "Not attempted.",
+    supportedClaims: [],
+    expectedSignalsPresent: [],
+    unsupportedClaims: [],
+    dimensionReasons: Object.fromEntries(
+      EVALUATION_DIMENSIONS.map((key) => [key, "Not attempted."]),
+    ) as Evaluation["dimensionReasons"],
+  } as Evaluation;
+}
+
 /** Mirrors `api/interview/route.ts`'s "respond" action: find the next unanswered question, evaluate it, persist the turn. */
 async function answerNextQuestion(session: InterviewSession, answer: string): Promise<InterviewSession> {
   const question = session.questions.find((item) => !item.answer);
   if (!question) throw new Error("No unanswered question remains.");
-  const index = session.questions.findIndex((item) => item.id === question.id);
-  const nextPlannedQuestion = session.questions.slice(index + 1).find((item) => !item.answer) ?? null;
-  const turn = await nextTurn(
-    { role: profile.role, seniority: profile.seniority, expertise: profile.expertise, narrative: profile.narrative },
-    question,
-    nextPlannedQuestion,
-    profile.source,
+  const turn = await nextTurn({
+    profile: { role: profile.role, seniority: profile.seniority, expertise: profile.expertise, narrative: profile.narrative },
     session,
+    answeredQuestion: question,
     answer,
-    session.blueprint ?? null,
-  );
-  return recordConversationTurn(supabase as never, "user-1", question.id, answer, turn.evaluation, {
-    nextQuestionId: turn.followUp ? null : nextPlannedQuestion?.id ?? null,
-    nextPrompt: turn.nextQuestion,
-    followUp: turn.followUp,
+    blueprint: session.blueprint!,
+    evidence: profile.evidence ?? [],
+    opportunity: null,
+  });
+  return recordConversationTurn(supabase as never, "user-1", question.id, answer, turn.evaluation ?? emptyEvaluationFor(question), {
+    nextQuestionId: turn.targetId ? questionIdForTarget(session, turn.targetId) : null,
+    nextPrompt: turn.prompt,
+    followUp: null,
+    askedIntent: turn.intent,
+    assistance: turn.assistance ? [turn.assistance] : [],
+    nonAnswer: turn.nonAnswer,
+    degraded: turn.degraded,
   });
 }
 
@@ -324,7 +327,7 @@ describe("Release 2 flow: recommendation through practice-plan completion", () =
     vi.unstubAllEnvs();
   });
 
-  it("drives a story-gap recommendation through a 3-question planned session, its follow-up, completion, and plan completion", async () => {
+  it("drives a story-gap recommendation through a 3-question planned session, completion, and plan completion", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
 
     mocks.getProfile.mockResolvedValue(profile);
@@ -455,27 +458,14 @@ describe("Release 2 flow: recommendation through practice-plan completion", () =
     );
     expect(session.questions).toHaveLength(3); // this answer matches every expected signal, so no follow-up is warranted
 
-    // The final base question, answered deliberately weakly so it earns a persisted follow-up.
+    // The final base question, answered deliberately weakly -- under the old
+    // dynamic follow-up pipeline this would have earned a persisted
+    // follow-up; Task 7 removed that mechanism entirely (the director only
+    // ever advances to a pre-existing coverage target, it never derives a
+    // new question), and this practice-plan blueprint carries no coverage
+    // targets, so the session simply has no more questions to ask.
     session = await answerNextQuestion(session, "I used React.");
-    expect(session.questions).toHaveLength(4);
-    const followUp = session.questions.find((question) => question.isFollowUp);
-    expect(followUp).toBeDefined();
-    expect(followUp?.parentQuestionId).toBe("practice-blueprint-question-3");
-    expect(followUp?.answer).toBeNull();
-
-    // Every base question is now answered -- the ONLY unanswered item left
-    // is the persisted follow-up itself. This is the brief's "planned
-    // session with an unanswered persisted follow-up cannot explicitly
-    // complete" case, produced by the real flow rather than a hand fixture.
-    expect(session.questions.filter((question) => !question.isFollowUp).every((question) => Boolean(question.answer))).toBe(true);
-    expect(canExplicitlyCompleteConversation(session)).toBe(false);
-
-    // --- answer the follow-up ---
-    session = await answerNextQuestion(
-      session,
-      "I made the decision to split the migration into two phases because of a tight constraint on the launch date, and I weighed the trade-off between a full rewrite and an incremental rollout before choosing the incremental path.",
-    );
-    expect(session.questions).toHaveLength(4); // a follow-up can never itself earn a second follow-up
+    expect(session.questions).toHaveLength(3); // no dynamic follow-up is ever created anymore
     expect(session.questions.every((question) => Boolean(question.answer))).toBe(true);
     expect(canExplicitlyCompleteConversation(session)).toBe(true);
 
@@ -494,14 +484,14 @@ describe("Release 2 flow: recommendation through practice-plan completion", () =
     // "plan bookkeeping failure returns a warning without invalidating
     // completed interview evidence" -- a second, independent bookkeeping
     // attempt fails, but the interview evidence already returned above is
-    // untouched: every answer, including the follow-up, is still there.
+    // untouched: every answer is still there.
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     mocks.updatePracticePlan.mockRejectedValueOnce(new Error("db unavailable"));
     const secondAttempt = await completeLinkedPracticePlanBestEffort(supabase as never, "user-1", completed);
     expect(secondAttempt.warning).toEqual(expect.any(String));
     expect(completed.questions.every((question) => Boolean(question.answer))).toBe(true);
-    expect(completed.questions).toHaveLength(4);
-    expect(completed.evaluations).toHaveLength(4);
+    expect(completed.questions).toHaveLength(3);
+    expect(completed.evaluations).toHaveLength(3);
     consoleError.mockRestore();
   });
 
