@@ -3,19 +3,28 @@ import "server-only";
 import { z } from "zod";
 import { applyEvaluation } from "@/lib/competencies";
 import { geminiFailureState, geminiModel, geminiRequestError } from "@/lib/gemini";
-import { buildExperienceDiscoveryBlueprint, buildFallbackInterviewBlueprint, validateInterviewBlueprint } from "@/lib/interview-planner";
+import { canContinueOnAnsweredRow, deriveCoverageState, rescuesSpentInSession, targetIdOf } from "@/lib/interview-coverage";
+import { decideIntent } from "@/lib/interview-director";
+import { buildCoverageTargets, buildExperienceDiscoveryBlueprint, buildFallbackInterviewBlueprint, defaultMaxQuestions, validateInterviewBlueprint } from "@/lib/interview-planner";
+import { modePolicyFor, roundFor } from "@/lib/interview-rounds";
+import type { InterviewRound } from "@/lib/interview-rounds";
+import { deterministicLine, validateInterviewerLine } from "@/lib/interviewer-voice";
 import { MAX_CV_PDF_BYTES } from "@/lib/upload-limits";
 import type {
+  AssessmentRead,
+  AssistanceRecord,
   BlueprintQuestion,
   CoachObservation,
   Competency,
+  CoverageTarget,
   Difficulty,
   EvidenceItem,
   Evaluation,
-  FollowUpDraft,
   HandsOnExercise,
+  Intent,
   InterviewBlueprint,
   InterviewSession,
+  ModePolicy,
   Opportunity,
   PlannedQuestion,
   PracticeBlueprintContext,
@@ -24,12 +33,15 @@ import type {
   Profile,
   ProfileDraft,
   ProfileReadiness,
-  ProfileSource,
   QuestionCategory,
+  RescueStyle,
+  RoundId,
   GroundedEvaluation,
 } from "@/lib/types";
 
 const dimensions = ["correctness", "depth", "clarity", "structure", "practicalExperience", "tradeOffAwareness", "communication", "confidence", "relevance"] as const;
+/** The fixed set of scoring dimensions, exported for callers (e.g. `route.ts`'s `emptyEvaluationFor`) that need to build a placeholder `Evaluation` without duplicating this list. */
+export const EVALUATION_DIMENSIONS = dimensions;
 const dimensionShape = Object.fromEntries(dimensions.map((dimension) => [dimension, z.number().min(0).max(10)])) as Record<(typeof dimensions)[number], z.ZodNumber>;
 const dimensionReasonShape = Object.fromEntries(dimensions.map((dimension) => [dimension, z.string().min(1)])) as Record<(typeof dimensions)[number], z.ZodString>;
 const profileSchema = z.object({
@@ -50,11 +62,13 @@ const groundedEvaluationSchema = z.object({
   unsupportedClaims: z.array(z.string()).default([]),
   dimensionReasons: z.object(dimensionReasonShape),
 });
-const turnSchema = z.object({
-  question: z.string().min(1),
-  shouldFollowUp: z.boolean(),
+// The assessor scores privately and reports a coarse read. It no longer
+// authors questions: speech is a separate call that never sees this rubric.
+const assessorSchema = z.object({
+  read: z.enum(["answered", "partial", "evasive", "stuck"]),
   evaluation: groundedEvaluationSchema,
 });
+const interviewerLineSchema = z.object({ line: z.string().min(1) });
 const evidenceSchema = z.object({
   id: z.string().min(1).optional(),
   sourceKind: z.enum(["cv", "cover_letter", "summary"]).nullable().optional(),
@@ -844,6 +858,10 @@ function normalizeBlueprintQuestion(
     rubricCriteria: value.rubricCriteria.map((criteria) => criteria.trim()),
     followUpLimit: value.followUpLimit,
     sourceConfidence: value.sourceConfidence ?? null,
+    // A model-authored base question predates the director's intent/assistance pipeline.
+    askedIntent: null,
+    assistance: [],
+    nonAnswer: false,
   };
 }
 
@@ -858,6 +876,13 @@ function normalizeBlueprint(
     maxQuestions: value.maxQuestions,
     createdAt,
     questions: value.questions.map((question) => normalizeBlueprintQuestion(question, createdAt)),
+    // Shared by both callers: `generateInterviewBlueprint`'s `withCoveragePlan`
+    // overwrites these with the real round-derived values, and
+    // `generatePracticeBlueprint`'s practice-plan path never consumes the
+    // round/coverage-target system at all.
+    roundId: "tech-lead",
+    turnBudget: defaultMaxQuestions,
+    targets: [],
   };
 }
 
@@ -909,23 +934,49 @@ export async function extractEngineeringEvidence(cvText: string, coverLetter: st
 }
 
 /**
- * Generates the persisted five-question interview blueprint from the validated
- * profile and extracted evidence. `assessProfileReadiness(evidence)` is the
- * single decision point: when the profile lacks enough source-backed detail,
- * this returns a deterministic discovery blueprint (`buildExperienceDiscoveryBlueprint`)
+ * Generates the persisted interview blueprint from the validated profile and
+ * extracted evidence. `assessProfileReadiness(evidence)` is the single
+ * decision point: when the profile lacks enough source-backed detail, this
+ * returns a deterministic discovery blueprint (`buildExperienceDiscoveryBlueprint`)
  * with zero model calls. Otherwise it asks the model for a grounded blueprint,
  * retries once on malformed or unsupported output, then falls back to a
  * deterministic limited-grounding plan (`buildFallbackInterviewBlueprint`) if
  * both attempts fail.
+ *
+ * `options.roundId` and `options.opportunity` drive the coverage plan (spec
+ * §9.1): every blueprint this function returns -- whichever of the three
+ * strategies above produced it -- carries `roundId`, a fixed `turnBudget` of
+ * 8, and `targets` computed once from the same inputs, via `withCoveragePlan`
+ * below. That single merge point is deliberate: it is the one place this
+ * function guarantees the coverage-plan fields land, so no return path can
+ * silently omit them.
+ *
+ * It is also the one place they are validated. `validateInterviewBlueprint`
+ * is the only check that `targets` is non-empty, and `buildCoverageTargets`
+ * legitimately returns an empty list for a profile with no competencies and
+ * no anchored gaps -- exactly the sparse profile the discovery path serves.
+ * `createSessionWithBlueprint` validates `blueprint.questions` rather than
+ * `targets`, so an unvalidated empty plan used to insert an active session
+ * with zero question rows and only then fail in `openingTurn`, orphaning it.
+ * Throwing here, before any session exists, is the whole point.
  */
 export async function generateInterviewBlueprint(
   profile: Pick<ProfileDraft, "role" | "seniority" | "summary" | "narrative" | "expertise" | "characteristics" | "competencies">,
   evidence: EvidenceItem[],
+  options: { roundId: RoundId; opportunity: Pick<Opportunity, "gaps" | "jobDescription"> | null },
 ): Promise<InterviewBlueprint> {
   const createdAt = new Date().toISOString();
+  const targets = buildCoverageTargets(profile, evidence, options.opportunity, options.roundId);
+  const withCoveragePlan = (blueprint: InterviewBlueprint): InterviewBlueprint => validateInterviewBlueprint({
+    ...blueprint,
+    roundId: options.roundId,
+    turnBudget: 8,
+    targets,
+  }, evidence);
+
   const readiness = assessProfileReadiness(evidence);
   if (!readiness.ready) {
-    return buildExperienceDiscoveryBlueprint(profile, evidence, readiness, new Date(createdAt));
+    return withCoveragePlan(buildExperienceDiscoveryBlueprint(profile, evidence, readiness, new Date(createdAt)));
   }
   const competencyContext = profile.competencies.map((competency) => ({
     name: competency.name,
@@ -948,13 +999,13 @@ export async function generateInterviewBlueprint(
     const result = await modelJson("interview blueprint", prompt(repair), blueprintDraftSchema);
     if (!result) continue;
     try {
-      return validateInterviewBlueprint(normalizeBlueprint(result, createdAt), evidence);
+      return withCoveragePlan(normalizeBlueprint(result, createdAt));
     } catch {
       continue;
     }
   }
 
-  return buildFallbackInterviewBlueprint(
+  return withCoveragePlan(buildFallbackInterviewBlueprint(
     {
       role: profile.role,
       seniority: profile.seniority,
@@ -967,7 +1018,7 @@ export async function generateInterviewBlueprint(
     fallbackBlueprintCompetencies(profile),
     evidence,
     new Date(createdAt),
-  );
+  ));
 }
 
 /**
@@ -1092,7 +1143,7 @@ function validatePracticeBlueprint(
       throw new Error("Practice blueprint questions must be contiguous base questions.");
     }
     if (!question.objective.trim()) throw new Error("Practice blueprint questions need an objective.");
-    if (!question.prompt.trim()) throw new Error("Practice blueprint questions need prompt text.");
+    if (!question.prompt!.trim()) throw new Error("Practice blueprint questions need prompt text.");
     if (!question.expectedSignals.length) throw new Error("Practice blueprint questions need expected signals.");
     if (!question.missingSignalPrompts.length) throw new Error("Practice blueprint questions need missing-signal prompts.");
     if (!question.rubricCriteria?.length) throw new Error("Practice blueprint questions need scoring criteria.");
@@ -1280,6 +1331,10 @@ function buildFallbackPracticeBlueprint(
       rubricCriteria: fallbackPracticeRubricCriteria(category, subject),
       followUpLimit: category === "introduction" ? 0 : 1,
       sourceConfidence: item?.confidence ?? null,
+      // A fallback practice question predates the director's intent/assistance pipeline.
+      askedIntent: null,
+      assistance: [],
+      nonAnswer: false,
     };
   });
 
@@ -1290,6 +1345,10 @@ function buildFallbackPracticeBlueprint(
     maxQuestions: 8,
     createdAt,
     questions,
+    // Practice-plan blueprints never consume the round/coverage-target system.
+    roundId: "tech-lead",
+    turnBudget: defaultMaxQuestions,
+    targets: [],
   });
 }
 
@@ -1422,34 +1481,6 @@ export async function analyzeProfile(cvText: string, coverLetter: string): Promi
   return result ?? fallbackProfile(cvText, coverLetter);
 }
 
-function cvExcerpt(source: ProfileSource, planned: PlannedQuestion): string {
-  const text = source.cvText.replace(/\s+/g, " ").trim();
-  if (!text) return "";
-  const tokens = (planned.competencyName ?? "").toLowerCase().split(/\W+/).filter(Boolean);
-  const sentences = text.split(/(?<=[.!?])\s+/);
-  const selected = sentences.find((sentence) => tokens.some((token) => token.length > 2 && sentence.toLowerCase().includes(token)))
-    ?? sentences[0]
-    ?? text;
-  return selected.slice(0, 420).trimEnd();
-}
-
-function promptForPlan(planned: PlannedQuestion, source: ProfileSource, role: string | null = null): string {
-  const competency = planned.competencyName ?? "your recent work";
-  const roleFocus = roleDescriptor(role);
-  const excerpt = cvExcerpt(source, planned);
-  const templates: Record<PlannedQuestion["category"], string> = {
-    introduction: `Give me a concise introduction to yourself and the ${roleFocus} work you have owned recently.`,
-    experience: excerpt ? `Your CV mentions “${excerpt}”. Tell me about that experience through the lens of ${competency}: what was your role, decision, and impact?` : `Tell me about a meaningful project involving ${competency}. What was your role and impact?`,
-    technical: `Walk me through a technical decision involving ${competency}. What trade-offs did you consider?`,
-    practical: `Describe how you would apply ${competency} to a realistic delivery constraint.`,
-    architecture: `Design an approach involving ${competency}. Start with the requirements you would clarify.`,
-    "system-design": `Design a system involving ${competency}. Start with the requirements you would clarify.`,
-    behavioral: `Tell me about a collaboration challenge related to ${competency}. How did you make progress?`,
-    communication: `Explain a complex ${competency} decision to a non-specialist stakeholder.`,
-  };
-  return templates[planned.category];
-}
-
 function groundedQuestion(question: PlannedQuestion, blueprint: InterviewBlueprint | null): BlueprintQuestion {
   const rubric = blueprint?.questions.find((item) => item.id === question.id);
   if (rubric) return rubric;
@@ -1511,101 +1542,47 @@ function normalizeGroundedEvaluation(question: PlannedQuestion, value: z.infer<t
   };
 }
 
-function shouldAskFollowUp(question: BlueprintQuestion, evaluation: GroundedEvaluation): boolean {
-  const signalCoverage = question.expectedSignals.length
-    ? evaluation.expectedSignalsPresent.length / question.expectedSignals.length
-    : 1;
-  return evaluation.supportedClaims.length === 0
-    || evaluation.relevance < 4.5
-    || signalCoverage < 0.5
-    || evaluation.unsupportedClaims.length > 0;
-}
-
-function resolveFollowUpLimit(question: BlueprintQuestion, blueprint: InterviewBlueprint | null): number {
-  return Math.max(
-    0,
-    Math.min(question.followUpLimit ?? (blueprint?.maxFollowUps ?? 3), blueprint?.maxFollowUps ?? 3),
-  );
-}
-
-function turnPrompt(
+/**
+ * The assessor prompt. Scores privately against the rubric and classifies the
+ * answer. It authors no candidate-facing text, so the rubric can appear here
+ * safely -- that is the whole point of the split (spec §6.1).
+ */
+function assessorPrompt(
   question: BlueprintQuestion,
   profile: Pick<ProfileDraft, "role" | "seniority" | "expertise" | "narrative">,
   answer: string,
   transcript: string,
-  source: ProfileSource | null,
-  nextPlannedQuestion: PlannedQuestion | null,
-  canFollowUp: boolean,
-  blueprint: InterviewBlueprint | null,
 ): string {
-  const nextRubric = nextPlannedQuestion ? groundedQuestion(nextPlannedQuestion, blueprint) : null;
   return [
     "You are an experienced senior software-engineering interviewer.",
     "Privately evaluate the latest answer against the exact question rubric.",
     "Return only valid JSON.",
     "Ground the scoring in the exact question objective, expected signals, and the candidate's answer.",
     "Do not praise, coach, reveal scores, or invent facts.",
+    "Classify the answer with `read`:",
+    "  answered  - a genuine attempt that addressed the question",
+    "  partial   - a genuine attempt that left the objective largely uncovered",
+    "  evasive   - talked at length without engaging the question",
+    "  stuck     - did not attempt the question: said they do not know, cannot",
+    "              find words, are blanking, or asked to move on.",
+    "`stuck` is about the absence of an attempt, never about a weak attempt.",
     hasSourceEvidenceTarget(question)
       ? ""
       : "Grounding rule: question.evidenceIds is empty, so this is a discovery/general objective. Treat first-person career details in the candidate's answer as newly supplied session evidence. Do not mark them unsupported merely because they were absent from the source profile. Never invent missing details; improved answers may only reuse facts actually supplied by the candidate or already grounded by the question context.",
-    "If shouldFollowUp is true, the question must probe the answered plan without changing its objective.",
-    "If shouldFollowUp is false, the question should ask the supplied next plan without changing its objective or evidence target.",
     `Question: ${JSON.stringify(question)}`,
     `Rubric criteria: ${JSON.stringify(question.rubricCriteria ?? [])}`,
     `Profile: ${JSON.stringify(profile)}`,
-    `Can follow up: ${JSON.stringify(canFollowUp)}`,
     `Transcript: ${transcript}`,
     `Latest answer: ${answer}`,
-    source ? `CV excerpt: ${cvExcerpt(source, question)}` : "",
-    nextRubric ? `Next plan: ${JSON.stringify({
-      category: nextPlannedQuestion?.category,
-      competency: nextPlannedQuestion?.competencyName,
-      difficulty: nextPlannedQuestion?.difficulty,
-      objective: nextRubric.objective,
-      expectedSignals: nextRubric.expectedSignals,
-      rubricCriteria: nextRubric.rubricCriteria ?? [],
-    })}` : "",
   ].filter(Boolean).join("\n");
 }
 
-async function evaluateTurn(
-  profile: Pick<ProfileDraft, "role" | "seniority" | "expertise" | "narrative">,
-  answeredQuestion: PlannedQuestion,
-  blueprint: InterviewBlueprint | null,
-  answer: string,
-  transcript: string,
-  source: ProfileSource | null,
-  nextPlannedQuestion: PlannedQuestion | null,
-  followUpCount: number,
-  followUpCountForQuestion: number,
-): Promise<{ evaluation: GroundedEvaluation; question: string | null; shouldFollowUp: boolean }> {
-  const rubric = groundedQuestion(answeredQuestion, blueprint);
-  const followUpLimit = resolveFollowUpLimit(rubric, blueprint);
-  const canFollowUp = !answeredQuestion.isFollowUp
-    && (blueprint?.maxQuestions ?? 8) > 0
-    && followUpCount < (blueprint?.maxFollowUps ?? 3)
-    && followUpCountForQuestion < followUpLimit;
-  const result = await modelJson(
-    "answer evaluation",
-    turnPrompt(rubric, profile, answer, transcript, source, nextPlannedQuestion, canFollowUp, blueprint),
-    turnSchema,
-  );
-  const modelEvaluation = result
-    ? validateGroundedModelEvaluation(rubric, answer, result.evaluation)
-    : null;
-  const evaluation = modelEvaluation?.evaluation ?? groundedEvaluationFor(rubric, answer);
-  const shouldFollowUp = canFollowUp && (modelEvaluation?.trusted
-    ? result?.shouldFollowUp ?? false
-    : shouldAskFollowUp(rubric, evaluation));
-  const question = shouldFollowUp
-    ? deterministicFollowUp(answeredQuestion)
-    : (nextPlannedQuestion
-    ? promptForPlan(nextPlannedQuestion, source ?? { cvText: "", coverLetter: "" }, profile.role)
-    : null);
-  return { evaluation, question, shouldFollowUp };
-}
-
-/** Evaluates the candidate's answer against the persisted question rubric. */
+/**
+ * Evaluates the candidate's answer against the persisted question rubric,
+ * privately (spec §6.1) -- this is the assessor half of the turn, on its own
+ * for callers that only need a score (for example hydrating historical
+ * feedback) without running the full director/interviewer pipeline.
+ */
 export async function evaluateAnswer(
   question: PlannedQuestion,
   blueprint: InterviewBlueprint | null,
@@ -1613,74 +1590,281 @@ export async function evaluateAnswer(
   answer: string,
   transcript: string,
 ): Promise<GroundedEvaluation> {
-  const result = await evaluateTurn(profile, question, blueprint, answer, transcript, null, null, 0, 0);
-  return result.evaluation;
-}
-
-export function initialQuestion(profile: Pick<ProfileDraft, "role">, planned: PlannedQuestion, source: ProfileSource): string {
-  return promptForPlan(planned, source, profile.role);
-}
-
-function deterministicFollowUp(planned: PlannedQuestion): string {
-  const competency = planned.competencyName ?? "that decision";
-  return `Make the ${competency} example more concrete: what trade-off did you choose, and how did you measure the outcome?`;
-}
-
-function followUpDraft(planned: PlannedQuestion, prompt: string): FollowUpDraft {
-  return {
-    category: planned.category,
-    competencyId: planned.competencyId,
-    competencyName: planned.competencyName,
-    difficulty: planned.difficulty,
-    isFollowUp: true,
-    prompt,
-    objective: (planned as BlueprintQuestion).objective,
-    evidenceIds: (planned as BlueprintQuestion).evidenceIds ?? [],
-    expectedSignals: (planned as BlueprintQuestion).expectedSignals ?? [],
-    missingSignalPrompts: (planned as BlueprintQuestion).missingSignalPrompts ?? [],
-    rubricCriteria: (planned as BlueprintQuestion).rubricCriteria ?? [],
-    followUpLimit: (planned as BlueprintQuestion).followUpLimit ?? 0,
-    sourceConfidence: (planned as BlueprintQuestion).sourceConfidence ?? null,
-    parentQuestionId: planned.id,
-  };
-}
-
-/** Evaluates the current answer and proposes either one persisted follow-up or the next plan prompt. */
-export async function nextTurn(
-  profile: Pick<ProfileDraft, "role" | "seniority" | "expertise" | "narrative">,
-  answeredQuestion: PlannedQuestion,
-  nextPlannedQuestion: PlannedQuestion | null,
-  source: ProfileSource,
-  session: InterviewSession,
-  answer: string,
-  blueprint: InterviewBlueprint | null = null,
-): Promise<{ evaluation: Evaluation; nextQuestion: string | null; followUp: FollowUpDraft | null }> {
-  const transcript = session.messages.map((message) => `${message.role}: ${message.content}`).join("\n");
-  const followUpCount = session.questions.filter((question) => question.isFollowUp).length;
-  const followUpCountForQuestion = session.questions.filter((question) => question.parentQuestionId === answeredQuestion.id).length;
-  const { evaluation, question, shouldFollowUp } = await evaluateTurn(
-    profile,
-    answeredQuestion,
-    blueprint,
-    answer,
-    transcript,
-    source,
-    nextPlannedQuestion,
-    followUpCount,
-    followUpCountForQuestion,
+  const rubric = groundedQuestion(question, blueprint);
+  const result = await modelJson(
+    "answer evaluation",
+    assessorPrompt(rubric, profile, answer, transcript),
+    assessorSchema,
   );
-  if (shouldFollowUp) {
-    return {
-      evaluation,
-      nextQuestion: null,
-      followUp: followUpDraft(answeredQuestion, question ?? deterministicFollowUp(answeredQuestion)),
-    };
+  return result
+    ? validateGroundedModelEvaluation(rubric, answer, result.evaluation).evaluation
+    : groundedEvaluationFor(rubric, answer);
+}
+
+export type SpeakContext = {
+  round: InterviewRound;
+  policy: ModePolicy;
+  competencyName: string | null;
+  evidence: EvidenceItem[];
+  opportunity: Pick<Opportunity, "company" | "role" | "jobDescription"> | null;
+  transcript: string;
+  askedPrompts: string[];
+  /** Strings the line must not echo; never themselves sent to the model. */
+  forbiddenRubricText: string[];
+};
+
+/**
+ * Structured evidence only. The interviewer refers to what a CV says; it never
+ * recites it, and `sourceExcerpt` -- which carries raw CV text including
+ * contact details -- is deliberately excluded (spec §11.2).
+ */
+function evidenceForSpeech(evidence: EvidenceItem[]): Array<Record<string, unknown>> {
+  return evidence.slice(0, 6).map((item) => ({
+    projectOrEmployer: item.projectOrEmployer,
+    ownership: item.ownership,
+    technologies: item.technologies,
+    decision: item.decision,
+    constraint: item.constraint,
+    outcome: item.outcome,
+  }));
+}
+
+function intentInstruction(intent: Intent, policy: ModePolicy): string {
+  switch (intent.kind) {
+    case "open":
+      return "Open a new thread on the subject below. Ask what they worked on, in your own words.";
+    case "probe":
+      return `Press on "${intent.aspect}" in what they just said: "${intent.basis}". Ask for the missing specific.`;
+    case "challenge":
+      return `They claimed "${intent.claim}" without support. Ask how they know, without accusing them.`;
+    case "rescue":
+      return rescueInstruction(intent.style, intent.hook, policy);
+    case "advance":
+      return "Close the current thread briefly and open the new subject below.";
+    case "hypothetical":
+      return `Pose one short hypothetical grounded in what they described: "${intent.basis}".`;
+    case "candidate-questions":
+      return "Signal that you have covered what you wanted and invite their questions.";
+    case "close":
+      return "Close the conversation.";
   }
+}
+
+function rescueInstruction(style: RescueStyle, hook: string | null, policy: ModePolicy): string {
+  const acknowledge = policy.acknowledgeStruggle
+    ? "Acknowledge the difficulty in at most one short clause first. "
+    : "Do not acknowledge the difficulty. ";
+  switch (style) {
+    case "narrow":
+      return `${acknowledge}They could not answer. Ask a much smaller version of the same question.`;
+    case "hook":
+      return `${acknowledge}They could not answer. Hand them a concrete starting point${hook ? ` from their work on ${hook}` : ""} and ask them to start there.`;
+    case "reframe":
+      return `${acknowledge}They could not answer. Ask for the same material as a story about one specific occasion.`;
+    case "park":
+      return `${acknowledge}They could not answer. Say you will come back to it, and move to the new subject below.`;
+  }
+}
+
+/**
+ * Authors one line of interviewer speech for an already-decided intent.
+ *
+ * This call NEVER receives the objective, expected signals, rubric criteria, or
+ * any score. That exclusion is structural, not filtered, and is the fix for the
+ * rubric leak that commit 02ec2c1 worked around by removing model-authored
+ * questions altogether.
+ */
+export async function speakIntent(intent: Intent, context: SpeakContext): Promise<string> {
+  const prompt = [
+    context.round.personaStake,
+    `Your manner: ${context.round.register}`,
+    `You never raise: ${context.round.outOfScope.join(", ")}.`,
+    "Say one thing only, in at most two sentences, ending with exactly one question.",
+    "Never quote a CV or job description. Never state the candidate's contact details.",
+    context.policy.pushback === "firm"
+      ? "Do not praise, encourage, or hint."
+      : "You may acknowledge difficulty in one short clause. Never coach or hint at an answer.",
+    `Your move: ${intentInstruction(intent, context.policy)}`,
+    context.competencyName ? `Subject: ${context.competencyName}` : "",
+    `What you know about their work: ${JSON.stringify(evidenceForSpeech(context.evidence))}`,
+    context.opportunity
+      ? `You are hiring for ${context.opportunity.role} at ${context.opportunity.company}. Role context: ${(context.opportunity.jobDescription ?? "").slice(0, 1200)}`
+      : "",
+    `Conversation so far:\n${context.transcript}`,
+    context.askedPrompts.length
+      ? `Already asked -- do not repeat or paraphrase these:\n${context.askedPrompts.join("\n")}`
+      : "",
+  ].filter(Boolean).join("\n");
+
+  const lineContext = {
+    forbiddenRubricText: context.forbiddenRubricText,
+    askedPrompts: context.askedPrompts,
+    policy: context.policy,
+  };
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const result = await modelJson(
+      "interviewer line",
+      attempt === 0 ? prompt : `${prompt}\nYour previous attempt broke a rule. Try again, shorter and more direct.`,
+      interviewerLineSchema,
+    );
+    if (!result) break;
+    const violation = validateInterviewerLine(result.line, lineContext);
+    if (!violation) return result.line.trim();
+    console.warn("[gemini] interviewer line rejected", { operation: "interviewer line", intent: intent.kind, violation });
+  }
+
+  return deterministicLine(intent, context.competencyName);
+}
+
+export type NextTurnInput = {
+  profile: Pick<ProfileDraft, "role" | "seniority" | "expertise" | "narrative">;
+  session: InterviewSession;
+  answeredQuestion: PlannedQuestion;
+  answer: string;
+  blueprint: InterviewBlueprint;
+  evidence: EvidenceItem[];
+  opportunity: Pick<Opportunity, "company" | "role" | "jobDescription"> | null;
+};
+
+export type NextTurnResult = {
+  /** Null when the candidate did not attempt the question (spec §3.4). */
+  evaluation: GroundedEvaluation | null;
+  nonAnswer: boolean;
+  intent: Intent;
+  prompt: string;
+  assistance: AssistanceRecord | null;
+  targetId: string | null;
+  degraded: boolean;
+};
+
+function targetById(blueprint: InterviewBlueprint, id: string | null): CoverageTarget | null {
+  return blueprint.targets.find((target) => target.id === id) ?? null;
+}
+
+function forbiddenRubricText(blueprint: InterviewBlueprint): string[] {
+  return blueprint.targets.flatMap((target) => [target.objective, ...target.expectedSignals, ...target.rubricCriteria]);
+}
+
+/**
+ * Prompts already put to the candidate, fed to `speakIntent` so the model
+ * avoids repeating a question (spec §11.2).
+ *
+ * Restricted to rows this pipeline authored (`askedIntent !== null`) rather
+ * than every persisted prompt: a pre-release row's prompt was authored by the
+ * deleted `promptForPlan`, which interpolates a raw CV excerpt. Feeding that
+ * text back into the interviewer prompt would leak CV/PII content -- exactly
+ * what the assessor/interviewer split (Task 6) exists to keep out of this call
+ * (controller ruling 10). `askedIntent` is a structural marker of "this
+ * pipeline authored it", not a text filter, so it stays correct even if a
+ * legacy prompt happens not to contain any excerpt-shaped text.
+ */
+function askedPromptsOf(session: InterviewSession): string[] {
+  return session.questions
+    .filter((question) => question.askedIntent !== null)
+    .map((question) => question.prompt)
+    .filter((prompt): prompt is string => Boolean(prompt));
+}
+
+/**
+ * Runs one full turn: assess privately, decide deterministically, then speak.
+ *
+ * The order is load-bearing. The director never sees model-authored prose, and
+ * the interviewer never sees the rubric.
+ */
+export async function nextTurn(input: NextTurnInput): Promise<NextTurnResult> {
+  const { blueprint, session, answeredQuestion, answer } = input;
+  const round = roundFor(blueprint.roundId);
+  const policy = modePolicyFor(session.mode);
+  const rubric = groundedQuestion(answeredQuestion, blueprint);
+  const transcript = session.messages.map((message) => `${message.role}: ${message.content}`).join("\n");
+
+  const assessment = await modelJson(
+    "answer evaluation",
+    assessorPrompt(rubric, input.profile, answer, transcript),
+    assessorSchema,
+  );
+  let degraded = assessment === null;
+
+  const read: AssessmentRead = assessment?.read ?? "answered";
+  const nonAnswer = read === "stuck";
+  const evaluation = nonAnswer
+    ? null
+    : assessment
+      ? validateGroundedModelEvaluation(rubric, answer, assessment.evaluation).evaluation
+      : groundedEvaluationFor(rubric, answer);
+
+  const currentTargetId = answeredQuestion.askedIntent ? targetIdOf(answeredQuestion.askedIntent) : null;
+  const states = deriveCoverageState(blueprint.targets, session.questions, session.evaluations);
+
+  const decision = decideIntent({
+    round,
+    policy,
+    states,
+    currentTargetId,
+    read,
+    unsupportedClaims: evaluation?.unsupportedClaims ?? [],
+    answer,
+    turnsUsed: session.questions.filter((question) => question.answer !== null).length,
+    turnBudget: blueprint.turnBudget,
+    sessionRescues: rescuesSpentInSession(session.questions),
+    canContinueCurrentTarget: canContinueOnAnsweredRow(session.questions, answeredQuestion, blueprint),
+    // The director stays pure -- it never reads the clock itself (controller
+    // ruling 5). This is the one call site allowed to.
+    now: new Date().toISOString(),
+  });
+
+  const nextTargetId = targetIdOf(decision.intent);
+  const nextTarget = targetById(blueprint, nextTargetId);
+
+  const prompt = await speakIntent(decision.intent, {
+    round,
+    policy,
+    competencyName: nextTarget?.competencyName ?? null,
+    evidence: input.evidence,
+    opportunity: input.opportunity,
+    transcript,
+    askedPrompts: askedPromptsOf(session),
+    forbiddenRubricText: forbiddenRubricText(blueprint),
+  });
+
+  if (prompt === deterministicLine(decision.intent, nextTarget?.competencyName ?? null)) degraded = true;
+
   return {
     evaluation,
-    nextQuestion: question,
-    followUp: null,
+    nonAnswer,
+    intent: decision.intent,
+    prompt,
+    assistance: decision.assistance,
+    targetId: nextTargetId,
+    degraded,
   };
+}
+
+/** Authors the session's first question. Replaces `initialQuestion`. */
+export async function openingTurn(input: Omit<NextTurnInput, "answeredQuestion" | "answer">): Promise<{
+  intent: Intent;
+  prompt: string;
+  targetId: string;
+}> {
+  const { blueprint, session } = input;
+  const round = roundFor(blueprint.roundId);
+  const first = blueprint.targets[0];
+  if (!first) throw new Error("An interview blueprint needs at least one coverage target.");
+  const intent: Intent = { kind: "open", targetId: first.id };
+
+  const prompt = await speakIntent(intent, {
+    round,
+    policy: modePolicyFor(session.mode),
+    competencyName: first.competencyName,
+    evidence: input.evidence,
+    opportunity: input.opportunity,
+    transcript: "",
+    askedPrompts: [],
+    forbiddenRubricText: forbiddenRubricText(blueprint),
+  });
+
+  return { intent, prompt, targetId: first.id };
 }
 
 // The hands-on exercise remains intentionally React-specific for now; the

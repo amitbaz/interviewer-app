@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CareerDashboard, CareerStorySummary, CoachObservationSummary, Competency, InterviewSession, Opportunity, PlannedQuestion, PracticePlan, PracticeRecommendation, Profile, ProgressSnapshot } from "@/lib/types";
+import type { AssistanceRecord, CareerDashboard, CareerStorySummary, CoachObservationSummary, Competency, InterviewSession, Opportunity, PlannedQuestion, PracticePlan, PracticeRecommendation, Profile, ProgressSnapshot } from "@/lib/types";
 import App from "@/app/page";
 import { ResultsFeedbackCards } from "@/app/results-feedback-cards";
 
@@ -24,6 +24,7 @@ function question(
   answer: string,
   competencyId: string | null,
   competencyName: string | null,
+  overrides: Partial<PlannedQuestion> = {},
 ): PlannedQuestion {
   return {
     id: `question-${sequence}`,
@@ -36,7 +37,31 @@ function question(
     prompt,
     answer,
     createdAt: "2026-08-29T10:00:00.000Z",
+    askedIntent: null,
+    assistance: [],
+    nonAnswer: false,
+    ...overrides,
   };
+}
+
+/** One rescue record, for building a question that only reached its score via Coach-mode assistance. */
+function assistanceRecord(overrides: Partial<AssistanceRecord> = {}): AssistanceRecord {
+  return { style: "hook", at: "2026-08-29T10:00:00.000Z", ...overrides };
+}
+
+/** A question answered, but only after `count` Coach-mode rescues -- exercises the results card's assistance suffix (spec §8.4). */
+function answeredQuestionWithAssistance(count: number): PlannedQuestion {
+  return question(1, "How would you phase a large React migration?", "I would phase by route.", "react-architecture", "React architecture", {
+    assistance: Array.from({ length: count }, () => assistanceRecord()),
+  });
+}
+
+/** A question the candidate never attempted -- results should show "Not attempted", never a zero score (spec §11.3). */
+function unansweredNonAnswerQuestion(): PlannedQuestion {
+  return question(1, "How would you phase a large React migration?", "", "react-architecture", "React architecture", {
+    answer: null,
+    nonAnswer: true,
+  });
 }
 
 function competency(overrides: Partial<Competency>): Competency {
@@ -122,6 +147,9 @@ function session(overrides: Partial<InterviewSession> = {}): InterviewSession {
     id: "session-1",
     userId: "user-1",
     kind: "conversation",
+    roundId: "tech-lead",
+    mode: "real",
+    degraded: false,
     status: "complete",
     startedAt: "2026-08-29T10:00:00.000Z",
     completedAt: "2026-08-29T11:00:00.000Z",
@@ -491,6 +519,139 @@ async function startInterviewFrom(mode: "conversation" | "hands-on", started: In
   });
 
   return fetchMock;
+}
+
+/** A grounded, unanswered question with non-empty evidence -- the shape that used to trigger the removed "Grounded in <evidence>" provenance line. */
+function sessionWithUnansweredQuestion(): InterviewSession {
+  return activeConversationSession({
+    blueprint: {
+      status: "grounded",
+      fallbackReason: null,
+      maxFollowUps: 3,
+      maxQuestions: 8,
+      createdAt: "2026-09-01T12:00:00.000Z",
+      roundId: "tech-lead",
+      turnBudget: 8,
+      targets: [],
+      questions: [
+        {
+          id: "question-1",
+          sequence: 1,
+          category: "experience",
+          competencyId: "react-architecture",
+          competencyName: "React architecture",
+          difficulty: "senior",
+          isFollowUp: false,
+          prompt: "How would you phase a large React migration?",
+          answer: null,
+          createdAt: "2026-09-01T12:00:00.000Z",
+          objective: "Probe migration ownership and rollout trade-offs.",
+          evidenceIds: ["evidence-1"],
+          expectedSignals: ["ownership"],
+          missingSignalPrompts: [],
+          followUpLimit: 1,
+          sourceConfidence: 0.9,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
+        },
+      ],
+    },
+  });
+}
+
+/**
+ * Like `mockRoutes`, but a `POST /api/interview` `respond` request never
+ * resolves -- simulating a turn still in flight (spec §13.1's two
+ * sequential model calls) so a test can assert on the pending interviewer
+ * state without also having to resolve the request.
+ */
+function mockRoutesWithHangingRespond(routes: Record<string, RouteHandler>) {
+  const effectiveRoutes = { ...DEFAULT_ROUTES, ...routes };
+  const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.pathname : input.url;
+    if (url === "/api/interview" && requestBody(init).action === "respond") {
+      return new Promise<Response>(() => {}); // deliberately never resolves
+    }
+    const handler = effectiveRoutes[url];
+    if (!handler) throw new Error(`Unexpected request: ${url}`);
+    const { ok = true, status = 200, body } = handler(init);
+    return Promise.resolve({ ok, status, json: async () => body } as Response);
+  });
+
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+/**
+ * Drives the real shell into the states the mode-picker, pending-turn, and
+ * grounding-provenance tests need, following the same practice-view start
+ * flow `startInterviewFrom` already uses. Named (and shaped as an options
+ * bag) to match how the task-12 brief sketches its own tests, even though
+ * this file builds the driving logic itself rather than importing it from
+ * anywhere -- there is no pre-existing `renderShell` in this suite.
+ */
+async function renderShell(options: { pendingTurn?: boolean; activeSession?: InterviewSession } = {}) {
+  const defaultRoutes = {
+    "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+    "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+  };
+
+  if (options.pendingTurn) {
+    mockRoutesWithHangingRespond({
+      ...defaultRoutes,
+      "/api/practice": (init) => {
+        const body = requestBody(init);
+        if (body.action !== "start_manual") throw new Error(`Unexpected /api/practice action in this test: ${body.action}`);
+        return { body: { plan: startedPracticePlan("targeted_drill"), session: activeConversationSession() } };
+      },
+    });
+    render(<App />);
+    await screen.findByRole("heading", { name: "Ready when you are." });
+    fireEvent.click(screen.getByRole("button", { name: "practice" }));
+    await screen.findByRole("heading", { name: "Choose deliberate practice." });
+    fireEvent.change(screen.getByLabelText("Focus"), { target: { value: "Practice focus" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start practice" }));
+    await screen.findByRole("heading", { name: "Stay in the conversation." });
+    fireEvent.change(screen.getByPlaceholderText("Answer as if you were in the room…"), { target: { value: "Phase by route." } });
+    fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
+    return;
+  }
+
+  if (options.activeSession) {
+    await startInterviewFrom("conversation", options.activeSession, defaultRoutes);
+    return;
+  }
+
+  // Default: land on the results view of a just-completed conversation
+  // session, which is where "start another interview" -- and its mode
+  // picker -- lives.
+  const completed = session({ id: "session-active", overallScore: 7.5, resultSummary: { summary: "Strong migration reasoning." } });
+  await startInterviewFrom("conversation", activeConversationSession(), {
+    ...defaultRoutes,
+    "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [completed], emptyProgress()) }),
+    "/api/interview": () => ({ body: { session: completed, profile: profile() } }),
+  });
+  fireEvent.change(screen.getByPlaceholderText("Answer as if you were in the room…"), { target: { value: "Phase by route." } });
+  fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
+  await screen.findByRole("heading", { name: "A useful baseline." });
+}
+
+/** Renders `ResultsFeedbackCards` directly, mirroring the `describe("ResultsFeedbackCards", ...)` block below -- no full shell/fetch driving needed since the component takes `session` as a plain prop. */
+function renderResults(overrides: { questions: PlannedQuestion[] }) {
+  const evaluations = overrides.questions.map((item, index) => ({
+    score: 7,
+    questionId: item.id,
+    competencyId: item.competencyId,
+    competency: item.competencyName ?? `Question ${index + 1}`,
+    dimensions: {},
+    strengths: [],
+    needsWork: [],
+    missingPoints: [],
+    betterStructure: [],
+    improvedAnswer: "",
+  }));
+  render(<ResultsFeedbackCards session={session({ questions: overrides.questions, evaluations })} />);
 }
 
 beforeEach(() => {
@@ -1078,6 +1239,9 @@ describe("ResultsFeedbackCards", () => {
         maxFollowUps: 3,
         maxQuestions: 5,
         createdAt: "2026-08-29T10:00:00.000Z",
+        roundId: "tech-lead",
+        turnBudget: 8,
+        targets: [],
         questions: [
           {
             id: "question-1",
@@ -1096,6 +1260,9 @@ describe("ResultsFeedbackCards", () => {
             missingSignalPrompts: ["Name the rollback trigger."],
             followUpLimit: 1,
             sourceConfidence: 0.92,
+            askedIntent: null,
+            assistance: [],
+            nonAnswer: false,
           },
         ],
       },
@@ -1160,6 +1327,9 @@ describe("ResultsFeedbackCards", () => {
         maxFollowUps: 3,
         maxQuestions: 5,
         createdAt: "2026-08-29T10:00:00.000Z",
+        roundId: "tech-lead",
+        turnBudget: 8,
+        targets: [],
         questions: [
           {
             id: "question-1",
@@ -1178,6 +1348,9 @@ describe("ResultsFeedbackCards", () => {
             missingSignalPrompts: ["Name the rollback trigger."],
             followUpLimit: 1,
             sourceConfidence: 0.64,
+            askedIntent: null,
+            assistance: [],
+            nonAnswer: false,
           },
         ],
       },
@@ -1300,6 +1473,18 @@ describe("ResultsFeedbackCards", () => {
     expect(region.id).toBe(controls);
     expect(region).toHaveAttribute("aria-labelledby", toggle.id);
     expect(region.parentElement?.style.viewTransitionName).toBe("evaluation-card-question-question-1-0");
+  });
+
+  it("shows the assistance that produced a score", async () => {
+    renderResults({ questions: [answeredQuestionWithAssistance(2)] });
+
+    expect(await screen.findByText(/after two rescues/i)).toBeInTheDocument();
+  });
+
+  it("shows Not attempted, not a zero score, for a question the candidate never attempted", async () => {
+    renderResults({ questions: [unansweredNonAnswerQuestion()] });
+
+    expect(await screen.findByText("Not attempted")).toBeInTheDocument();
   });
 });
 
@@ -1476,6 +1661,9 @@ describe("App conversation interview", () => {
         maxFollowUps: 3,
         maxQuestions: 8,
         createdAt: "2026-09-01T12:00:00.000Z",
+        roundId: "tech-lead",
+        turnBudget: 8,
+        targets: [],
         questions: [
           {
             id: "question-1",
@@ -1494,6 +1682,9 @@ describe("App conversation interview", () => {
             missingSignalPrompts: [],
             followUpLimit: 1,
             sourceConfidence: null,
+            askedIntent: null,
+            assistance: [],
+            nonAnswer: false,
           },
         ],
       },
@@ -1520,6 +1711,9 @@ describe("App conversation interview", () => {
         maxFollowUps: 3,
         maxQuestions: 8,
         createdAt: "2026-09-01T12:00:00.000Z",
+        roundId: "tech-lead",
+        turnBudget: 8,
+        targets: [],
         questions: [
           {
             id: "question-1",
@@ -1538,6 +1732,9 @@ describe("App conversation interview", () => {
             missingSignalPrompts: [],
             followUpLimit: 1,
             sourceConfidence: null,
+            askedIntent: null,
+            assistance: [],
+            nonAnswer: false,
           },
         ],
       },
@@ -1564,6 +1761,9 @@ describe("App conversation interview", () => {
         maxFollowUps: 3,
         maxQuestions: 8,
         createdAt: "2026-09-01T12:00:00.000Z",
+        roundId: "tech-lead",
+        turnBudget: 8,
+        targets: [],
         questions: [
           {
             id: "question-1",
@@ -1582,6 +1782,9 @@ describe("App conversation interview", () => {
             missingSignalPrompts: [],
             followUpLimit: 1,
             sourceConfidence: null,
+            askedIntent: null,
+            assistance: [],
+            nonAnswer: false,
           },
         ],
       },
@@ -1658,6 +1861,58 @@ describe("App conversation interview", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("The coach is unavailable.");
     expect(screen.getByPlaceholderText("Answer as if you were in the room…")).toHaveValue("Phase by route.");
+  });
+});
+
+describe("App interview mode choice and pending turn state", () => {
+  it("offers coach and real mode before a practice session starts", async () => {
+    await renderShell();
+
+    expect(await screen.findByRole("radio", { name: /coach/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /real/i })).toBeInTheDocument();
+  });
+
+  it("shows a pending state on the interviewer while the next question is authored", async () => {
+    await renderShell({ pendingTurn: true });
+
+    expect(await screen.findByText(/thinking/i)).toBeInTheDocument();
+  });
+
+  it("does not show the grounding provenance line during a live conversation", async () => {
+    await renderShell({ activeSession: sessionWithUnansweredQuestion() });
+
+    expect(screen.queryByText(/^Grounded in/)).not.toBeInTheDocument();
+  });
+
+  it("sends the chosen mode, hardcoded round, and the finished session's opportunity when starting another interview", async () => {
+    const withOpportunity = session({ id: "session-active", overallScore: 7.5, opportunityId: "opp-1" });
+    const nextSession = activeConversationSession();
+    const fetchMock = await startInterviewFrom("conversation", activeConversationSession(), {
+      "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [withOpportunity], emptyProgress()) }),
+      "/api/interview": (init) => {
+        const body = requestBody(init);
+        if (body.action === "respond") return { body: { session: withOpportunity, profile: profile() } };
+        if (body.action === "start") return { body: { session: nextSession } };
+        throw new Error(`Unexpected /api/interview action in this test: ${body.action}`);
+      },
+    });
+
+    fireEvent.change(screen.getByPlaceholderText("Answer as if you were in the room…"), { target: { value: "Phase by route." } });
+    fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
+    await screen.findByRole("heading", { name: "A useful baseline." });
+
+    fireEvent.click(screen.getByRole("radio", { name: /coach/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Start another interview" }));
+
+    await screen.findByRole("heading", { name: "Stay in the conversation." });
+    const startCall = fetchMock.mock.calls.find(([url, init]) => url === "/api/interview" && requestBody(init as RequestInit).action === "start");
+    expect(requestBody(startCall?.[1] as RequestInit)).toEqual({
+      action: "start",
+      mode: "coach",
+      roundId: "tech-lead",
+      opportunityId: "opp-1",
+    });
   });
 });
 

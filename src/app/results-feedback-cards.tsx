@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { EvidenceItem, InterviewSession } from "@/lib/types";
+import type { AssistanceRecord, EvidenceItem, InterviewSession } from "@/lib/types";
 
 const evaluationDimensionLabels = [
   ["correctness", "Correctness"],
@@ -48,6 +48,19 @@ function evidenceLabel(item: EvidenceItem): string {
   return summary.length > 0 ? summary.join(" · ") : item.sourceExcerpt.trim();
 }
 
+/**
+ * Describes the rescues that produced a Coach-mode score, so the score is
+ * never shown alone (spec §8.4) -- a bare number flatters the candidate when
+ * it was actually reached with help. Spells out "one"/"two" since those are
+ * the only counts common enough to read oddly as digits; anything higher
+ * falls back to the digit form rather than spelling out an unbounded range.
+ */
+function assistanceLabel(assistance: AssistanceRecord[]): string | null {
+  if (assistance.length === 0) return null;
+  const count = assistance.length === 1 ? "one rescue" : assistance.length === 2 ? "two rescues" : `${assistance.length} rescues`;
+  return `reached after ${count}`;
+}
+
 function startViewTransition(update: () => void) {
   const documentWithTransition = document as Document & { startViewTransition?: (callback: () => void) => void };
   if (documentWithTransition.startViewTransition) {
@@ -70,6 +83,11 @@ export function ResultsFeedbackCards({
 }) {
   const answeredQuestions = session.questions.filter((question) => Boolean(question.answer));
   const answeredQuestionsById = new Map(answeredQuestions.map((question) => [question.id, question]));
+  // Unlike `answeredQuestionsById`, this covers every question regardless of
+  // answer status -- a non-answer question is never in `answeredQuestions`
+  // (it has no `answer`), but its score row still needs its `nonAnswer` and
+  // `assistance` fields to render "Not attempted" instead of a bare score.
+  const questionsById = new Map(session.questions.map((question) => [question.id, question]));
   const evidenceById = new Map(evidence.map((item) => [item.id, item]));
   const [expandedEvaluationKey, setExpandedEvaluationKey] = useState<string | null>(null);
 
@@ -82,6 +100,9 @@ export function ResultsFeedbackCards({
         const regionId = `${currentKey}-details`;
         const answeredQuestion = evaluation.questionId
           ? answeredQuestionsById.get(evaluation.questionId) ?? null
+          : answeredQuestions[index] ?? null;
+        const linkedQuestion = evaluation.questionId
+          ? questionsById.get(evaluation.questionId) ?? null
           : answeredQuestions[index] ?? null;
         const dimensions = evaluationDimensionLabels.filter(([key]) => {
           const value = evaluation.dimensions[key as EvaluationDimensionKey];
@@ -103,7 +124,16 @@ export function ResultsFeedbackCards({
                 <h2 className="font-semibold">{evaluation.competency}</h2>
                 <p className="mt-1 text-sm leading-6 text-[var(--ink-muted)]">{evaluation.strengths[0] ?? evaluation.needsWork[0] ?? "Open the details to review the full coaching."}</p>
               </div>
-              <span className="shrink-0 font-semibold text-[var(--pine)]">{evaluation.score}/10</span>
+              <span className="shrink-0 text-right font-semibold text-[var(--pine)]">
+                {linkedQuestion?.nonAnswer ? "Not attempted" : (
+                  <>
+                    {evaluation.score.toFixed(1)}/10
+                    {linkedQuestion && assistanceLabel(linkedQuestion.assistance) && (
+                      <span className="mt-1 block text-xs font-normal text-[var(--ink-muted)]">{assistanceLabel(linkedQuestion.assistance)}</span>
+                    )}
+                  </>
+                )}
+              </span>
             </div>
             <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
               <div className="flex flex-wrap gap-4 text-sm">

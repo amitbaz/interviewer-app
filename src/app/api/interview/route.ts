@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
-import { completeSession as summarizeSession, evaluateHandsOn, generateInterviewBlueprint, handsOnCheckpoint, handsOnExercise, initialQuestion, nextTurn } from "@/lib/coach";
+import { completeSession as summarizeSession, EVALUATION_DIMENSIONS, evaluateHandsOn, generateInterviewBlueprint, handsOnCheckpoint, handsOnExercise, nextTurn, openingTurn } from "@/lib/coach";
 import { canExplicitlyCompleteConversation } from "@/lib/conversation-completion";
+import { IMPLEMENTED_ROUNDS } from "@/lib/interview-rounds";
+import { isPreWrittenQuestion, resolveNextQuestionWrite } from "@/lib/interview-turn-write";
 import { completeLinkedPracticePlanBestEffort } from "@/lib/practice-service";
 import { calculateProgress } from "@/lib/progress";
 import {
@@ -11,11 +13,13 @@ import {
   getSession,
   listRecentSessions,
   recordConversationTurn,
+  revealFirstQuestion,
   saveHandsOnCheckpoint,
 } from "@/lib/repositories/interviews";
+import { getOpportunity } from "@/lib/repositories/opportunities";
 import { getProfile } from "@/lib/repositories/profile";
 import { requireUser } from "@/lib/supabase/server";
-import type { InterviewSession, Profile } from "@/lib/types";
+import type { Evaluation, InterviewMode, InterviewSession, PlannedQuestion, Profile, RoundId } from "@/lib/types";
 
 export const runtime = "nodejs";
 
@@ -63,19 +67,37 @@ export async function POST(request: Request) {
         const session = await createHandsOnSession(supabase, user.id, handsOnExercise(profile));
         return NextResponse.json({ session });
       }
-      const blueprint = await generateInterviewBlueprint(profile, profile.evidence ?? []);
-      const session = await createSessionWithBlueprint(supabase, user.id, blueprint);
-      if (session.questions[0]) {
-        const firstQuestion = hydratePlannedQuestion(session, session.questions[0]);
-        const openingPrompt = initialQuestion(profile, firstQuestion, profile.source);
-        session.questions[0] = openingPrompt
-          ? {
-            ...firstQuestion,
-            prompt: openingPrompt,
-          }
-          : firstQuestion;
+
+      const roundId = (typeof body.roundId === "string" ? body.roundId : "tech-lead") as RoundId;
+      if (!IMPLEMENTED_ROUNDS.includes(roundId)) {
+        return NextResponse.json({ error: "That interview round is not available yet." }, { status: 400 });
       }
-      return NextResponse.json({ session: visibleConversation(session) });
+      const mode: InterviewMode = body.mode === "coach" ? "coach" : "real";
+      const opportunityId = typeof body.opportunityId === "string" ? body.opportunityId : null;
+      const opportunity = opportunityId ? await getOpportunity(supabase, user.id, opportunityId) : null;
+
+      const blueprint = await generateInterviewBlueprint(profile, profile.evidence ?? [], { roundId, opportunity });
+      // `createSessionWithBlueprint` deliberately does not take `opportunityId`
+      // (Ruling A) -- only `linkSessionCareerContext` ever writes it.
+      const session = await createSessionWithBlueprint(supabase, user.id, blueprint, { roundId, mode });
+
+      // `blueprint: session.blueprint!`, NOT the pre-persistence `blueprint`
+      // above: `session.blueprint.targets` carry the row ids `openingTurn`'s
+      // resulting `targetId` must persist as, so later turns (which reload
+      // the session and reconstruct targets from those same row ids) can
+      // still match it. The original `blueprint.targets` use transient
+      // `gap-0`/`competency-0` ids that never round-trip through the
+      // database, which would otherwise break coverage tracking from the
+      // second turn onward.
+      const opening = await openingTurn({
+        profile,
+        session,
+        blueprint: session.blueprint!,
+        evidence: profile.evidence ?? [],
+        opportunity,
+      });
+      const revealed = await revealFirstQuestion(supabase, user.id, session, opening);
+      return NextResponse.json({ session: visibleConversation(revealed) });
     }
 
     const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
@@ -90,29 +112,47 @@ export async function POST(request: Request) {
       const question = session.questions.find((item) => !item.answer);
       if (!question) return finishConversation(supabase, user.id, profile, session);
 
-      const questionIndex = session.questions.findIndex((item) => item.id === question.id);
-      const nextPlannedQuestion = session.questions.slice(questionIndex + 1).find((item) => !item.answer) ?? null;
       const hydratedQuestion = hydratePlannedQuestion(session, question);
-      const hydratedNextQuestion = nextPlannedQuestion ? hydratePlannedQuestion(session, nextPlannedQuestion) : null;
-      const turn = await nextTurn(
+      const turn = await nextTurn({
         profile,
-        hydratedQuestion,
-        hydratedNextQuestion,
-        profile.source,
-        visibleConversation(session),
+        session: visibleConversation(session),
+        answeredQuestion: hydratedQuestion,
         answer,
-        session.blueprint ?? null,
-      );
+        blueprint: session.blueprint!,
+        evidence: profile.evidence ?? [],
+        opportunity: session.opportunityId ? await getOpportunity(supabase, user.id, session.opportunityId) : null,
+      });
+
+      // Resolving the director's coverage-target id to the row that will carry
+      // the next prompt lives in one place, shared with the flow tests -- see
+      // `resolveNextQuestionWrite`'s doc comment for the three cases.
+      const write = resolveNextQuestionWrite(session, hydratedQuestion, turn);
+      // A pre-written session (planned practice, or a legacy conversation) is
+      // not driven by the coverage plan, so it also keeps the pre-adaptive
+      // "every turn advances" behaviour: treating a blank answer as a
+      // non-answer there would leave the row unanswered with its planned
+      // prompt unchanged, silently discarding what the candidate wrote.
+      const nonAnswer = turn.nonAnswer && !isPreWrittenQuestion(hydratedQuestion);
+
       const updated = await recordConversationTurn(
         supabase,
         user.id,
         question.id,
         answer,
-        turn.evaluation,
+        turn.evaluation ?? emptyEvaluationFor(hydratedQuestion),
         {
-          nextQuestionId: turn.followUp ? null : nextPlannedQuestion?.id ?? null,
-          nextPrompt: turn.nextQuestion,
-          followUp: turn.followUp,
+          nextQuestionId: write.nextQuestionId,
+          nextPrompt: turn.prompt,
+          followUp: write.followUp,
+          askedIntent: turn.intent,
+          // Accumulates onto the row's own persisted history, not just this
+          // turn's grant: a non-answer continuation re-asks the SAME row
+          // (see above), so a rescue budget check like `rescuesSpentInSession`
+          // (which sums `question.assistance.length`) would silently lose
+          // every earlier rescue on that row if this replaced instead.
+          assistance: [...question.assistance, ...(turn.assistance ? [turn.assistance] : [])],
+          nonAnswer,
+          degraded: turn.degraded,
         },
       );
       if (!updated.questions.some((item) => !item.answer)) {
@@ -195,6 +235,35 @@ function visibleConversation(session: InterviewSession): InterviewSession {
     ...session,
     messages: session.messages.filter((message) => visibleQuestionIds.has(message.id.split(":")[0])),
   };
+}
+
+/**
+ * Placeholder evaluation values for a turn the assessor could not score. The
+ * RPC skips evidence recording when `p_non_answer` is true, so on the adaptive
+ * path these only satisfy the RPC's non-null parameters (spec §11.3). On a
+ * pre-written session, where a turn always advances, they ARE persisted -- and
+ * "Not attempted." is then the honest record of what happened.
+ */
+function emptyEvaluationFor(question: PlannedQuestion): Evaluation {
+  return {
+    questionId: question.id,
+    competencyId: question.competencyId,
+    competency: question.competencyName ?? "Communication",
+    score: 0,
+    relevance: 0,
+    dimensions: Object.fromEntries(EVALUATION_DIMENSIONS.map((key) => [key, 0])) as Evaluation["dimensions"],
+    strengths: [],
+    needsWork: [],
+    missingPoints: ["Not attempted."],
+    betterStructure: ["Not attempted."],
+    improvedAnswer: "Not attempted.",
+    supportedClaims: [],
+    expectedSignalsPresent: [],
+    unsupportedClaims: [],
+    dimensionReasons: Object.fromEntries(
+      EVALUATION_DIMENSIONS.map((key) => [key, "Not attempted."]),
+    ) as Evaluation["dimensionReasons"],
+  } as Evaluation;
 }
 
 function hydratePlannedQuestion(

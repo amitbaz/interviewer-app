@@ -13,18 +13,55 @@ import {
   createSessionWithPracticeBlueprint,
   linkSessionCareerContext,
   mapSession,
+  questionIdForTarget,
   recordAnswerAndEvaluation,
   recordConversationTurn,
+  revealFirstQuestion,
 } from "@/lib/repositories/interviews";
 import { RepositoryError } from "@/lib/repositories/profile";
 import type {
   Competency,
+  CoverageTarget,
+  Evaluation,
   EvidenceItem,
   HandsOnExercise,
   InterviewBlueprint,
   PlannedQuestion,
   ProfileDraft,
 } from "@/lib/types";
+
+/** A minimal, realistic `Evaluation` for RPC-argument-shape tests that don't care about scoring content. */
+function sampleEvaluation(): Evaluation {
+  return {
+    score: 7,
+    questionId: null,
+    competencyId: null,
+    competency: "Communication",
+    dimensions: {},
+    strengths: [],
+    needsWork: [],
+    missingPoints: [],
+    betterStructure: [],
+    improvedAnswer: "",
+  };
+}
+
+/** A single required coverage target with a stable, test-chosen id -- mirrors `buildCoverageTargets`' shape. */
+function sampleTarget(overrides: Partial<CoverageTarget> = {}): CoverageTarget {
+  return {
+    id: "target-1",
+    competencyId: null,
+    competencyName: "React architecture",
+    category: "experience",
+    evidenceIds: ["evidence-1"],
+    difficulty: "senior",
+    objective: "Probe the migration ownership and impact.",
+    expectedSignals: ["ownership", "impact"],
+    rubricCriteria: ["Name the decision.", "Describe the trade-off.", "State the outcome."],
+    required: true,
+    ...overrides,
+  };
+}
 
 type Row = Record<string, unknown>;
 type QueryResult = { data: unknown; error: { code: string } | null };
@@ -478,12 +515,103 @@ describe("mapSession", () => {
     });
   });
 
+  it("maps the new question columns onto the session", () => {
+    const session = mapSession(
+      legacyRow(),
+      [{
+        id: "question-1", sequence: 1, category: "experience", competency_id: null,
+        difficulty: "senior", is_follow_up: false, prompt: null, answer: null,
+        asked_intent: { kind: "open", targetId: "question-1" },
+        assistance: [{ style: "hook", at: "2026-09-01T00:00:00.000Z" }],
+        non_answer: true,
+        created_at: "2026-09-01T00:00:00.000Z",
+      }],
+      [], [], new Map(),
+    );
+
+    const question = session.questions[0];
+    expect(question.askedIntent).toEqual({ kind: "open", targetId: "question-1" });
+    expect(question.assistance).toHaveLength(1);
+    expect(question.nonAnswer).toBe(true);
+    expect(question.prompt).toBeNull();
+  });
+
+  it("hydrates round, mode, and degraded state onto the session", () => {
+    const session = mapSession(
+      legacyRow({ round_id: "founder", mode: "coach", degraded: true }),
+      [], [], [], new Map(),
+    );
+
+    expect(session.roundId).toBe("founder");
+    expect(session.mode).toBe("coach");
+    expect(session.degraded).toBe(true);
+  });
+
+  it("defaults round, mode, and degraded state for legacy rows that predate this release", () => {
+    const session = mapSession(legacyRow(), [], [], [], new Map());
+
+    expect(session.roundId).toBe("tech-lead");
+    expect(session.mode).toBe("real");
+    expect(session.degraded).toBe(false);
+  });
+
+  /**
+   * The load-bearing reconstruction Ruling C depends on: `nextTurn` reads
+   * `blueprint.targets` on every stateless turn (a fresh reload), and
+   * `deriveCoverageState` matches a persisted `askedIntent.targetId` against
+   * `target.id` for every target in THIS reload's list. If a reload ever
+   * produced different target ids than the ones already embedded in
+   * persisted `askedIntent`s, every target would look perpetually unasked.
+   * Using each row's own database id as its target's id is what makes the
+   * id stable across reloads (a primary key never changes) -- this test
+   * proves that for two separate targets, and proves `required` (added by
+   * Task 9.1, defaulting to `true`) survives the round trip in both
+   * directions, not just the all-default-true case.
+   */
+  it("reconstructs blueprint.targets from persisted question rows, keyed by each row's own id", () => {
+    const mapped = mapSession(
+      legacyRow({ round_id: "tech-lead", mode: "real" }),
+      [
+        {
+          id: "question-1", sequence: 1, category: "experience", competency_id: null,
+          competency_name: "Ownership", difficulty: "senior", is_follow_up: false,
+          prompt: null, answer: null, objective: "Probe ownership.",
+          evidence_ids: ["evidence-1"], expected_signals: ["ownership"],
+          rubric_criteria: ["Names the decision."], required: true,
+          created_at: "2026-09-01T10:00:00.000Z",
+        },
+        {
+          id: "question-2", sequence: 2, category: "technical", competency_id: null,
+          competency_name: "System design", difficulty: "senior", is_follow_up: false,
+          prompt: null, answer: null, objective: "Probe system design.",
+          evidence_ids: [], expected_signals: ["trade-off"], rubric_criteria: [],
+          required: false,
+          created_at: "2026-09-01T10:00:00.000Z",
+        },
+        {
+          // A follow-up row (Task 9's `record_conversation_turn` inserts these) --
+          // it must never become a coverage target.
+          id: "question-3-followup", sequence: 3, category: "technical", competency_id: null,
+          difficulty: "senior", is_follow_up: true, parent_question_id: "question-2",
+          prompt: "A follow-up prompt.", answer: null, objective: "Follow-up objective.",
+          created_at: "2026-09-01T10:00:00.000Z",
+        },
+      ],
+      [], [], new Map(),
+    );
+
+    const targets = mapped.blueprint!.targets;
+    expect(targets).toHaveLength(2);
+    expect(targets[0]).toMatchObject({ id: "question-1", competencyName: "Ownership", required: true });
+    expect(targets[1]).toMatchObject({ id: "question-2", competencyName: "System design", required: false });
+  });
+
   it("rejects a plan that is not the exact five-question backbone before persistence", () => {
     expect(() => assertConversationPlan([
-      { id: "1", sequence: 1, category: "introduction", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "one", answer: null, createdAt: "" },
-      { id: "2", sequence: 2, category: "experience", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "two", answer: null, createdAt: "" },
-      { id: "3", sequence: 3, category: "technical", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "three", answer: null, createdAt: "" },
-      { id: "4", sequence: 4, category: "architecture", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "four", answer: null, createdAt: "" },
+      { id: "1", sequence: 1, category: "introduction", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "one", answer: null, createdAt: "", askedIntent: null, assistance: [], nonAnswer: false },
+      { id: "2", sequence: 2, category: "experience", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "two", answer: null, createdAt: "", askedIntent: null, assistance: [], nonAnswer: false },
+      { id: "3", sequence: 3, category: "technical", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "three", answer: null, createdAt: "", askedIntent: null, assistance: [], nonAnswer: false },
+      { id: "4", sequence: 4, category: "architecture", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "four", answer: null, createdAt: "", askedIntent: null, assistance: [], nonAnswer: false },
     ])).toThrow("five-question backbone");
   });
 
@@ -571,6 +699,9 @@ describe("mapSession", () => {
           missingSignalPrompts: ["Name the recent engineering area you owned."],
           followUpLimit: 0,
           sourceConfidence: null,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-2",
@@ -589,6 +720,9 @@ describe("mapSession", () => {
           missingSignalPrompts: ["Name the trade-off."],
           followUpLimit: 1,
           sourceConfidence: 0.94,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-3",
@@ -607,6 +741,9 @@ describe("mapSession", () => {
           missingSignalPrompts: ["What option did you reject?"],
           followUpLimit: 1,
           sourceConfidence: 0.94,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-4",
@@ -625,6 +762,9 @@ describe("mapSession", () => {
           missingSignalPrompts: ["What alert trade-off mattered most?"],
           followUpLimit: 1,
           sourceConfidence: 0.91,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
         {
           id: "question-5",
@@ -643,30 +783,67 @@ describe("mapSession", () => {
           missingSignalPrompts: ["Who did you need alignment from?"],
           followUpLimit: 0,
           sourceConfidence: 0.91,
+          askedIntent: null,
+          assistance: [],
+          nonAnswer: false,
         },
+      ],
+      roundId: "tech-lead",
+      turnBudget: 8,
+      targets: [
+        sampleTarget({
+          id: "target-1",
+          competencyId: null,
+          competencyName: null,
+          category: "introduction",
+          evidenceIds: [],
+          objective: "Establish recent engineering ownership.",
+          expectedSignals: ["role summary"],
+          rubricCriteria: [],
+        }),
+        sampleTarget({
+          id: "target-2",
+          competencyId: "competency-1",
+          competencyName: "React architecture",
+          category: "experience",
+          evidenceIds: ["evidence-1"],
+          objective: "Probe the migration ownership and impact.",
+          expectedSignals: ["role", "impact"],
+          rubricCriteria: ["Name the trade-off."],
+        }),
       ],
     };
 
-    const session = await createSessionWithBlueprint(supabase as never, "user-1", blueprint);
+    const session = await createSessionWithBlueprint(supabase as never, "user-1", blueprint, {
+      roundId: "tech-lead",
+      mode: "real",
+    });
 
     expect(session.id).toBe("session-1");
     expect(calls).toEqual([{
       name: "create_conversation_session_with_blueprint",
       payload: expect.objectContaining({
         p_blueprint: expect.objectContaining({
+          roundId: "tech-lead",
+          mode: "real",
           status: "grounded",
           max_follow_ups: 3,
           max_questions: 8,
-          questions: expect.arrayContaining([
+          targets: expect.arrayContaining([
             expect.objectContaining({
               sequence: 2,
               objective: "Probe the migration ownership and impact.",
               evidence_ids: ["evidence-1"],
+              required: true,
             }),
           ]),
         }),
       }),
     }]);
+    // The legacy `questions` key must not be sent -- the live RPC only reads
+    // `p_blueprint.targets` (Task 9's migration drops the old `questions` key
+    // entirely).
+    expect((calls[0].payload as { p_blueprint: Record<string, unknown> }).p_blueprint.questions).toBeUndefined();
   });
 
   it("strips non-UUID fallback competency ids before the blueprint RPC while keeping persisted UUID links", async () => {
@@ -693,30 +870,47 @@ describe("mapSession", () => {
       },
       from: (table: string) => ({ select: () => table === "interview_sessions" ? sessionQuery : emptyQuery }),
     };
-    const blueprint = buildFallbackInterviewBlueprint(
-      fallbackProfile,
-      fallbackCompetencies,
-      fallbackEvidence,
-      new Date("2026-08-30T10:00:00.000Z"),
-    );
+    // buildFallbackInterviewBlueprint doesn't populate roundId/turnBudget/targets
+    // itself (see interview-planner.test.ts's own comment on this) -- Task 8's
+    // withCoveragePlan is the one merge point that does, so tests construct
+    // targets directly, the same way interview-planner.test.ts does.
+    const blueprint: InterviewBlueprint = {
+      ...buildFallbackInterviewBlueprint(
+        fallbackProfile,
+        fallbackCompetencies,
+        fallbackEvidence,
+        new Date("2026-08-30T10:00:00.000Z"),
+      ),
+      roundId: "tech-lead",
+      turnBudget: 8,
+      targets: [
+        sampleTarget({ id: "target-1", competencyId: "fallback-competency-1" }),
+        sampleTarget({ id: "target-2", competencyId: "0d7f2d0c-8e26-4ae6-b4b2-f9f44c4f4ab8" }),
+      ],
+    };
 
-    await createSessionWithBlueprint(supabase as never, "user-1", blueprint);
+    await createSessionWithBlueprint(supabase as never, "user-1", blueprint, {
+      roundId: "tech-lead",
+      mode: "real",
+    });
 
     expect(calls).toEqual([{
       name: "create_conversation_session_with_blueprint",
       payload: expect.objectContaining({
         p_blueprint: expect.objectContaining({
           status: "limited-grounding",
-          questions: expect.arrayContaining([
+          targets: [
             expect.objectContaining({
-              sequence: 2,
+              sequence: 1,
+              // Not a UUID, so it cannot satisfy the competency_id foreign
+              // key -- persistableCompetencyId strips it to null.
               competency_id: null,
             }),
             expect.objectContaining({
-              sequence: 4,
+              sequence: 2,
               competency_id: "0d7f2d0c-8e26-4ae6-b4b2-f9f44c4f4ab8",
             }),
-          ]),
+          ],
         }),
       }),
     }]);
@@ -756,6 +950,9 @@ describe("mapSession", () => {
       missingSignalPrompts: ["Prompt"],
       followUpLimit: 1,
       sourceConfidence: 0.8,
+      askedIntent: null,
+      assistance: [],
+      nonAnswer: false,
     });
     const supabase = {
       rpc: async (name: string, payload: unknown) => {
@@ -777,15 +974,27 @@ describe("mapSession", () => {
         blueprintQuestion(4, "architecture", "Reliability"),
         blueprintQuestion(5, "behavioral", "Communication"),
       ],
+      roundId: "tech-lead" as const,
+      turnBudget: 8,
+      targets: [
+        sampleTarget({ id: "target-1", category: "introduction", competencyId: null, competencyName: null }),
+        sampleTarget({ id: "target-2", category: "experience", competencyId: null, competencyName: "Backend systems" }),
+        sampleTarget({ id: "target-3", category: "technical", competencyId: null, competencyName: "System design" }),
+        sampleTarget({ id: "target-4", category: "architecture", competencyId: null, competencyName: "Reliability" }),
+        sampleTarget({ id: "target-5", category: "behavioral", competencyId: null, competencyName: "Communication" }),
+      ],
     };
 
-    await createSessionWithBlueprint(supabase as never, "user-1", blueprint);
+    await createSessionWithBlueprint(supabase as never, "user-1", blueprint, {
+      roundId: "tech-lead",
+      mode: "real",
+    });
 
     expect(calls).toEqual([{
       name: "create_conversation_session_with_blueprint",
       payload: expect.objectContaining({
         p_blueprint: expect.objectContaining({
-          questions: expect.arrayContaining([
+          targets: expect.arrayContaining([
             expect.objectContaining({
               sequence: 2,
               competency_id: null,
@@ -897,7 +1106,15 @@ describe("mapSession", () => {
         unsupportedClaims: ["It was easy and perfect."],
         dimensionReasons: { relevance: "It answers the exact trade-off question." },
       },
-      { nextQuestionId: "question-2", nextPrompt: "How would you design the system?", followUp: null },
+      {
+        nextQuestionId: "question-2",
+        nextPrompt: "How would you design the system?",
+        followUp: null,
+        askedIntent: { kind: "open", targetId: "question-2" },
+        assistance: [],
+        nonAnswer: false,
+        degraded: false,
+      },
     );
 
     expect(calls).toEqual([{
@@ -966,6 +1183,10 @@ describe("mapSession", () => {
             "Describe the trade-off and impact.",
           ],
         } as never,
+        askedIntent: { kind: "probe", targetId: "question-1", aspect: "specifics", basis: "compared the trade-offs" },
+        assistance: [],
+        nonAnswer: false,
+        degraded: false,
       },
     );
 
@@ -985,6 +1206,38 @@ describe("mapSession", () => {
             "Describe the trade-off and impact.",
           ],
         }),
+      }),
+    }]);
+  });
+
+  it("passes the intent, assistance, and non-answer flag to the RPC", async () => {
+    const calls: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const supabase = rpcHydrationClient(calls, "conversation");
+
+    await recordConversationTurn(
+      supabase as never,
+      "user-1",
+      "question-1",
+      "an answer",
+      sampleEvaluation(),
+      {
+        nextQuestionId: "question-2",
+        nextPrompt: "What did you own there?",
+        followUp: null,
+        askedIntent: { kind: "probe", targetId: "question-1", aspect: "ownership", basis: "an answer" },
+        assistance: [{ style: "narrow", at: "2026-09-01T00:00:00.000Z" }],
+        nonAnswer: false,
+        degraded: true,
+      },
+    );
+
+    expect(calls).toEqual([{
+      name: "record_conversation_turn",
+      payload: expect.objectContaining({
+        p_asked_intent: { kind: "probe", targetId: "question-1", aspect: "ownership", basis: "an answer" },
+        p_assistance: [{ style: "narrow", at: "2026-09-01T00:00:00.000Z" }],
+        p_non_answer: false,
+        p_degraded: true,
       }),
     }]);
   });
@@ -1118,7 +1371,14 @@ function practiceBlueprint(questionCount: number): InterviewBlueprint {
       rubricCriteria: ["Meet the objective."],
       followUpLimit: 0,
       sourceConfidence: null,
+      askedIntent: null,
+      assistance: [],
+      nonAnswer: false,
     })),
+    // A practice-plan blueprint never consumes the round/coverage-target system.
+    roundId: "tech-lead",
+    turnBudget: 8,
+    targets: [],
   };
 }
 
@@ -1158,6 +1418,102 @@ function practiceRpcSupabase() {
   const from = (table: string) => ({ select: () => table === "interview_sessions" ? sessionQuery : emptyQuery });
   return { rpc, from };
 }
+
+describe("questionIdForTarget", () => {
+  const rows: Row[] = [
+    {
+      id: "question-1", sequence: 1, category: "experience", competency_id: null,
+      competency_name: "Ownership", difficulty: "senior", is_follow_up: false,
+      prompt: "Tell me about the migration.", answer: "I owned it.",
+      created_at: "2026-09-01T10:00:00.000Z", answered_at: "2026-09-01T10:01:00.000Z",
+    },
+    {
+      id: "question-2", sequence: 2, category: "technical", competency_id: null,
+      competency_name: "System design", difficulty: "senior", is_follow_up: false,
+      prompt: null, answer: null, created_at: "2026-09-01T10:00:00.000Z",
+    },
+  ];
+
+  it("returns the unanswered question row whose id matches the target id", () => {
+    const session = mapSession(legacyRow(), rows, [], [], new Map());
+
+    expect(questionIdForTarget(session, "question-2")).toBe("question-2");
+  });
+
+  it("returns null when the matching row has already been answered", () => {
+    // Ruling C's invariant only ever routes a director targetId at an
+    // unasked target -- a probe/challenge/rescue on an already-answered
+    // target becomes a follow-up row instead (a different code path). This
+    // guards against a caller bug reusing a stale, already-answered id.
+    const session = mapSession(legacyRow(), rows, [], [], new Map());
+
+    expect(questionIdForTarget(session, "question-1")).toBeNull();
+  });
+
+  it("returns null when no question row carries that id", () => {
+    const session = mapSession(legacyRow(), rows, [], [], new Map());
+
+    expect(questionIdForTarget(session, "no-such-id")).toBeNull();
+  });
+});
+
+describe("revealFirstQuestion", () => {
+  it("writes the authored prompt and intent onto the first unanswered row, scoped by user id", async () => {
+    const sessionRow = legacyRow();
+    const questionRow = {
+      id: "question-1", sequence: 1, category: "experience", competency_id: null,
+      difficulty: "senior", is_follow_up: false, prompt: null, answer: null,
+      created_at: "2026-08-29T10:00:00.000Z",
+    };
+    const questionsCapture: { update?: Row; eq?: Array<[string, unknown]> } = {};
+    const tables: Record<string, ReturnType<typeof tableStub>> = {
+      interview_sessions: tableStub({ data: sessionRow, error: null }),
+      interview_questions: tableStub({ data: [questionRow], error: null }, questionsCapture),
+      hands_on_checkpoints: tableStub({ data: [], error: null }),
+      session_evaluations: tableStub({ data: [], error: null }),
+      question_evaluations: tableStub({ data: [], error: null }),
+      competencies: tableStub({ data: [], error: null }),
+    };
+    const supabase = { from: (table: string) => tables[table] };
+    const session = mapSession(sessionRow, [questionRow], [], [], new Map());
+
+    const refreshed = await revealFirstQuestion(supabase as never, "user-1", session, {
+      intent: { kind: "open", targetId: "question-1" },
+      prompt: "Tell me about a project you owned end to end.",
+      targetId: "question-1",
+    });
+
+    expect(refreshed.id).toBe(sessionRow.id);
+    expect(questionsCapture.update).toEqual({
+      prompt: "Tell me about a project you owned end to end.",
+      asked_intent: { kind: "open", targetId: "question-1" },
+      asked_at: expect.any(String),
+    });
+    // The update itself is the FIRST pair of `.eq(...)` calls on this table --
+    // later pairs belong to the session reload's own `interview_questions`
+    // query, which reuses the same table stub.
+    expect(questionsCapture.eq?.slice(0, 2)).toEqual([["id", "question-1"], ["user_id", "user-1"]]);
+  });
+
+  it("throws when every question already has an answer", async () => {
+    const sessionRow = legacyRow();
+    const answeredRow = {
+      id: "question-1", sequence: 1, category: "experience", competency_id: null,
+      difficulty: "senior", is_follow_up: false, prompt: "Already asked.", answer: "Already answered.",
+      created_at: "2026-08-29T10:00:00.000Z",
+    };
+    const session = mapSession(sessionRow, [answeredRow], [], [], new Map());
+    const supabase = { from: () => tableStub({ data: null, error: null }) };
+
+    await expect(
+      revealFirstQuestion(supabase as never, "user-1", session, {
+        intent: { kind: "open", targetId: "question-1" },
+        prompt: "Anything else to reveal?",
+        targetId: "question-1",
+      }),
+    ).rejects.toThrow("no question to reveal");
+  });
+});
 
 describe("planned practice session starts", () => {
   it("accepts three planned base questions but generic backbone still rejects them", () => {

@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  CoverageTarget,
   Evaluation,
   EvidenceItem,
-  FollowUpDraft,
   InterviewSession,
   Message,
   Opportunity,
@@ -39,9 +39,8 @@ import type { ConversationTurnPersistence } from "@/lib/repositories/interviews"
  * `supabase/migrations/202608290010_follow_up_rubric_contract.sql` and
  * `supabase/migrations/202608310001_planned_practice_sessions.sql`) --
  * that DB round trip cannot run in Vitest, and Task 11's ruling bars this
- * branch from touching a live Supabase project. The follow-up-insertion
- * stand-in mirrors the RPC's exact sequence-shift behavior (see
- * `applyConversationTurn` below). The mock for `createSessionWithPracticeBlueprint`
+ * branch from touching a live Supabase project (see `applyConversationTurn`
+ * below). The mock for `createSessionWithPracticeBlueprint`
  * still calls the REAL `assertPracticeConversationBlueprint` before
  * constructing a session, so a `generatePracticeBlueprint` bug that produced
  * an illegal blueprint (wrong count, gapped sequence) is caught exactly as
@@ -99,12 +98,13 @@ vi.mock("@/lib/repositories/practice-plans", async () => {
 
 // `@/lib/coach`, `@/lib/practice-recommendation`, `@/lib/progress`, and
 // `@/lib/practice-service` are deliberately NOT mocked anywhere in this file.
-import { completeSession as summarizeSession, nextTurn } from "@/lib/coach";
+import { completeSession as summarizeSession, EVALUATION_DIMENSIONS, nextTurn } from "@/lib/coach";
 import { canExplicitlyCompleteConversation } from "@/lib/conversation-completion";
 import {
   completeLinkedPracticePlanBestEffort,
   startRecommendedPractice,
 } from "@/lib/practice-service";
+import { isPreWrittenQuestion, resolveNextQuestionWrite } from "@/lib/interview-turn-write";
 import {
   assertConversationPlan,
   assertPracticeConversationBlueprint,
@@ -204,7 +204,7 @@ function interviewerTranscript(questions: PlannedQuestion[]): Message[] {
       const interviewer: Message = {
         id: `${question.id}:question`,
         role: "interviewer",
-        content: question.prompt,
+        content: question.prompt!,
         createdAt: question.createdAt,
       };
       if (!question.answer) return [interviewer];
@@ -219,15 +219,18 @@ function interviewerTranscript(questions: PlannedQuestion[]): Message[] {
 
 /**
  * A hand-rolled stand-in for the `record_conversation_turn` Postgres RPC
- * (`supabase/migrations/202608290010_follow_up_rubric_contract.sql`): marks
- * the answered question, and either (a) inserts a new follow-up question at
- * `answered.sequence + 1`, shifting every later question's sequence up by
- * one -- exactly like the RPC's `for ... order by sequence desc` shift loop
- * -- or (b) updates the next base question's prompt text in place, which is
- * what the RPC's `elsif p_next_question_id is not null` branch does. Used as
- * the mocked `recordConversationTurn` implementation below so this test
- * exercises the exact persisted-state transition the real RPC performs,
- * without a live database.
+ * (`supabase/migrations/202609010001_adaptive_interviewer.sql`): marks the
+ * answered question, then EITHER inserts a follow-up row (`p_follow_up`) OR
+ * updates the row named by `p_next_question_id` in place. Used as the mocked
+ * `recordConversationTurn` implementation below so this test exercises the
+ * exact persisted-state transition the real RPC performs, without a live
+ * database.
+ *
+ * The follow-up branch reproduces the RPC's guard, including the limit read
+ * off the PARENT row's persisted `follow_up_limit` -- 0 for every practice
+ * introduction. That is what makes this file a real detector for the class of
+ * bug where a planned-practice turn is routed through the adaptive
+ * follow-up path: the RPC raises, and so does this.
  */
 function applyConversationTurn(
   session: InterviewSession,
@@ -237,71 +240,117 @@ function applyConversationTurn(
   next: ConversationTurnPersistence,
 ): InterviewSession {
   let questions = session.questions.map((question) => (
-    question.id === questionId ? { ...question, answer } : question
+    question.id === questionId
+      ? {
+        ...question,
+        answer: next.nonAnswer ? question.answer : answer,
+        assistance: next.assistance,
+        nonAnswer: next.nonAnswer,
+      }
+      : question
   ));
   const answered = questions.find((question) => question.id === questionId);
   if (!answered) throw new Error(`Unknown question id: ${questionId}`);
 
   if (next.followUp) {
-    const followUp: FollowUpDraft = next.followUp;
-    questions = questions.map((question) => (
-      question.sequence > answered.sequence ? { ...question, sequence: question.sequence + 1 } : question
-    ));
-    const followUpQuestion: PlannedQuestion = {
-      id: `${answered.id}-follow-up`,
-      sequence: answered.sequence + 1,
-      category: followUp.category,
-      competencyId: followUp.competencyId,
-      competencyName: followUp.competencyName,
-      difficulty: followUp.difficulty,
-      isFollowUp: true,
-      prompt: followUp.prompt,
-      answer: null,
-      createdAt: NOW_ISO,
-      objective: followUp.objective,
-      evidenceIds: followUp.evidenceIds,
-      expectedSignals: followUp.expectedSignals,
-      missingSignalPrompts: followUp.missingSignalPrompts,
-      rubricCriteria: followUp.rubricCriteria,
-      followUpLimit: followUp.followUpLimit,
-      sourceConfidence: followUp.sourceConfidence,
-      parentQuestionId: answered.id,
-    };
-    questions = [...questions, followUpQuestion].sort((left, right) => left.sequence - right.sequence);
+    const followUps = questions.filter((question) => question.isFollowUp).length;
+    const parentFollowUps = questions.filter((question) => question.parentQuestionId === answered.id).length;
+    if (
+      questions.length >= session.blueprint!.maxQuestions
+      || followUps >= session.blueprint!.maxFollowUps
+      || parentFollowUps >= (answered.followUpLimit ?? 0)
+      || answered.isFollowUp
+    ) {
+      throw new Error("Conversation follow-up limit reached");
+    }
+    questions = [
+      ...questions.map((question) => (
+        question.sequence > answered.sequence ? { ...question, sequence: question.sequence + 1 } : question
+      )),
+      {
+        ...answered,
+        id: `${answered.id}-follow-up`,
+        sequence: answered.sequence + 1,
+        isFollowUp: true,
+        parentQuestionId: answered.id,
+        prompt: next.followUp.prompt,
+        answer: null,
+        assistance: [],
+        nonAnswer: false,
+        askedIntent: next.askedIntent,
+      },
+    ];
   } else if (next.nextQuestionId) {
     const nextQuestionId = next.nextQuestionId;
     questions = questions.map((question) => (
-      question.id === nextQuestionId ? { ...question, prompt: next.nextPrompt ?? question.prompt } : question
+      question.id === nextQuestionId && question.answer === null
+        ? { ...question, prompt: next.nextPrompt ?? question.prompt, askedIntent: next.askedIntent }
+        : question
     ));
   }
 
   return {
     ...session,
     questions,
-    evaluations: [...session.evaluations, evaluation],
+    evaluations: next.nonAnswer ? session.evaluations : [...session.evaluations, evaluation],
     messages: interviewerTranscript(questions),
   };
+}
+
+/**
+ * Placeholder evaluation values for a non-answer turn. Mirrors
+ * `emptyEvaluationFor` in `src/app/api/interview/route.ts`: the RPC skips
+ * evidence recording when `p_non_answer` is true, so these are never
+ * persisted; they exist only to satisfy the RPC's non-null parameters (spec
+ * §11.3). Not imported from `route.ts` because that copy is a private,
+ * unexported helper local to the route module.
+ */
+function emptyEvaluationFor(question: PlannedQuestion): Evaluation {
+  return {
+    questionId: question.id,
+    competencyId: question.competencyId,
+    competency: question.competencyName ?? "Communication",
+    score: 0,
+    relevance: 0,
+    dimensions: Object.fromEntries(EVALUATION_DIMENSIONS.map((key) => [key, 0])) as Evaluation["dimensions"],
+    strengths: [],
+    needsWork: [],
+    missingPoints: ["Not attempted."],
+    betterStructure: ["Not attempted."],
+    improvedAnswer: "Not attempted.",
+    supportedClaims: [],
+    expectedSignalsPresent: [],
+    unsupportedClaims: [],
+    dimensionReasons: Object.fromEntries(
+      EVALUATION_DIMENSIONS.map((key) => [key, "Not attempted."]),
+    ) as Evaluation["dimensionReasons"],
+  } as Evaluation;
 }
 
 /** Mirrors `api/interview/route.ts`'s "respond" action: find the next unanswered question, evaluate it, persist the turn. */
 async function answerNextQuestion(session: InterviewSession, answer: string): Promise<InterviewSession> {
   const question = session.questions.find((item) => !item.answer);
   if (!question) throw new Error("No unanswered question remains.");
-  const index = session.questions.findIndex((item) => item.id === question.id);
-  const nextPlannedQuestion = session.questions.slice(index + 1).find((item) => !item.answer) ?? null;
-  const turn = await nextTurn(
-    { role: profile.role, seniority: profile.seniority, expertise: profile.expertise, narrative: profile.narrative },
-    question,
-    nextPlannedQuestion,
-    profile.source,
+  const turn = await nextTurn({
+    profile: { role: profile.role, seniority: profile.seniority, expertise: profile.expertise, narrative: profile.narrative },
     session,
+    answeredQuestion: question,
     answer,
-    session.blueprint ?? null,
-  );
-  return recordConversationTurn(supabase as never, "user-1", question.id, answer, turn.evaluation, {
-    nextQuestionId: turn.followUp ? null : nextPlannedQuestion?.id ?? null,
-    nextPrompt: turn.nextQuestion,
-    followUp: turn.followUp,
+    blueprint: session.blueprint!,
+    evidence: profile.evidence ?? [],
+    opportunity: null,
+  });
+  // The route's own resolution and its own non-answer rule, not a local copy:
+  // a copy is exactly what let this helper drift out of step with `route.ts`.
+  const write = resolveNextQuestionWrite(session, question, turn);
+  return recordConversationTurn(supabase as never, "user-1", question.id, answer, turn.evaluation ?? emptyEvaluationFor(question), {
+    nextQuestionId: write.nextQuestionId,
+    nextPrompt: turn.prompt,
+    followUp: write.followUp,
+    askedIntent: turn.intent,
+    assistance: [...question.assistance, ...(turn.assistance ? [turn.assistance] : [])],
+    nonAnswer: turn.nonAnswer && !isPreWrittenQuestion(question),
+    degraded: turn.degraded,
   });
 }
 
@@ -319,7 +368,7 @@ describe("Release 2 flow: recommendation through practice-plan completion", () =
     vi.unstubAllEnvs();
   });
 
-  it("drives a story-gap recommendation through a 3-question planned session, its follow-up, completion, and plan completion", async () => {
+  it("drives a story-gap recommendation through a 3-question planned session, completion, and plan completion", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
 
     mocks.getProfile.mockResolvedValue(profile);
@@ -379,10 +428,34 @@ describe("Release 2 flow: recommendation through practice-plan completion", () =
       // the live RPC would reject it in production.
       assertPracticeConversationBlueprint(blueprint);
       const questions: PlannedQuestion[] = blueprint.questions.map((question: PlannedQuestion) => ({ ...question, answer: null }));
+      // `mapSession` reconstructs a coverage target from EVERY non-follow-up
+      // row of ANY conversation session, so a planned practice session is
+      // reloaded with a full set of targets its plan never asked for. The
+      // fixture must carry them, or this file tests a session shape that does
+      // not exist in production -- the gap that let a planned-practice turn
+      // reach the adaptive follow-up path unnoticed.
+      const targets: CoverageTarget[] = questions
+        .filter((question) => !question.isFollowUp)
+        .map((question) => ({
+          id: question.id,
+          competencyId: question.competencyId,
+          competencyName: question.competencyName,
+          category: question.category,
+          evidenceIds: question.evidenceIds ?? [],
+          difficulty: question.difficulty,
+          objective: question.objective ?? "",
+          expectedSignals: question.expectedSignals ?? [],
+          rubricCriteria: question.rubricCriteria ?? [],
+          required: true,
+        }));
       liveSession = {
         id: "session-1",
         userId,
         kind: "conversation",
+        // A planned practice session, not a round-based real interview.
+        roundId: "tech-lead",
+        mode: "coach",
+        degraded: false,
         status: "active",
         startedAt: NOW_ISO,
         completedAt: null,
@@ -390,7 +463,7 @@ describe("Release 2 flow: recommendation through practice-plan completion", () =
         resultSummary: {},
         overallScore: null,
         questions,
-        blueprint,
+        blueprint: { ...blueprint, targets },
         checkpoints: [],
         evaluations: [],
         messages: interviewerTranscript(questions),
@@ -446,27 +519,19 @@ describe("Release 2 flow: recommendation through practice-plan completion", () =
     );
     expect(session.questions).toHaveLength(3); // this answer matches every expected signal, so no follow-up is warranted
 
-    // The final base question, answered deliberately weakly so it earns a persisted follow-up.
+    // The final base question, answered deliberately weakly -- under the old
+    // dynamic follow-up pipeline this would have earned a persisted
+    // follow-up. Task 7 removed that mechanism: the director only ever moves
+    // between pre-existing coverage targets. Those targets are reconstructed
+    // from these very rows, so `decideIntent` does return an intent naming one
+    // of them -- but a pre-written row is not driven by the coverage plan, so
+    // `resolveNextQuestionWrite` writes no next question and the session
+    // simply has no more questions to ask. Routing it through the follow-up
+    // branch instead would raise "Conversation follow-up limit reached" out of
+    // `applyConversationTurn`, exactly as the live RPC does.
     session = await answerNextQuestion(session, "I used React.");
-    expect(session.questions).toHaveLength(4);
-    const followUp = session.questions.find((question) => question.isFollowUp);
-    expect(followUp).toBeDefined();
-    expect(followUp?.parentQuestionId).toBe("practice-blueprint-question-3");
-    expect(followUp?.answer).toBeNull();
-
-    // Every base question is now answered -- the ONLY unanswered item left
-    // is the persisted follow-up itself. This is the brief's "planned
-    // session with an unanswered persisted follow-up cannot explicitly
-    // complete" case, produced by the real flow rather than a hand fixture.
-    expect(session.questions.filter((question) => !question.isFollowUp).every((question) => Boolean(question.answer))).toBe(true);
-    expect(canExplicitlyCompleteConversation(session)).toBe(false);
-
-    // --- answer the follow-up ---
-    session = await answerNextQuestion(
-      session,
-      "I made the decision to split the migration into two phases because of a tight constraint on the launch date, and I weighed the trade-off between a full rewrite and an incremental rollout before choosing the incremental path.",
-    );
-    expect(session.questions).toHaveLength(4); // a follow-up can never itself earn a second follow-up
+    expect(session.questions).toHaveLength(3); // no dynamic follow-up is ever created anymore
+    expect(session.questions.some((question) => question.isFollowUp)).toBe(false);
     expect(session.questions.every((question) => Boolean(question.answer))).toBe(true);
     expect(canExplicitlyCompleteConversation(session)).toBe(true);
 
@@ -485,14 +550,14 @@ describe("Release 2 flow: recommendation through practice-plan completion", () =
     // "plan bookkeeping failure returns a warning without invalidating
     // completed interview evidence" -- a second, independent bookkeeping
     // attempt fails, but the interview evidence already returned above is
-    // untouched: every answer, including the follow-up, is still there.
+    // untouched: every answer is still there.
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     mocks.updatePracticePlan.mockRejectedValueOnce(new Error("db unavailable"));
     const secondAttempt = await completeLinkedPracticePlanBestEffort(supabase as never, "user-1", completed);
     expect(secondAttempt.warning).toEqual(expect.any(String));
     expect(completed.questions.every((question) => Boolean(question.answer))).toBe(true);
-    expect(completed.questions).toHaveLength(4);
-    expect(completed.evaluations).toHaveLength(4);
+    expect(completed.questions).toHaveLength(3);
+    expect(completed.evaluations).toHaveLength(3);
     consoleError.mockRestore();
   });
 
@@ -509,6 +574,9 @@ describe("Release 2 flow: recommendation through practice-plan completion", () =
         prompt: `Backbone prompt ${index + 1}`,
         answer: null,
         createdAt: NOW_ISO,
+        askedIntent: null,
+        assistance: [],
+        nonAnswer: false,
       }));
 
     expect(() => assertConversationPlan(backbone)).not.toThrow();
