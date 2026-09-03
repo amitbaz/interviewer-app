@@ -1453,6 +1453,25 @@ describe("generateInterviewBlueprint", () => {
     expect(blueprint.questions).toHaveLength(5);
     expect(blueprint.questions[1].evidenceIds).toEqual(["evidence-1"]);
   });
+
+  it.each([
+    ["the discovery path", [] as EvidenceItem[]],
+    ["the deterministic fallback path", blueprintEvidence],
+  ])("refuses an empty coverage plan on %s", async (_label, evidence) => {
+    // `buildCoverageTargets` returns nothing for a profile with no
+    // competencies and no anchored gaps. Without validation here the empty
+    // plan reached `createSessionWithBlueprint`, which validates
+    // `blueprint.questions` rather than `targets`: it inserted an active
+    // session with zero question rows and only then failed in `openingTurn`,
+    // leaving the orphan behind.
+    vi.stubEnv("GEMINI_API_KEY", "");
+
+    await expect(generateInterviewBlueprint(
+      { ...blueprintProfile, competencies: [] },
+      evidence,
+      { roundId: "tech-lead", opportunity: null },
+    )).rejects.toThrow(/at least one coverage target/);
+  });
 });
 
 describe("generatePracticeBlueprint", () => {

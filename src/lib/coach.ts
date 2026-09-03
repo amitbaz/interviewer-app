@@ -950,6 +950,15 @@ export async function extractEngineeringEvidence(cvText: string, coverLetter: st
  * below. That single merge point is deliberate: it is the one place this
  * function guarantees the coverage-plan fields land, so no return path can
  * silently omit them.
+ *
+ * It is also the one place they are validated. `validateInterviewBlueprint`
+ * is the only check that `targets` is non-empty, and `buildCoverageTargets`
+ * legitimately returns an empty list for a profile with no competencies and
+ * no anchored gaps -- exactly the sparse profile the discovery path serves.
+ * `createSessionWithBlueprint` validates `blueprint.questions` rather than
+ * `targets`, so an unvalidated empty plan used to insert an active session
+ * with zero question rows and only then fail in `openingTurn`, orphaning it.
+ * Throwing here, before any session exists, is the whole point.
  */
 export async function generateInterviewBlueprint(
   profile: Pick<ProfileDraft, "role" | "seniority" | "summary" | "narrative" | "expertise" | "characteristics" | "competencies">,
@@ -958,12 +967,12 @@ export async function generateInterviewBlueprint(
 ): Promise<InterviewBlueprint> {
   const createdAt = new Date().toISOString();
   const targets = buildCoverageTargets(profile, evidence, options.opportunity, options.roundId);
-  const withCoveragePlan = (blueprint: InterviewBlueprint): InterviewBlueprint => ({
+  const withCoveragePlan = (blueprint: InterviewBlueprint): InterviewBlueprint => validateInterviewBlueprint({
     ...blueprint,
     roundId: options.roundId,
     turnBudget: 8,
     targets,
-  });
+  }, evidence);
 
   const readiness = assessProfileReadiness(evidence);
   if (!readiness.ready) {
@@ -990,10 +999,7 @@ export async function generateInterviewBlueprint(
     const result = await modelJson("interview blueprint", prompt(repair), blueprintDraftSchema);
     if (!result) continue;
     try {
-      // The coverage plan must land before validation, not after: `validateInterviewBlueprint`
-      // now requires a non-empty `targets` with a required entry (spec §9.1),
-      // and the model's own JSON never carries one.
-      return validateInterviewBlueprint(withCoveragePlan(normalizeBlueprint(result, createdAt)), evidence);
+      return withCoveragePlan(normalizeBlueprint(result, createdAt));
     } catch {
       continue;
     }
