@@ -724,7 +724,16 @@ describe("adaptive interviewer flow", () => {
     expect(followUp?.askedIntent).toMatchObject({ targetId: openingTargetId });
   });
 
-  it("rescues a blanking candidate in coach mode and returns to the parked target", async () => {
+  // NOT "and returns to the parked target": it does not, and this test never
+  // checked that it did. A park issues `{ kind: "rescue", targetId: <the same
+  // target>, style: "park" }` and a non-answer never sets the row's `answer`,
+  // so the parked row stays the first unanswered row and therefore stays the
+  // question the candidate is shown -- the conversation cannot move off it,
+  // which is the §2.1 blackout spec §8.2 names park as the fix for. Moving it
+  // needs a way for a non-answered row to stop being the current row, which is
+  // a persistence change, not a director one. Tracked in
+  // `final-review-fix-report.md` (I1).
+  it("rescues a blanking candidate in coach mode and records the rescue on the question", async () => {
     const session = await runScriptedSession({
       mode: "coach",
       answers: ["i don't know", "i am having a blackout", "ok — I owned the design system migration at Acme."],
