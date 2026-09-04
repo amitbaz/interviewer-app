@@ -351,6 +351,7 @@ async function answerNextQuestion(session: InterviewSession, answer: string): Pr
     assistance: [...question.assistance, ...(turn.assistance ? [turn.assistance] : [])],
     nonAnswer: turn.nonAnswer && !isPreWrittenQuestion(question),
     degraded: turn.degraded,
+    setAsideReason: null,
   });
 }
 
@@ -577,6 +578,9 @@ describe("Release 2 flow: recommendation through practice-plan completion", () =
         askedIntent: null,
         assistance: [],
         nonAnswer: false,
+        setAsideAt: null,
+        setAsideReason: null,
+        nonAnswers: [],
       }));
 
     expect(() => assertConversationPlan(backbone)).not.toThrow();

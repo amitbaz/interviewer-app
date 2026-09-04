@@ -155,6 +155,9 @@ function sampleBlueprintQuestions(): BlueprintQuestion[] {
     askedIntent: null,
     assistance: [],
     nonAnswer: false,
+    setAsideAt: null,
+    setAsideReason: null,
+    nonAnswers: [],
   }));
 }
 
@@ -223,6 +226,9 @@ describe("adaptive interview planning", () => {
       askedIntent: null,
       assistance: [],
       nonAnswer: false,
+      setAsideAt: null,
+      setAsideReason: null,
+      nonAnswers: [],
     };
 
     const withOne = appendFollowUp(plan, followUp);
@@ -292,6 +298,9 @@ describe("adaptive interview planning", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
         {
           id: "question-2",
@@ -318,6 +327,9 @@ describe("adaptive interview planning", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
         {
           id: "question-3",
@@ -344,6 +356,9 @@ describe("adaptive interview planning", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
         {
           id: "question-4",
@@ -370,6 +385,9 @@ describe("adaptive interview planning", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
         {
           id: "question-5",
@@ -396,6 +414,9 @@ describe("adaptive interview planning", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
       ],
     };
@@ -435,6 +456,9 @@ describe("adaptive interview planning", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
         {
           id: "question-2",
@@ -457,6 +481,9 @@ describe("adaptive interview planning", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
         {
           id: "question-3",
@@ -479,6 +506,9 @@ describe("adaptive interview planning", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
         {
           id: "question-4",
@@ -501,6 +531,9 @@ describe("adaptive interview planning", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
         {
           id: "question-5",
@@ -523,6 +556,9 @@ describe("adaptive interview planning", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
       ],
     }, evidence)).toThrow("clearly labeled general objective");
@@ -560,6 +596,9 @@ describe("adaptive interview planning", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
         {
           id: "question-2",
@@ -582,6 +621,9 @@ describe("adaptive interview planning", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
         {
           id: "question-3",
@@ -604,6 +646,9 @@ describe("adaptive interview planning", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
         {
           id: "question-4",
@@ -626,6 +671,9 @@ describe("adaptive interview planning", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
         {
           id: "question-5",
@@ -648,6 +696,9 @@ describe("adaptive interview planning", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
       ],
     }, evidence)).toThrow("unknown evidence");

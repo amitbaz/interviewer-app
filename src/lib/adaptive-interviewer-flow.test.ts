@@ -373,6 +373,9 @@ function makeFakeSupabase() {
         asked_intent: null,
         assistance: [],
         non_answer: false,
+        set_aside_at: null,
+        set_aside_reason: null,
+        non_answers: [],
         answer: null,
         answered_at: null,
         asked_at: null,
@@ -441,6 +444,18 @@ function makeFakeSupabase() {
 
     question.non_answer = nonAnswer;
     question.assistance = args.p_assistance ?? [];
+    // Mirrors 202609040001: append the unscored exchange, and set (never
+    // clear) the set-aside marker on the answered row.
+    if (nonAnswer) {
+      question.non_answers = [
+        ...(Array.isArray(question.non_answers) ? question.non_answers : []),
+        { prompt: (question.prompt as string) ?? "", answer: args.p_answer, at: nowIso() },
+      ];
+    }
+    if (args.p_set_aside_reason != null) {
+      question.set_aside_at = nowIso();
+      question.set_aside_reason = args.p_set_aside_reason;
+    }
     question.updated_at = nowIso();
 
     if (args.p_follow_up != null) {
@@ -501,6 +516,9 @@ function makeFakeSupabase() {
         asked_intent: args.p_asked_intent ?? null,
         assistance: [],
         non_answer: false,
+        set_aside_at: null,
+        set_aside_reason: null,
+        non_answers: [],
         answer: null,
         answered_at: null,
         asked_at: nowIso(),
@@ -519,6 +537,9 @@ function makeFakeSupabase() {
       if (!eligible) return { data: null, error: { code: "P0002", message: "Owned next question was not found" } };
       next!.prompt = typeof args.p_next_prompt === "string" ? args.p_next_prompt.trim() : null;
       next!.asked_intent = args.p_asked_intent ?? null;
+      // Mirrors 202609040001: asking a row again makes it current again.
+      next!.set_aside_at = null;
+      next!.set_aside_reason = null;
       next!.asked_at = nowIso();
       next!.updated_at = nowIso();
     }
@@ -672,6 +693,7 @@ async function runScriptedSession(options: {
         assistance: [...question.assistance, ...(turn.assistance ? [turn.assistance] : [])],
         nonAnswer: turn.nonAnswer,
         degraded: turn.degraded,
+        setAsideReason: null,
       },
     );
   }

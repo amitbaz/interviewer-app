@@ -862,6 +862,9 @@ function normalizeBlueprintQuestion(
     askedIntent: null,
     assistance: [],
     nonAnswer: false,
+    setAsideAt: null,
+    setAsideReason: null,
+    nonAnswers: [],
   };
 }
 
@@ -1335,6 +1338,9 @@ function buildFallbackPracticeBlueprint(
       askedIntent: null,
       assistance: [],
       nonAnswer: false,
+      setAsideAt: null,
+      setAsideReason: null,
+      nonAnswers: [],
     };
   });
 

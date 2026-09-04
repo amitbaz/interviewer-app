@@ -153,6 +153,8 @@ export async function POST(request: Request) {
           assistance: [...question.assistance, ...(turn.assistance ? [turn.assistance] : [])],
           nonAnswer,
           degraded: turn.degraded,
+          // Wired up by a later task; this task only adds the column.
+          setAsideReason: null,
         },
       );
       if (!updated.questions.some((item) => !item.answer)) {

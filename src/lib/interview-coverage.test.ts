@@ -33,6 +33,9 @@ function question(id: string, overrides: Partial<PlannedQuestion> = {}): Planned
     askedIntent: null,
     assistance: [],
     nonAnswer: false,
+    setAsideAt: null,
+    setAsideReason: null,
+    nonAnswers: [],
     ...overrides,
   };
 }

@@ -242,6 +242,9 @@ function scoreCompetencyForCategory(
     askedIntent: null,
     assistance: [],
     nonAnswer: false,
+    setAsideAt: null,
+    setAsideReason: null,
+    nonAnswers: [],
   };
   const evidenceScore = evidence.reduce((best, item) => Math.max(best, scoreEvidenceForQuestion(question, item)), 0);
   return evidenceScore + competency.relevance;
@@ -278,6 +281,9 @@ function fallbackQuestionPlan(
     askedIntent: null,
     assistance: [],
     nonAnswer: false,
+    setAsideAt: null,
+    setAsideReason: null,
+    nonAnswers: [],
   };
 }
 
@@ -372,6 +378,9 @@ export function buildInterviewPlan(
       askedIntent: null,
       assistance: [],
       nonAnswer: false,
+      setAsideAt: null,
+      setAsideReason: null,
+      nonAnswers: [],
     };
   });
 }
@@ -691,6 +700,9 @@ export function buildExperienceDiscoveryBlueprint(
       askedIntent: null,
       assistance: [],
       nonAnswer: false,
+      setAsideAt: null,
+      setAsideReason: null,
+      nonAnswers: [],
     };
   });
 

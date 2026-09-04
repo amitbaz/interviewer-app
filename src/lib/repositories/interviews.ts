@@ -14,10 +14,12 @@ import type {
   InterviewMode,
   InterviewSession,
   Message,
+  NonAnswerRecord,
   PlannedQuestion,
   PracticeSessionContext,
   RoundId,
   SessionCareerContext,
+  SetAsideReason,
 } from "@/lib/types";
 import { RepositoryError } from "@/lib/repositories/profile";
 
@@ -88,6 +90,9 @@ function mapQuestion(row: Row, competencyNames: Map<string, string>): PlannedQue
     askedIntent: (row.asked_intent as Intent | null) ?? null,
     assistance: Array.isArray(row.assistance) ? (row.assistance as AssistanceRecord[]) : [],
     nonAnswer: row.non_answer === true,
+    setAsideAt: typeof row.set_aside_at === "string" ? row.set_aside_at : null,
+    setAsideReason: (row.set_aside_reason as PlannedQuestion["setAsideReason"]) ?? null,
+    nonAnswers: Array.isArray(row.non_answers) ? (row.non_answers as NonAnswerRecord[]) : [],
     objective: typeof row.objective === "string" && row.objective.trim() ? row.objective.trim() : undefined,
     evidenceIds: stringArray(row.evidence_ids),
     expectedSignals: stringArray(row.expected_signals),
@@ -293,6 +298,7 @@ export function mapSession(
       id: "", sequence: 0, category: "communication", competencyId: null, competencyName: null,
       difficulty: "foundational", isFollowUp: false, prompt: "", answer: null, createdAt: "",
       askedIntent: null, assistance: [], nonAnswer: false,
+      setAsideAt: null, setAsideReason: null, nonAnswers: [],
     });
     });
   const checkpoints = [...checkpointRows]
@@ -689,6 +695,8 @@ export type ConversationTurnPersistence = {
   nonAnswer: boolean;
   /** True when this turn fell back to a deterministic evaluation or line. */
   degraded: boolean;
+  /** Set when this turn finishes the answered row without an answer; null otherwise. */
+  setAsideReason: SetAsideReason | null;
 };
 
 /** Atomically records answer evidence and persists the exact next interviewer question. */
@@ -718,6 +726,7 @@ export async function recordConversationTurn(
     p_assistance: next.assistance,
     p_non_answer: next.nonAnswer,
     p_degraded: next.degraded,
+    p_set_aside_reason: next.setAsideReason,
   });
   if (error || !data) throw new RepositoryError("Could not record your interview turn.", error?.code ?? "NO_OWNED_ROW");
   const result = Array.isArray(data) ? data[0] as Row | undefined : data as Row;

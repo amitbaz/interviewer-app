@@ -24,6 +24,23 @@ export type ProbeAspect =
 
 export type RescueStyle = "narrow" | "hook" | "reframe" | "park";
 
+/**
+ * Why a question stopped being the candidate's current one without ever being
+ * answered. `parked` is recoverable -- the interview may come back to it while
+ * turns remain (spec §9.3 rule 3); `rescue-budget-spent` is not.
+ */
+export type SetAsideReason = "parked" | "rescue-budget-spent";
+
+/**
+ * One exchange the assessor refused to score, kept verbatim. The prompt is
+ * copied in because the row's own `prompt` is overwritten by the next re-ask.
+ */
+export type NonAnswerRecord = {
+  prompt: string;
+  answer: string;
+  at: string;
+};
+
 export type AdvanceReason =
   | "satisfied"
   | "line-exhausted"
@@ -41,7 +58,13 @@ export type Intent =
   | { kind: "open"; targetId: string }
   | { kind: "probe"; targetId: string; aspect: ProbeAspect; basis: string }
   | { kind: "challenge"; targetId: string; claim: string }
-  | { kind: "rescue"; targetId: string; style: RescueStyle; hook: string | null }
+  /**
+   * `targetId` is the target the interviewer's line is ABOUT. For every style
+   * but `park` that is the target being rescued. A `park` moves the interview
+   * elsewhere, so its `targetId` is the destination and `parkedTargetId` names
+   * the target being set aside. Absent on intents persisted before this change.
+   */
+  | { kind: "rescue"; targetId: string; style: RescueStyle; hook: string | null; parkedTargetId?: string | null }
   | { kind: "advance"; targetId: string; reason: AdvanceReason }
   | { kind: "hypothetical"; targetId: string; basis: string }
   | { kind: "candidate-questions" }
@@ -156,6 +179,11 @@ export type PlannedQuestion = {
   assistance: AssistanceRecord[];
   /** True when the candidate did not attempt the question; never scored. */
   nonAnswer: boolean;
+  /** Set when this row was finished without an answer; null while it is still open. */
+  setAsideAt: string | null;
+  setAsideReason: SetAsideReason | null;
+  /** Every unscored exchange on this row, oldest first. */
+  nonAnswers: NonAnswerRecord[];
   objective?: string;
   evidenceIds?: string[];
   expectedSignals?: string[];
