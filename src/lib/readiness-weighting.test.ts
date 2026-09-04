@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { MINIMUM_RECENCY_FACTOR, RECENCY_HALF_LIFE_DAYS, evidenceStrength, recencyFactor } from "@/lib/readiness-weighting";
+import {
+  MINIMUM_RECENCY_FACTOR,
+  MINIMUM_RELEVANCE,
+  RECENCY_HALF_LIFE_DAYS,
+  evidenceStrength,
+  recencyFactor,
+  relevanceFactor,
+} from "@/lib/readiness-weighting";
 
 const conditions = (overrides: Partial<Parameters<typeof evidenceStrength>[0]> = {}) => ({
   mode: "real" as const,
@@ -70,5 +77,34 @@ describe("recencyFactor", () => {
 
   it("does not reward a timestamp in the future", () => {
     expect(recencyFactor(new Date(now.getTime() + 86_400_000).toISOString(), now)).toBe(1);
+  });
+});
+
+describe("relevanceFactor", () => {
+  it("passes an in-range relevance through untouched", () => {
+    expect(relevanceFactor(0.7)).toBe(0.7);
+    expect(relevanceFactor(1)).toBe(1);
+  });
+
+  it("never lets an unset relevance annihilate its evidence", () => {
+    // `competencies.relevance` is `not null default 0`, and the competency
+    // upsert coalesces a scope with no relevance to 0, so 0 means "nobody set
+    // this" far more often than "provably worthless". Zero weight would erase
+    // the evidence entirely.
+    expect(relevanceFactor(0)).toBe(MINIMUM_RELEVANCE);
+    expect(MINIMUM_RELEVANCE).toBeGreaterThan(0);
+  });
+
+  it("floors rather than promotes, so low relevance still counts least", () => {
+    expect(relevanceFactor(0)).toBeLessThan(relevanceFactor(1));
+  });
+
+  it("clamps a relevance outside the 0-1 range", () => {
+    expect(relevanceFactor(4)).toBe(1);
+    expect(relevanceFactor(-2)).toBe(MINIMUM_RELEVANCE);
+  });
+
+  it("treats a non-numeric relevance as the lowest possible", () => {
+    expect(relevanceFactor(Number.NaN)).toBe(MINIMUM_RELEVANCE);
   });
 });

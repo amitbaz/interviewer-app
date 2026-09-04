@@ -42,6 +42,37 @@ const ASSISTANCE_FACTORS = [1, 0.6, 0.35] as const;
 /** A degraded session ran on the deterministic fallback, so it proves less. */
 const DEGRADED_FACTOR = 0.5;
 
+/**
+ * The lowest role-relevance any evidence is weighted at.
+ *
+ * `competencies.relevance` is `not null default 0`, and the competency upsert
+ * coalesces a scope that omits relevance to 0 as well, so 0 overwhelmingly
+ * means "nobody ever set this" rather than "this skill is provably worthless
+ * for the target role". Without a floor such a competency multiplies its
+ * evidence by exactly zero, and the dimension then reports `evidenceCount > 0`
+ * with a null score and null confidence -- indistinguishable from never having
+ * practised it, which is a worse lie than a slightly under-weighted score.
+ *
+ * A floor rather than "treat 0 as unset (= 1)": relevance 0 is a legal,
+ * in-range value a caller can also mean literally, and promoting a deliberate
+ * "not relevant to this role" to maximally relevant would corrupt the score in
+ * the opposite direction. Flooring keeps the ordering intact -- unset/irrelevant
+ * still counts least -- while guaranteeing evidence is never annihilated: the
+ * same "fades but is never erased" rule `MINIMUM_RECENCY_FACTOR` applies to age,
+ * and it is set to the same order of magnitude for the same reason.
+ */
+export const MINIMUM_RELEVANCE = 0.1;
+
+/**
+ * Role relevance as the weighting actually uses it: clamped into 0-1 for
+ * genuinely out-of-range input, then floored so zero-relevance evidence still
+ * carries some weight. See `MINIMUM_RELEVANCE` for why the floor exists.
+ */
+export function relevanceFactor(relevance: number): number {
+  if (!Number.isFinite(relevance)) return MINIMUM_RELEVANCE;
+  return Math.max(MINIMUM_RELEVANCE, Math.min(1, relevance));
+}
+
 export type EvidenceConditions = {
   mode: InterviewMode;
   degraded: boolean;

@@ -93,6 +93,73 @@ describe("calculateReadiness", () => {
     expect(dimension(model, "frontend").score).toBeGreaterThan(85);
   });
 
+  it("still counts evidence from a competency whose relevance was never set", () => {
+    // `competencies.relevance` is `not null default 0` and the competency upsert
+    // coalesces a missing relevance to 0, so an unset competency would otherwise
+    // multiply its evidence by exactly zero: the dimension would report evidence
+    // it had, with a null score and null confidence -- identical to never having
+    // practised it. The floor keeps it counting, just for less.
+    const unset = calculateReadiness(
+      Array.from({ length: 3 }, () => evidence({ score: 8, relevance: 0 })),
+      NOW,
+    );
+    const onTarget = calculateReadiness(
+      Array.from({ length: 3 }, () => evidence({ score: 8, relevance: 1 })),
+      NOW,
+    );
+
+    expect(dimension(unset, "frontend").evidenceCount).toBe(3);
+    expect(dimension(unset, "frontend").score).toBe(80);
+    expect(dimension(unset, "frontend").confidence).not.toBeNull();
+    expect(dimension(unset, "frontend").totalWeight).toBeGreaterThan(0);
+    // Floored, not promoted: unset relevance must still count for less than a
+    // competency the role actually needs.
+    expect(dimension(unset, "frontend").totalWeight).toBeLessThan(
+      dimension(onTarget, "frontend").totalWeight,
+    );
+  });
+
+  it("clamps a relevance above the 0-1 range instead of letting it inflate a score", () => {
+    const inRange = calculateReadiness([evidence({ score: 8, relevance: 1 })], NOW);
+    const outOfRange = calculateReadiness([evidence({ score: 8, relevance: 7 })], NOW);
+    expect(dimension(outOfRange, "frontend").totalWeight).toBe(
+      dimension(inRange, "frontend").totalWeight,
+    );
+  });
+
+  it("computes the overall as the weight-weighted mean of the dimension scores", () => {
+    // Hand-computed rather than compared with an inequality, so a sign or
+    // denominator error cannot survive. Everything is recorded at `asOf`, so
+    // recency is exactly 1 and each weight is strength x relevance:
+    //   frontend  : 3 real answers at 8/10, weight 1 each -> score 80, weight 3
+    //   behavioral: 1 coach answer at 4/10, weight 0.4    -> score 40, weight 0.4
+    //   overall    = (80 x 3 + 40 x 0.4) / 3.4 = 256 / 3.4 = 75.29 -> 75
+    const model = calculateReadiness(
+      [
+        ...Array.from({ length: 3 }, () =>
+          evidence({ score: 8, recordedAt: daysAgo(0), mode: "real", relevance: 1 }),
+        ),
+        evidence({
+          score: 4,
+          recordedAt: daysAgo(0),
+          mode: "coach",
+          relevance: 1,
+          competencyName: "Ownership",
+          category: "behavioral",
+        }),
+      ],
+      NOW,
+    );
+
+    expect(dimension(model, "frontend").score).toBe(80);
+    expect(dimension(model, "frontend").totalWeight).toBe(3);
+    expect(dimension(model, "behavioral").score).toBe(40);
+    expect(dimension(model, "behavioral").totalWeight).toBe(0.4);
+    expect(model.overall).toBe(75);
+    // 3.4 total weight sits below the 3.5 high-confidence threshold.
+    expect(model.overallConfidence).toBe("medium");
+  });
+
   it("records the evidence that produced each dimension score, heaviest first", () => {
     const model = calculateReadiness(
       [evidence({ score: 5, recordedAt: daysAgo(200) }), evidence({ score: 9, recordedAt: daysAgo(1) })],
@@ -159,14 +226,61 @@ describe("calculateReadiness trend", () => {
     expect(dimension(model, "frontend").trend).not.toBe("worsening");
   });
 
-  it("derives an overall trend across every dimension", () => {
+  // The overall trend is derived from the dimension trends, so exercising it
+  // needs evidence in more than one dimension. `evidence()` defaults to a
+  // frontend competency; these put the second half in `behavioral`.
+  const behavioral = (score: number, recordedAt: string) =>
+    evidence({ score, recordedAt, competencyName: "Ownership", category: "behavioral" });
+  const olderBehavioral = (score: number) => behavioral(score, daysAgo(90));
+  const newerBehavioral = (score: number) => behavioral(score, daysAgo(5));
+
+  it("derives an overall trend from dimensions that agree", () => {
     const model = calculateReadiness(
       [
         ...Array.from({ length: 4 }, () => older(4)),
         ...Array.from({ length: 4 }, () => newer(9)),
+        ...Array.from({ length: 4 }, () => olderBehavioral(4)),
+        ...Array.from({ length: 4 }, () => newerBehavioral(9)),
       ],
       NOW,
     );
+    expect(dimension(model, "frontend").trend).toBe("improving");
+    expect(dimension(model, "behavioral").trend).toBe("improving");
     expect(model.overallTrend).toBe("improving");
+  });
+
+  it("reports stable when equally weighted dimensions move in opposite directions", () => {
+    const model = calculateReadiness(
+      [
+        ...Array.from({ length: 4 }, () => older(4)),
+        ...Array.from({ length: 4 }, () => newer(9)),
+        ...Array.from({ length: 4 }, () => olderBehavioral(9)),
+        ...Array.from({ length: 4 }, () => newerBehavioral(4)),
+      ],
+      NOW,
+    );
+    expect(dimension(model, "frontend").trend).toBe("improving");
+    expect(dimension(model, "behavioral").trend).toBe("worsening");
+    expect(model.overallTrend).toBe("stable");
+  });
+
+  it("does not read a change of topic as an overall improvement", () => {
+    // Composition shift: old behavioural practice, recent frontend practice, and
+    // nothing on both sides of the boundary in either dimension. Pooling all the
+    // evidence would compare 4/10 behavioural answers against 9/10 frontend ones
+    // and report `improving` -- telling a user who only switched topics that they
+    // got better. Deriving from the dimensions cannot: both are unresolved, so
+    // the overall is too.
+    const model = calculateReadiness(
+      [
+        ...Array.from({ length: 4 }, () => olderBehavioral(4)),
+        ...Array.from({ length: 4 }, () => newer(9)),
+      ],
+      NOW,
+    );
+    expect(dimension(model, "behavioral").trend).toBe("unresolved");
+    expect(dimension(model, "frontend").trend).toBe("unresolved");
+    expect(model.dimensions.every((entry) => entry.trend === "unresolved")).toBe(true);
+    expect(model.overallTrend).toBe("unresolved");
   });
 });

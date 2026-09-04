@@ -27,6 +27,7 @@ import type {
   EvidenceItem,
   HandsOnExercise,
   InterviewBlueprint,
+  InterviewSession,
   PlannedQuestion,
   ProfileDraft,
 } from "@/lib/types";
@@ -1853,6 +1854,14 @@ function mockSupabase(tables: Record<string, Row[]>) {
         rows = rows.filter((row) => allowed.has(row[field]));
         return builder;
       },
+      // Only the `is` form is modelled, because it is the only one production
+      // uses. `not(field, "is", true)` is Postgres `field IS NOT TRUE`, which
+      // -- unlike `neq` -- keeps rows where the column is NULL.
+      not: (field: string, operator: string, value: unknown) => {
+        if (operator !== "is") throw new Error(`unsupported not() operator: ${operator}`);
+        rows = rows.filter((row) => row[field] !== value);
+        return builder;
+      },
       order: (field: string, options?: { ascending?: boolean }) => {
         const direction = options?.ascending === false ? -1 : 1;
         rows = [...rows].sort((a, b) => {
@@ -1869,11 +1878,20 @@ function mockSupabase(tables: Record<string, Row[]>) {
   return { from };
 }
 
+/**
+ * The status a finished session is actually persisted with. Typed off
+ * `InterviewSession` rather than inlined so that these fixtures cannot drift
+ * from the literal the completion RPCs write and `hydrateSession` reads -- the
+ * drift that once made `listReadinessEvidence` return nothing for every real
+ * user while the suite stayed green.
+ */
+const COMPLETED_STATUS: InterviewSession["status"] = "complete";
+
 describe("listReadinessEvidence", () => {
   it("flattens graded answers with the session conditions needed to weight them", async () => {
     const supabase = mockSupabase({
       interview_sessions: [
-        { id: "session-1", user_id: "user-1", status: "completed", mode: "real", degraded: false },
+        { id: "session-1", user_id: "user-1", status: COMPLETED_STATUS, mode: "real", degraded: false },
       ],
       interview_questions: [
         {
@@ -1923,7 +1941,7 @@ describe("listReadinessEvidence", () => {
     // non_answer: true rows are never scored, so they must never become evidence.
     const supabase = mockSupabase({
       interview_sessions: [
-        { id: "session-1", user_id: "user-1", status: "completed", mode: "real", degraded: false },
+        { id: "session-1", user_id: "user-1", status: COMPLETED_STATUS, mode: "real", degraded: false },
       ],
       interview_questions: [
         {
@@ -1989,7 +2007,7 @@ describe("listReadinessEvidence", () => {
   it("defaults relevance to 1 when an answer has no competency", async () => {
     const supabase = mockSupabase({
       interview_sessions: [
-        { id: "session-1", user_id: "user-1", status: "completed", mode: "coach", degraded: true },
+        { id: "session-1", user_id: "user-1", status: COMPLETED_STATUS, mode: "coach", degraded: true },
       ],
       interview_questions: [
         {
@@ -2025,6 +2043,113 @@ describe("listReadinessEvidence", () => {
     ]);
   });
 
+  it("counts a session persisted the way the app actually persists one", async () => {
+    // Regression guard: the read once filtered on "completed", a status nothing
+    // in the app ever writes, so every real user's readiness was empty forever.
+    // `completeSession` and all three completion RPCs write "complete".
+    const supabase = mockSupabase({
+      interview_sessions: [
+        { id: "session-1", user_id: "user-1", status: "complete", mode: "real", degraded: false },
+      ],
+      interview_questions: [
+        {
+          id: "question-1", user_id: "user-1", session_id: "session-1", category: "technical",
+          competency_id: null, assistance: [], non_answer: false,
+        },
+      ],
+      question_evaluations: [
+        {
+          id: "eval-1", user_id: "user-1", question_id: "question-1", overall_score: 7,
+          created_at: "2026-09-01T10:05:00.000Z",
+        },
+      ],
+      competencies: [],
+    });
+
+    const evidence = await listReadinessEvidence(supabase as never, "user-1");
+
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0].sessionId).toBe("session-1");
+  });
+
+  it("keeps answers whose non_answer flag was never written", async () => {
+    // The filter is `is not true`, not `neq true`: a null flag means "nobody
+    // recorded a non-answer", so the row is a graded answer like any other.
+    const supabase = mockSupabase({
+      interview_sessions: [
+        { id: "session-1", user_id: "user-1", status: COMPLETED_STATUS, mode: "real", degraded: false },
+      ],
+      interview_questions: [
+        {
+          id: "question-1", user_id: "user-1", session_id: "session-1", category: "technical",
+          competency_id: null, assistance: [], non_answer: null,
+        },
+      ],
+      question_evaluations: [
+        {
+          id: "eval-1", user_id: "user-1", question_id: "question-1", overall_score: 6,
+          created_at: "2026-09-01T10:05:00.000Z",
+        },
+      ],
+      competencies: [],
+    });
+
+    const evidence = await listReadinessEvidence(supabase as never, "user-1");
+
+    expect(evidence.map((row) => row.questionEvaluationId)).toEqual(["eval-1"]);
+  });
+
+  it("drops rows that do not join back to a completed session", async () => {
+    // The questions and evaluations reads are no longer narrowed by an id list
+    // (unbounded `.in(...)` lists overflow the request URL), so the join loop is
+    // the only thing enforcing the narrowing. This proves it still does: an
+    // in-flight session's question, and an evaluation whose question was
+    // filtered out as a non-answer, must both produce nothing.
+    const supabase = mockSupabase({
+      interview_sessions: [
+        { id: "session-1", user_id: "user-1", status: COMPLETED_STATUS, mode: "real", degraded: false },
+        { id: "session-2", user_id: "user-1", status: "active", mode: "real", degraded: false },
+      ],
+      interview_questions: [
+        {
+          id: "question-1", user_id: "user-1", session_id: "session-1", category: "technical",
+          competency_id: null, assistance: [], non_answer: false,
+        },
+        {
+          id: "question-2", user_id: "user-1", session_id: "session-2", category: "technical",
+          competency_id: null, assistance: [], non_answer: false,
+        },
+        {
+          id: "question-3", user_id: "user-1", session_id: "session-1", category: "technical",
+          competency_id: null, assistance: [], non_answer: true,
+        },
+      ],
+      question_evaluations: [
+        {
+          id: "eval-1", user_id: "user-1", question_id: "question-1", overall_score: 7,
+          created_at: "2026-09-01T10:05:00.000Z",
+        },
+        {
+          id: "eval-2", user_id: "user-1", question_id: "question-2", overall_score: 9,
+          created_at: "2026-09-01T10:06:00.000Z",
+        },
+        {
+          id: "eval-3", user_id: "user-1", question_id: "question-3", overall_score: 9,
+          created_at: "2026-09-01T10:07:00.000Z",
+        },
+        {
+          id: "eval-4", user_id: "user-1", question_id: "question-missing", overall_score: 9,
+          created_at: "2026-09-01T10:08:00.000Z",
+        },
+      ],
+      competencies: [],
+    });
+
+    const evidence = await listReadinessEvidence(supabase as never, "user-1");
+
+    expect(evidence.map((row) => row.questionEvaluationId)).toEqual(["eval-1"]);
+  });
+
   it("returns an empty list when the user has no completed sessions", async () => {
     const supabase = mockSupabase({
       interview_sessions: [],
@@ -2046,7 +2171,7 @@ describe("listReadinessEvidence", () => {
     // proves the actual paging boundary rather than a stand-in for it.
     const rowCount = 1001;
     const sessions: Row[] = [
-      { id: "session-1", user_id: "user-1", status: "completed", mode: "real", degraded: false },
+      { id: "session-1", user_id: "user-1", status: COMPLETED_STATUS, mode: "real", degraded: false },
     ];
     const questions: Row[] = Array.from({ length: rowCount }, (_, index) => ({
       id: `question-${index}`, user_id: "user-1", session_id: "session-1", category: "technical",

@@ -16,7 +16,12 @@
  * the same result.
  */
 import { READINESS_DIMENSIONS, dimensionFor, type ReadinessDimension } from "@/lib/readiness-dimensions";
-import { RECENCY_HALF_LIFE_DAYS, evidenceStrength, recencyFactor } from "@/lib/readiness-weighting";
+import {
+  RECENCY_HALF_LIFE_DAYS,
+  evidenceStrength,
+  recencyFactor,
+  relevanceFactor,
+} from "@/lib/readiness-weighting";
 import type {
   ReadinessContribution,
   ReadinessDimensionResult,
@@ -41,7 +46,7 @@ function weigh(item: ReadinessEvidence, asOf: Date): number {
     assistanceCount: item.assistanceCount,
   });
   const recency = recencyFactor(item.recordedAt, asOf);
-  const relevance = Math.max(0, Math.min(1, item.relevance));
+  const relevance = relevanceFactor(item.relevance);
   return strength * recency * relevance;
 }
 
@@ -139,7 +144,12 @@ export function calculateReadiness(evidence: ReadinessEvidence[], asOf: Date = n
 
   const dimensions: ReadinessDimensionResult[] = READINESS_DIMENSIONS.map((dimension) => {
     const items = weighted.filter((item) => item.dimension === dimension);
-    const totalWeight = items.reduce((sum, item) => sum + item.weight, 0);
+    // Rounded ONCE, before both the reported field and the confidence call.
+    // Reporting the rounded weight while grading confidence on the raw one lets
+    // a sub-0.0001 total surface as `confidence: "low"` next to
+    // `totalWeight: 0` -- a combination `overallFor` then excludes, so the
+    // dimension would claim confidence the overall refuses to count.
+    const totalWeight = Number(items.reduce((sum, item) => sum + item.weight, 0).toFixed(4));
     const rubricMean = weightedMean(items);
     return {
       dimension,
@@ -147,13 +157,13 @@ export function calculateReadiness(evidence: ReadinessEvidence[], asOf: Date = n
       confidence: confidenceFor(totalWeight),
       trend: trendFor(items, asOf),
       evidenceCount: items.length,
-      totalWeight: Number(totalWeight.toFixed(4)),
+      totalWeight,
       contributions: contributionsFor(items),
     };
   });
 
   return {
-    ...overallFor(dimensions, weighted, asOf),
+    ...overallFor(dimensions),
     dimensions,
     unmappedEvidenceCount,
     computedAt: asOf.toISOString(),
@@ -171,8 +181,6 @@ export function calculateReadiness(evidence: ReadinessEvidence[], asOf: Date = n
  */
 function overallFor(
   dimensions: ReadinessDimensionResult[],
-  weighted: ReadonlyArray<WeightedEvidence>,
-  asOf: Date,
 ): Pick<ReadinessModel, "overall" | "overallConfidence" | "overallTrend"> {
   const scored = dimensions.filter(
     (entry): entry is ReadinessDimensionResult & { score: number } => entry.score !== null && entry.totalWeight > 0,
@@ -184,8 +192,70 @@ function overallFor(
   return {
     overall,
     overallConfidence: confidenceFor(totalWeight),
-    overallTrend: trendFor(weighted, asOf),
+    overallTrend: overallTrendFor(dimensions),
   };
+}
+
+/**
+ * Direction each trend contributes to the overall, on a -1..1 axis.
+ * `unresolved` has no direction, so it is excluded rather than scored as 0 --
+ * counting it as 0 would let a pile of dimensions Relay knows nothing about
+ * drag a genuine signal towards `stable`.
+ */
+const TREND_DIRECTIONS: Readonly<Record<Exclude<ReadinessTrend, "unresolved">, number>> = {
+  improving: 1,
+  stable: 0,
+  worsening: -1,
+};
+
+/**
+ * How far the weighted direction has to travel before the overall claims one.
+ *
+ * At 0.5, at least half the resolved weight must point one way with nothing
+ * pulling as hard the other way: an improving dimension beside an equally
+ * weighted stable one still reads `improving`, while an improving dimension
+ * beside an equally weighted worsening one cancels to `stable`, which is the
+ * honest answer when a user gained in one area and lost in another.
+ */
+const OVERALL_TREND_MAJORITY = 0.5;
+
+/**
+ * The overall trend is DERIVED from the dimension trends, exactly as `overall`
+ * is derived from the dimension scores -- never a second pass over raw
+ * evidence.
+ *
+ * The rule: take every dimension whose own trend resolved, weight its
+ * direction (+1 improving / 0 stable / -1 worsening) by that dimension's
+ * accumulated evidence weight -- the same weighting `overallFor` uses for the
+ * score, so the headline number and the headline arrow are built from the same
+ * shares -- and claim a direction only when the weighted mean clears
+ * `OVERALL_TREND_MAJORITY`. With no resolved dimension the answer is
+ * `unresolved`.
+ *
+ * Why not compare two time windows of all evidence at once, as `trendFor`
+ * does per dimension: a pooled comparison is movable by composition shift
+ * alone. Four behavioural answers at 4/10 ninety days ago plus four frontend
+ * answers at 9/10 five days ago leaves BOTH dimensions unresolved -- neither
+ * has enough weight on both sides of the boundary to say anything -- yet the
+ * pooled halves differ by five rubric points and would report `improving`,
+ * telling a user who merely switched topics that they got better. Deriving
+ * from the dimensions makes that impossible: every dimension unresolved means
+ * the overall is unresolved too, and a direction can only come from a
+ * dimension that actually improved or regressed against its own history.
+ */
+function overallTrendFor(dimensions: ReadonlyArray<ReadinessDimensionResult>): ReadinessTrend {
+  const resolved = dimensions.filter(
+    (entry): entry is ReadinessDimensionResult & { trend: Exclude<ReadinessTrend, "unresolved"> } =>
+      entry.trend !== "unresolved" && entry.totalWeight > 0,
+  );
+  const totalWeight = resolved.reduce((sum, entry) => sum + entry.totalWeight, 0);
+  if (totalWeight <= 0) return "unresolved";
+
+  const direction =
+    resolved.reduce((sum, entry) => sum + TREND_DIRECTIONS[entry.trend] * entry.totalWeight, 0) / totalWeight;
+  if (direction >= OVERALL_TREND_MAJORITY) return "improving";
+  if (direction <= -OVERALL_TREND_MAJORITY) return "worsening";
+  return "stable";
 }
 
 /**
@@ -205,6 +275,12 @@ function overallFor(
 export function weakestConfidentDimension(readiness: ReadinessModel): ReadinessDimensionResult | null {
   const confident = readiness.dimensions.filter((entry) => entry.confidence !== null);
   if (confident.length === 0) return null;
+  // The `as number` below is safe on an invariant `calculateReadiness`
+  // establishes and nothing else may break: confidence is non-null exactly when
+  // totalWeight > 0 (`confidenceFor` returns null at or below zero), and a
+  // positive total weight means `weightedMean` returned a number, so score is
+  // non-null. Filtering on `confidence !== null` therefore also filters on
+  // `score !== null`, which TypeScript cannot see through.
   return [...confident].sort(
     (left, right) => (left.score as number) - (right.score as number) || left.dimension.localeCompare(right.dimension),
   )[0];

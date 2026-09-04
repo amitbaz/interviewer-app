@@ -504,7 +504,7 @@ export async function listRecentSessions(supabase: SupabaseClient, userId: strin
   return Promise.all(((data ?? []) as Row[]).map((session) => hydrateSession(supabase, userId, session)));
 }
 
-/** The base owned-table query `selectAllPages` refines: `select("*")` scoped to the caller's rows. */
+/** The base owned-table query `selectAllPages` refines: an explicit column list scoped to the caller's rows. */
 type EvidenceQuery = ReturnType<ReturnType<SupabaseClient["from"]>["select"]>;
 
 const PAGE_SIZE = 1000;
@@ -520,17 +520,31 @@ const PAGE_SIZE = 1000;
  * separate requests backing each page, so a row can be skipped or duplicated
  * right at a page boundary -- the exact failure this unbounded read exists to
  * avoid.
+ *
+ * `columns` is required rather than defaulting to `*`: these reads are
+ * unbounded over a user's whole history, and the wide columns on these tables
+ * (`result_summary`/`exercise` jsonb, every question prompt and answer, every
+ * evaluation's dimensions/strengths/weaknesses) are megabytes the readiness
+ * model never looks at.
+ *
+ * The cast on `.select` is what a runtime-chosen column list costs: postgrest-js
+ * parses the select string in the type system, and handed a plain `string` it
+ * gives up with "type instantiation is excessively deep". Rows are read back
+ * through `stringValue`/`Number(...)` anyway, so nothing downstream relies on
+ * the inference this discards.
  */
 async function selectAllPages(
   supabase: SupabaseClient,
   table: string,
   userId: string,
+  columns: string,
   refine: (query: EvidenceQuery) => EvidenceQuery,
 ): Promise<Row[]> {
   const rows: Row[] = [];
   for (let page = 0; ; page += 1) {
+    const from = supabase.from(table) as unknown as { select: (columns: string) => EvidenceQuery };
     const { data, error } = await refine(
-      supabase.from(table).select("*").eq("user_id", userId).order("id", { ascending: true }),
+      from.select(columns).eq("user_id", userId).order("id", { ascending: true }),
     ).range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
     if (error) throw new RepositoryError("Could not load readiness evidence.", error.code);
     const batch = (data ?? []) as Row[];
@@ -549,36 +563,72 @@ async function selectAllPages(
  * Rows are paged in blocks so a long history does not hit PostgREST's limit.
  *
  * Skipped on purpose:
- * - sessions that are not `completed` -- partial grades are not yet evidence;
+ * - sessions that are not `complete` -- partial grades are not yet evidence.
+ *   `complete` (not `completed`) is the literal every completion RPC writes and
+ *   `hydrateSession` reads, and `InterviewSession["status"]` admits no other
+ *   finished value;
  * - questions flagged `non_answer` -- never scored, so never proof of anything.
+ *
+ * The questions and evaluations reads are NOT narrowed by an id list. Putting
+ * every session or question id into an `.in(...)` puts them all in a URL query
+ * string -- a thousand uuids is roughly 38KB, past what proxies and PostgREST
+ * accept -- and those filters were redundant anyway: every table is scoped to
+ * `user_id`, and the join loop below drops any row that does not resolve back
+ * to a kept question and a completed session, which is what actually enforces
+ * the narrowing.
  */
 export async function listReadinessEvidence(
   supabase: SupabaseClient,
   userId: string,
 ): Promise<ReadinessEvidence[]> {
-  const sessions = await selectAllPages(supabase, "interview_sessions", userId, (query) =>
-    query.eq("status", "completed"),
+  const sessions = await selectAllPages(
+    supabase,
+    "interview_sessions",
+    userId,
+    "id, status, mode, degraded",
+    (query) => query.eq("status", "complete"),
   );
   if (sessions.length === 0) return [];
 
   const sessionById = new Map(sessions.map((row) => [stringValue(row.id), row]));
-  const questions = (
-    await selectAllPages(supabase, "interview_questions", userId, (query) =>
-      query.in("session_id", [...sessionById.keys()]),
-    )
-  ).filter((row) => row.non_answer !== true);
+  // `.not("non_answer", "is", true)` rather than `.neq("non_answer", true)`:
+  // `neq` compiles to `<> true`, which is NULL -- and so excluded -- for rows
+  // where the flag was never written, whereas `is not true` keeps them,
+  // matching the `row.non_answer !== true` check this replaced.
+  const questions = await selectAllPages(
+    supabase,
+    "interview_questions",
+    userId,
+    "id, session_id, category, competency_id, assistance, non_answer",
+    (query) => query.not("non_answer", "is", true),
+  );
   if (questions.length === 0) return [];
 
   const questionById = new Map(questions.map((row) => [stringValue(row.id), row]));
-  const evaluations = await selectAllPages(supabase, "question_evaluations", userId, (query) =>
-    query.in("question_id", [...questionById.keys()]),
+  const evaluations = await selectAllPages(
+    supabase,
+    "question_evaluations",
+    userId,
+    "id, question_id, overall_score, created_at",
+    (query) => query,
   );
 
+  // Narrowed to questions that actually join back to a completed session, since
+  // the questions read above is no longer session-scoped.
   const competencyIds = [
-    ...new Set(questions.map((row) => stringValue(row.competency_id)).filter(Boolean)),
+    ...new Set(
+      questions
+        .filter((row) => sessionById.has(stringValue(row.session_id)))
+        .map((row) => stringValue(row.competency_id))
+        .filter(Boolean),
+    ),
   ];
+  // Bounded by the user's distinct competency count -- tens, not thousands --
+  // so this id list is safe in a query string where the two above were not.
   const competencies = competencyIds.length
-    ? await selectAllPages(supabase, "competencies", userId, (query) => query.in("id", competencyIds))
+    ? await selectAllPages(supabase, "competencies", userId, "id, name, relevance", (query) =>
+        query.in("id", competencyIds),
+      )
     : [];
   const competencyById = new Map(competencies.map((row) => [stringValue(row.id), row]));
 
