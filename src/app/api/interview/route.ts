@@ -30,13 +30,14 @@ export const runtime = "nodejs";
 export async function GET() {
   try {
     const { supabase, user } = await requireUser();
+    const now = new Date();
     const [sessions, evidence] = await Promise.all([
       listRecentSessions(supabase, user.id),
       listReadinessEvidence(supabase, user.id),
     ]);
     return NextResponse.json({
       sessions,
-      readiness: calculateReadiness(evidence),
+      readiness: calculateReadiness(evidence, now),
     });
   } catch (error) {
     return errorResponse(error);

@@ -75,8 +75,10 @@ function upcomingOpportunities(opportunities: Opportunity[], now: Date): Opportu
  * Resolves each non-dismissed observation's evidence and each story's
  * evidence count in parallel, after `loadPracticeInputs` resolves (each of
  * those needs its rows first). `now` is never read from the clock here -- it
- * is threaded straight through to `recommendPractice`, matching that
- * selector's own determinism contract.
+ * is threaded straight through to both `loadPracticeInputs` (as the
+ * readiness model's `asOf`) and `recommendPractice`, so the readiness that
+ * feeds a recommendation and the `now` beside it are always computed
+ * against the same clock reading.
  *
  * Throws {@link CareerDashboardError} with code `PROFILE_REQUIRED` when the
  * caller has no profile yet; every other empty Career Brain table (no
@@ -89,7 +91,7 @@ export async function loadCareerDashboard(
   now: Date,
   coachMode: "demo" | "live",
 ): Promise<CareerDashboard> {
-  const inputs = await loadPracticeInputs(supabase, userId);
+  const inputs = await loadPracticeInputs(supabase, userId, now);
   if (!inputs.profile) throw new CareerDashboardError("Create your profile first.", "PROFILE_REQUIRED");
 
   const [observationSummaries, storySummaries] = await Promise.all([

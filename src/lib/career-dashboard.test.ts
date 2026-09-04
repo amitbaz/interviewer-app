@@ -191,9 +191,9 @@ describe("loadCareerDashboard", () => {
     mocks.resolveObservationEvidence.mockResolvedValue([]);
   });
 
-  it("loads inputs through the shared practice-service loader for the given user", async () => {
+  it("loads inputs through the shared practice-service loader for the given user, threading now through", async () => {
     await loadCareerDashboard(supabase as never, "user-1", now, "demo");
-    expect(mocks.loadPracticeInputs).toHaveBeenCalledWith(supabase, "user-1");
+    expect(mocks.loadPracticeInputs).toHaveBeenCalledWith(supabase, "user-1", now);
   });
 
   it("produces a valid dashboard for a brand-new account with every Career Brain table empty", async () => {

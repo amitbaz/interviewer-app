@@ -141,13 +141,18 @@ function userSafeGenerationFailure(error: unknown): string {
 
 /**
  * Loads the profile, opportunities, coach observations, career stories,
- * recent sessions, and recent practice plans a request needs, plus the
- * progress snapshot derived from them, in one call. Every other Career Brain
- * read model that needs this same combination should call this rather than
- * re-issuing the six repository calls itself -- see the note on
- * {@link PracticeInputs}.
+ * recent sessions, recent practice plans, and readiness evidence a request
+ * needs, in one call, plus the readiness model computed from that evidence
+ * (a separate seventh read, not derived from the other six). Every other
+ * Career Brain read model that needs this same combination should call this
+ * rather than re-issuing the seven repository calls itself -- see the note
+ * on {@link PracticeInputs}.
+ *
+ * `now` is caller-supplied and threaded straight into `calculateReadiness`
+ * as `asOf` -- this function never reads the clock itself, matching that
+ * function's own determinism contract (see `src/lib/readiness.ts`).
  */
-export async function loadPracticeInputs(supabase: SupabaseClient, userId: string): Promise<PracticeInputs> {
+export async function loadPracticeInputs(supabase: SupabaseClient, userId: string, now: Date): Promise<PracticeInputs> {
   const [profile, opportunities, observations, stories, sessions, plans, evidence] = await Promise.all([
     getProfile(supabase, userId),
     listOpportunities(supabase, userId),
@@ -164,7 +169,7 @@ export async function loadPracticeInputs(supabase: SupabaseClient, userId: strin
     stories,
     sessions,
     plans,
-    readiness: calculateReadiness(evidence),
+    readiness: calculateReadiness(evidence, now),
   };
 }
 
@@ -196,7 +201,7 @@ export async function loadPracticeOverview(
   userId: string,
   now: Date,
 ): Promise<PracticeOverview> {
-  const inputs = await loadPracticeInputs(supabase, userId);
+  const inputs = await loadPracticeInputs(supabase, userId, now);
   return { recommendation: recommendFrom(inputs, now), plans: inputs.plans };
 }
 
@@ -219,7 +224,7 @@ export async function startRecommendedPractice(
   userId: string,
   now: Date,
 ): Promise<StartedPractice> {
-  const inputs = await loadPracticeInputs(supabase, userId);
+  const inputs = await loadPracticeInputs(supabase, userId, now);
   const profile = requireProfile(inputs.profile);
   const recommendation = recommendFrom(inputs, now);
   return startPractice(supabase, userId, profile, inputs, {
@@ -253,7 +258,13 @@ export async function startManualPractice(
   request: ManualPracticeRequest,
 ): Promise<StartedPractice> {
   const draft = validateManualRequest(request);
-  const inputs = await loadPracticeInputs(supabase, userId);
+  // No `now` is supplied by the caller here (manual practice never computes
+  // a recommendation, so the readiness model `loadPracticeInputs` loads
+  // alongside everything else is otherwise unused) -- read the clock once,
+  // right here at the top of the request, same as every `now`-needing
+  // service function in this file gets it from ITS caller reading the clock
+  // once (see `startRecommendedPractice`/`loadPracticeOverview` above).
+  const inputs = await loadPracticeInputs(supabase, userId, new Date());
   const profile = requireProfile(inputs.profile);
   if (draft.primaryOpportunityId && !inputs.opportunities.some((item) => item.id === draft.primaryOpportunityId)) {
     throw new PracticeServiceError("That opportunity was not found.", "OPPORTUNITY_NOT_FOUND");

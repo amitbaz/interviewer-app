@@ -187,3 +187,25 @@ function overallFor(
     overallTrend: trendFor(weighted, asOf),
   };
 }
+
+/**
+ * The weakest dimension worth calling a weakness, or null when none
+ * qualifies. Only dimensions with `confidence !== null` are eligible -- a
+ * dimension with zero evidence behind it is an unknown, not a weakness, and
+ * treating it as one would recommend drilling an area Relay has never
+ * actually observed (the unrealistic swing issue #14 exists to prevent).
+ * Ties are broken by dimension name for determinism.
+ *
+ * Shared by every consumer that needs "which dimension is the coaching
+ * priority right now" -- `practice-recommendation.ts`'s baseline selector
+ * and `progress-view-model.ts`'s Progress-view read model both call this
+ * rather than keeping their own copy of the rule, so they can never disagree
+ * about which dimension is weakest.
+ */
+export function weakestConfidentDimension(readiness: ReadinessModel): ReadinessDimensionResult | null {
+  const confident = readiness.dimensions.filter((entry) => entry.confidence !== null);
+  if (confident.length === 0) return null;
+  return [...confident].sort(
+    (left, right) => (left.score as number) - (right.score as number) || left.dimension.localeCompare(right.dimension),
+  )[0];
+}

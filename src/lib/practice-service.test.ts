@@ -533,14 +533,15 @@ describe("loadPracticeInputs", () => {
    * so a wrong or missing evidence argument leaves that dimension's
    * `evidenceCount`/`score` at their empty defaults.
    */
-  it("threads the loaded evidence through the real calculateReadiness call", async () => {
+  it("threads the loaded evidence, and the caller's now, through the real calculateReadiness call", async () => {
+    const now = new Date("2026-08-31T10:00:00.000Z");
     mocks.getProfile.mockResolvedValue(profile);
     mocks.listRecentSessions.mockResolvedValue([]);
     mocks.listReadinessEvidence.mockResolvedValue([
       {
         questionEvaluationId: "eval-1",
         sessionId: "session-1",
-        recordedAt: "2026-08-31T10:00:00.000Z",
+        recordedAt: now.toISOString(),
         score: 8,
         competencyId: "comp-1",
         competencyName: "React architecture",
@@ -552,12 +553,16 @@ describe("loadPracticeInputs", () => {
       },
     ]);
 
-    const inputs = await loadPracticeInputs(supabase as never, "user-1");
+    const inputs = await loadPracticeInputs(supabase as never, "user-1", now);
 
+    // Evidence recorded exactly at `now` decays to nothing, so this is exact
+    // -- not just non-zero -- and would drift if `now` stopped reaching
+    // `calculateReadiness` as `asOf` (e.g. it silently fell back to the
+    // wall clock instead).
     const frontend = inputs.readiness.dimensions.find((dimension) => dimension.dimension === "frontend");
-    expect(frontend?.evidenceCount).toBe(1);
-    expect(frontend?.score).toBeGreaterThan(0);
-    expect(inputs.readiness.overall).toBeGreaterThan(0);
+    expect(frontend).toMatchObject({ evidenceCount: 1, score: 80, confidence: "low" });
+    expect(inputs.readiness.overall).toBe(80);
+    expect(inputs.readiness.computedAt).toBe(now.toISOString());
     expect(mocks.listReadinessEvidence).toHaveBeenCalledWith(supabase, "user-1");
   });
 
@@ -566,7 +571,7 @@ describe("loadPracticeInputs", () => {
     mocks.listRecentSessions.mockResolvedValue([]);
     mocks.listReadinessEvidence.mockResolvedValue([]);
 
-    const inputs = await loadPracticeInputs(supabase as never, "user-1");
+    const inputs = await loadPracticeInputs(supabase as never, "user-1", new Date("2026-08-31T10:00:00.000Z"));
 
     expect(inputs.readiness.overall).toBeNull();
     expect(inputs.readiness.dimensions.every((dimension) => dimension.score === null)).toBe(true);

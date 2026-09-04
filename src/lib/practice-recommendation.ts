@@ -1,4 +1,5 @@
 import { dimensionFor, type ReadinessDimension } from "@/lib/readiness-dimensions";
+import { weakestConfidentDimension } from "@/lib/readiness";
 import type {
   CoachObservation,
   CoachObservationType,
@@ -10,7 +11,6 @@ import type {
   PracticeRecommendationInput,
   PracticeRecommendationSignal,
   ReadinessDimensionResult,
-  ReadinessModel,
 } from "@/lib/types";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -354,27 +354,13 @@ function humanizeDimension(dimension: ReadinessDimension): string {
 }
 
 /**
- * The weakest readiness dimension worth calling a weakness, or null when none
- * qualifies. Only dimensions with `confidence !== null` are eligible: a
- * dimension with zero evidence behind it is an unknown, not a weakness, and
- * treating it as one would recommend drilling an area Relay has never
- * actually observed -- the unrealistic swing issue #14 exists to prevent.
- */
-function weakestConfidentDimension(readiness: ReadinessModel): ReadinessDimensionResult | null {
-  const confident = readiness.dimensions.filter((entry) => entry.confidence !== null);
-  if (confident.length === 0) return null;
-  return [...confident].sort(
-    (left, right) => (left.score as number) - (right.score as number) || left.dimension.localeCompare(right.dimension),
-  )[0];
-}
-
-/**
- * Maps a readiness dimension back to the specific competency to practise,
- * using the same `dimensionFor` rules `calculateReadiness` uses to assign
- * evidence to dimensions in the first place -- run in reverse over the
- * profile's competency names. Among competencies that map to `dimension`,
- * picks the lowest-scoring one (excluding those with no score at all, which
- * have nothing to compare).
+ * Maps a readiness dimension back to the specific competency to practise.
+ * This is NOT a full reverse of `dimensionFor`: a competency row carries no
+ * `category`, only a name, so this only ever exercises `dimensionFor`'s
+ * name-regex rules -- falling back to the humanized dimension label (see
+ * `buildReadinessWeaknessRecommendation`) when no competency name matches.
+ * Among competencies that do map to `dimension`, picks the lowest-scoring
+ * one (excluding those with no score at all, which have nothing to compare).
  */
 function competencyFor(dimension: ReadinessDimension, competencies: Competency[]): Competency | null {
   const candidates = competencies.filter(

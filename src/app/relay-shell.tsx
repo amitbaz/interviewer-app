@@ -149,7 +149,7 @@ function progressTrendDescription(trend: ReadinessModel["overallTrend"]): string
     case "worsening":
       return "Recent sessions dipped below your earlier trend, so revisit the recurring weak spots next.";
     case "unresolved":
-      return "There isn't enough evidence yet to call a trend -- keep practicing to build a reliable signal.";
+      return "There isn't enough evidence yet to call a trend — keep practicing to build a reliable signal.";
   }
 }
 
