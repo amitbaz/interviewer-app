@@ -21,7 +21,6 @@ const user = { id: "user-1" };
 const dashboard = {
   profile: { userId: "user-1" },
   coachMode: "demo",
-  progress: { readiness: null, latestScore: null, trend: null, recentScores: [], strongest: null, weakest: null, recurringWeaknesses: [] },
   recentSessions: [],
   opportunities: [],
   upcomingOpportunities: [],
