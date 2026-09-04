@@ -16,8 +16,12 @@ alter table public.interview_questions
 add constraint interview_questions_set_aside_reason_check
 check (set_aside_reason is null or set_aside_reason in ('parked', 'rescue-budget-spent'));
 
--- The signature gains a parameter, so the old overload must go rather than be
--- replaced in place: leaving both would make every call ambiguous.
+-- Dropped deliberately, not replaced in place: keeping the old overload
+-- around would leave a second entry point to maintain and eventually remove,
+-- and nothing in this app calls it. The consequence is that exactly one
+-- signature exists at any instant, so this migration and the code that calls
+-- it with the new `p_set_aside_reason` argument must deploy together (see
+-- README.md's Supabase setup section for the ordering).
 drop function if exists public.record_conversation_turn(uuid, text, numeric, jsonb, jsonb, jsonb, jsonb, jsonb, text, numeric, jsonb, jsonb, jsonb, jsonb, uuid, text, jsonb, jsonb, jsonb, boolean, boolean);
 
 create or replace function public.record_conversation_turn(

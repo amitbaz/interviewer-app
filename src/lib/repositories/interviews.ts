@@ -218,6 +218,17 @@ function transcriptFor(questions: PlannedQuestion[], answerTimes: Map<string, st
       content: question.prompt ?? "",
       createdAt: question.createdAt,
     };
+    // A set-aside row's current prompt is already on screen: it was copied
+    // into the last `nonAnswers` entry above as that attempt's question, so
+    // emitting the row's own bubble here would show the candidate the exact
+    // same question twice in a row, right after they blanked on it (issue
+    // #10). Guarded on `attempts.length > 0` rather than dropping the row
+    // outright: today a set-aside row always has at least one attempt
+    // (`route.ts` only sends a set-aside reason when `nonAnswer` is true, and
+    // the SQL appends to `non_answers` on exactly that condition), but if
+    // that ever stopped holding, the bare form would silently erase the row
+    // from the transcript instead of just losing this de-dup.
+    if (question.setAsideAt !== null && attempts.length > 0) return attempts;
     if (!question.answer) return [...attempts, interviewer];
     return [...attempts, interviewer, {
       id: `${question.id}:answer`,

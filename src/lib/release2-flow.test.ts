@@ -340,8 +340,14 @@ async function answerNextQuestion(session: InterviewSession, answer: string): Pr
     evidence: profile.evidence ?? [],
     opportunity: null,
   });
-  // The route's own resolution and its own non-answer rule, not a local copy:
-  // a copy is exactly what let this helper drift out of step with `route.ts`.
+  // `write` reuses the route's real `resolveNextQuestionWrite`, not a local
+  // copy -- a copy is exactly what let this helper drift out of step with
+  // `route.ts`. `setAsideReason` below is hardcoded to null rather than
+  // derived, and `question` above is picked with a plain `find`, not
+  // `currentQuestion`/`isAwaitingAnswer`. Both are safe here only because
+  // this harness drives pre-written scripted sessions, whose rows are never
+  // set aside (see the pre-written/coverage-plan distinction noted below,
+  // near `isPreWrittenQuestion`'s other use in this file).
   const write = resolveNextQuestionWrite(session, question, turn);
   return recordConversationTurn(supabase as never, "user-1", question.id, answer, turn.evaluation ?? emptyEvaluationFor(question), {
     nextQuestionId: write.nextQuestionId,

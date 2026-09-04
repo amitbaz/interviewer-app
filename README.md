@@ -44,7 +44,7 @@ Create the key in Google AI Studio. Gemini's free tier is rate-limited and Googl
 
 The hosted POC uses Supabase Postgres, Auth, and private Storage. For a local or Vercel deployment:
 
-1. Create a free Supabase project. Install and authenticate the Supabase CLI, link the repository to the project, and run `supabase db push`. If the CLI is unavailable, paste and run every file in `supabase/migrations/` in filename order in the Supabase SQL Editor. Existing projects must also run `202608290002_complete_adaptive_interview_loop.sql`, `202608290003_richer_feedback.sql`, and, for this release, `202608310001_planned_practice_sessions.sql` after pulling this update.
+1. Create a free Supabase project. Install and authenticate the Supabase CLI, link the repository to the project, and run `supabase db push`. If the CLI is unavailable, paste and run every file in `supabase/migrations/` in filename order in the Supabase SQL Editor. Existing projects must also run `202608290002_complete_adaptive_interview_loop.sql`, `202608290003_richer_feedback.sql`, `202608310001_planned_practice_sessions.sql`, and, for this release, `202609040001_park_moves_off_target.sql` after pulling this update. `202609040001_park_moves_off_target.sql` replaces `record_conversation_turn` with a wider signature and drops the old one, so run the migration first and deploy the code immediately after. During the gap, calls made with the old parameter set find no matching function and every answer turn fails with a clean error ("Could not record your interview turn."); nothing is silently written wrong, and nothing is persisted either way.
 2. Copy the Supabase project URL and publishable key from Project Settings → API into `.env.local`:
 
    ```bash
