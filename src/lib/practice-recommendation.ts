@@ -1,13 +1,16 @@
+import { dimensionFor, type ReadinessDimension } from "@/lib/readiness-dimensions";
+import { weakestConfidentDimension } from "@/lib/readiness";
 import type {
   CoachObservation,
   CoachObservationType,
+  Competency,
   Opportunity,
   OpportunityStatus,
   PracticeFormat,
   PracticeRecommendation,
   PracticeRecommendationInput,
   PracticeRecommendationSignal,
-  ProgressSnapshot,
+  ReadinessDimensionResult,
 } from "@/lib/types";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -345,19 +348,45 @@ function buildStoryGapRecommendation(
   });
 }
 
-function buildProgressWeaknessRecommendation(progress: ProgressSnapshot): PracticeRecommendation {
-  const focusText = progress.weakest?.name ?? progress.recurringWeaknesses[0] ?? "your current weakest area";
+/** Turns a machine dimension id like `"system-design"` into readable text like `"system design"`. */
+function humanizeDimension(dimension: ReadinessDimension): string {
+  return dimension.replace(/-/g, " ");
+}
+
+/**
+ * Maps a readiness dimension back to the specific competency to practise.
+ * This is NOT a full reverse of `dimensionFor`: a competency row carries no
+ * `category`, only a name, so this only ever exercises `dimensionFor`'s
+ * name-regex rules -- falling back to the humanized dimension label (see
+ * `buildReadinessWeaknessRecommendation`) when no competency name matches.
+ * Among competencies that do map to `dimension`, picks the lowest-scoring
+ * one (excluding those with no score at all, which have nothing to compare).
+ */
+function competencyFor(dimension: ReadinessDimension, competencies: Competency[]): Competency | null {
+  const candidates = competencies.filter(
+    (item) => item.averageScore !== null && dimensionFor({ competencyName: item.name, category: null }) === dimension,
+  );
+  if (candidates.length === 0) return null;
+  return [...candidates].sort(
+    (left, right) => (left.averageScore as number) - (right.averageScore as number) || left.id.localeCompare(right.id),
+  )[0];
+}
+
+function buildReadinessWeaknessRecommendation(
+  dimension: ReadinessDimensionResult,
+  competencies: Competency[],
+): PracticeRecommendation {
+  const competency = competencyFor(dimension.dimension, competencies);
+  const focusText = competency?.name ?? humanizeDimension(dimension.dimension);
   const signal: PracticeRecommendationSignal = {
     kind: "progress_weakness",
-    label: "progress signal",
-    detail: progress.weakest
-      ? `${progress.weakest.name} is currently weakest`
-      : `recurring theme: ${progress.recurringWeaknesses[0]}`,
+    label: "readiness signal",
+    detail: `${focusText} is currently your weakest confident readiness dimension`,
   };
   return withCommonFields("targeted_drill", {
     primaryFocus: `Strengthen: ${focusText}`,
     secondaryFocus: null,
-    rationale: `Your coaching progress points to ${focusText} as the area most worth drilling next.`,
+    rationale: `Your readiness model points to ${focusText} as the area most worth drilling next.`,
     estimatedMinutes: 12,
     primaryOpportunityId: null,
     supportingOpportunityIds: [],
@@ -432,7 +461,8 @@ function buildFallbackRecommendation(): PracticeRecommendation {
  * 2. any interviewing opportunity without a near-term date;
  * 3. a confirmed/corrected coach observation with importance >= 0.6;
  * 4. an applied/interviewing opportunity with zero confirmed career stories;
- * 5. a weakest competency or recurring weakness on the progress snapshot;
+ * 5. the weakest readiness dimension with confidence (evidence) behind it,
+ *    mapped back to the competency to practise;
  * 6. an applied opportunity;
  * 7. zero completed practice sessions;
  * 8. fallback to a full simulation.
@@ -443,7 +473,7 @@ function buildFallbackRecommendation(): PracticeRecommendation {
  * consulted -- Release 2's precedence rules do not reference prior plans.
  */
 export function recommendPractice(input: PracticeRecommendationInput): PracticeRecommendation {
-  const { opportunities, observations, stories, progress, recentSessions, now } = input;
+  const { opportunities, observations, stories, readiness, competencies, recentSessions, now } = input;
   const activeOpportunities = opportunities.filter((opportunity) => !isTerminal(opportunity.status));
 
   const nearTermInterview = pickNearTermInterview(activeOpportunities, now);
@@ -467,8 +497,9 @@ export function recommendPractice(input: PracticeRecommendationInput): PracticeR
     return buildStoryGapRecommendation(activeApplication, activeOpportunities);
   }
 
-  if (progress.weakest || progress.recurringWeaknesses.length > 0) {
-    return buildProgressWeaknessRecommendation(progress);
+  const weakestDimension = weakestConfidentDimension(readiness);
+  if (weakestDimension) {
+    return buildReadinessWeaknessRecommendation(weakestDimension, competencies);
   }
 
   const appliedOpportunity = pickAppliedOpportunity(activeOpportunities);

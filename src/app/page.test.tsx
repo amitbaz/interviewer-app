@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AssistanceRecord, CareerDashboard, CareerStorySummary, CoachObservationSummary, Competency, InterviewSession, Opportunity, PlannedQuestion, PracticePlan, PracticeRecommendation, Profile, ProgressSnapshot } from "@/lib/types";
+import type { AssistanceRecord, CareerDashboard, CareerStorySummary, CoachObservationSummary, Competency, InterviewSession, Opportunity, PlannedQuestion, PracticePlan, PracticeRecommendation, Profile, ReadinessDimensionResult, ReadinessModel } from "@/lib/types";
 import App from "@/app/page";
 import { ResultsFeedbackCards } from "@/app/results-feedback-cards";
 
@@ -257,13 +257,13 @@ function fallbackRecommendation(): PracticeRecommendation {
 function dashboardPayload(
   profilePayload: Profile,
   sessionsPayload: InterviewSession[],
-  progressPayload: ProgressSnapshot,
+  readinessPayload: ReadinessModel,
   overrides: Partial<CareerDashboard> = {},
 ): CareerDashboard {
   return {
     profile: profilePayload,
     coachMode: "demo",
-    progress: progressPayload,
+    readiness: readinessPayload,
     recentSessions: sessionsPayload,
     opportunities: [],
     upcomingOpportunities: [],
@@ -277,7 +277,7 @@ function dashboardPayload(
 
 function mockCoachData(options: {
   profile?: Profile;
-  progress: ProgressSnapshot;
+  readiness: ReadinessModel;
   sessions?: InterviewSession[];
   dashboardOverrides?: Partial<CareerDashboard>;
 }) {
@@ -298,7 +298,7 @@ function mockCoachData(options: {
       return {
         ok: true,
         status: 200,
-        json: async () => dashboardPayload(profilePayload, sessionsPayload, options.progress, options.dashboardOverrides),
+        json: async () => dashboardPayload(profilePayload, sessionsPayload, options.readiness, options.dashboardOverrides),
       } satisfies Partial<Response>;
     }
 
@@ -323,7 +323,7 @@ function mockCoachData(options: {
 
 async function renderProgressView(options: {
   profile?: Profile;
-  progress: ProgressSnapshot;
+  readiness: ReadinessModel;
   sessions?: InterviewSession[];
 }) {
   mockCoachData(options);
@@ -338,7 +338,7 @@ async function renderProgressView(options: {
 
 async function renderHomeView(options: {
   profile?: Profile;
-  progress: ProgressSnapshot;
+  readiness: ReadinessModel;
   sessions?: InterviewSession[];
 }) {
   mockCoachData(options);
@@ -349,7 +349,7 @@ async function renderHomeView(options: {
 
 async function renderPracticeView(options: {
   profile?: Profile;
-  progress: ProgressSnapshot;
+  readiness: ReadinessModel;
   sessions?: InterviewSession[];
 }) {
   mockCoachData(options);
@@ -400,15 +400,29 @@ function requestBody(init: RequestInit | undefined): Record<string, unknown> {
   return JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
 }
 
-function emptyProgress(): ProgressSnapshot {
+function emptyReadiness(overrides: Partial<ReadinessModel> = {}): ReadinessModel {
   return {
-    readiness: null,
-    latestScore: null,
-    trend: null,
-    recentScores: [],
-    strongest: null,
-    weakest: null,
-    recurringWeaknesses: [],
+    overall: null,
+    overallConfidence: null,
+    overallTrend: "unresolved",
+    dimensions: [],
+    unmappedEvidenceCount: 0,
+    computedAt: "2026-08-29T10:00:00.000Z",
+    ...overrides,
+  };
+}
+
+/** One readiness dimension result, defaulting to a confident, mid-scoring `system-design` entry. */
+function readinessDimension(overrides: Partial<ReadinessDimensionResult> = {}): ReadinessDimensionResult {
+  return {
+    dimension: "system-design",
+    score: 60,
+    confidence: "medium",
+    trend: "stable",
+    evidenceCount: 2,
+    totalWeight: 2,
+    contributions: [],
+    ...overrides,
   };
 }
 
@@ -600,7 +614,7 @@ function mockRoutesWithHangingRespond(routes: Record<string, RouteHandler>) {
 async function renderShell(options: { pendingTurn?: boolean; activeSession?: InterviewSession } = {}) {
   const defaultRoutes = {
     "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-    "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+    "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
   };
 
   if (options.pendingTurn) {
@@ -635,7 +649,7 @@ async function renderShell(options: { pendingTurn?: boolean; activeSession?: Int
   const completed = session({ id: "session-active", overallScore: 7.5, resultSummary: { summary: "Strong migration reasoning." } });
   await startInterviewFrom("conversation", activeConversationSession(), {
     ...defaultRoutes,
-    "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [completed], emptyProgress()) }),
+    "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [completed], emptyReadiness()) }),
     "/api/interview": () => ({ body: { session: completed, profile: profile() } }),
   });
   fireEvent.change(screen.getByPlaceholderText("Answer as if you were in the room…"), { target: { value: "Phase by route." } });
@@ -674,15 +688,7 @@ afterEach(() => {
 describe("App progress view", () => {
   it("shows a no-evidence state before the first completed interview", async () => {
     await renderProgressView({
-      progress: {
-        readiness: null,
-        latestScore: null,
-        trend: null,
-        recentScores: [],
-        strongest: null,
-        weakest: null,
-        recurringWeaknesses: [],
-      },
+      readiness: emptyReadiness(),
       profile: profile({
         competencies: [
           competency({ averageScore: null, recentScore: null, confidence: null, strengths: [], weaknesses: [] }),
@@ -692,28 +698,16 @@ describe("App progress view", () => {
 
     expect(screen.getByRole("heading", { name: "Not enough data yet" })).toBeInTheDocument();
     expect(screen.getByText("Finish your first mixed interview to establish a baseline before Relay shows readiness or competency scores.")).toBeInTheDocument();
-    expect(screen.queryByText("Baseline established")).not.toBeInTheDocument();
+    expect(screen.queryByText("Interview readiness")).not.toBeInTheDocument();
   });
 
   it("shows practice-first readiness guidance on the progress view when the profile is sparse", async () => {
     await renderProgressView({
-      progress: {
-        readiness: 75,
-        latestScore: 8.2,
-        trend: "baseline",
-        recentScores: [8.2],
-        strongest: competency({}),
-        weakest: competency({
-          id: "system-design",
-          name: "System design",
-          averageScore: 6,
-          recentScore: 6,
-          confidence: "low",
-          strengths: ["Recognizes system boundaries."],
-          weaknesses: ["Open with requirements before the solution."],
-        }),
-        recurringWeaknesses: ["Open with requirements before the solution."],
-      },
+      readiness: emptyReadiness({
+        overall: 75,
+        overallConfidence: "low",
+        dimensions: [readinessDimension({ dimension: "system-design", score: 60, confidence: "low" })],
+      }),
       profile: profile({
         readiness: {
           ready: false,
@@ -732,98 +726,53 @@ describe("App progress view", () => {
     expect(screen.queryByText(/Profile evidence gate/i)).not.toBeInTheDocument();
   });
 
-  it("shows a one-session baseline state with coaching guidance", async () => {
-    const baselineCompetency = competency({
-      id: "system-design",
-      name: "System design",
-      averageScore: 6,
-      recentScore: 6,
-      confidence: "low",
-      strengths: ["Recognizes system boundaries."],
-      weaknesses: ["Open with requirements before the solution."],
-    });
-
+  it("shows a readiness state with coaching guidance when confidence is still low", async () => {
     await renderProgressView({
-      progress: {
-        readiness: 75,
-        latestScore: 8.2,
-        trend: "baseline",
-        recentScores: [8.2],
-        strongest: competency({}),
-        weakest: baselineCompetency,
-        recurringWeaknesses: ["Open with requirements before the solution."],
-      },
-      profile: profile({ competencies: [competency({}), baselineCompetency] }),
+      readiness: emptyReadiness({
+        overall: 75,
+        overallConfidence: "low",
+        overallTrend: "unresolved",
+        dimensions: [readinessDimension({ dimension: "system-design", score: 60, confidence: "low" })],
+      }),
+      profile: profile({ competencies: [competency({})] }),
       sessions: [session({ overallScore: 8.2 })],
     });
 
-    expect(screen.getAllByText("Baseline established")).toHaveLength(2);
+    expect(screen.getAllByText("Not enough evidence yet")).toHaveLength(2);
     expect(screen.getByText("A coaching signal based on your completed practice, not a hiring prediction.")).toBeInTheDocument();
     expect(screen.getByText("75")).toBeInTheDocument();
-    expect(screen.getByText("8.2/10")).toBeInTheDocument();
-    expect(screen.getAllByText("Open with requirements before the solution.")).toHaveLength(2);
+    expect(screen.getByText("Low")).toBeInTheDocument();
+    expect(screen.getByText("System design")).toBeInTheDocument();
   });
 
-  it("shows multi-session readiness insights, trend, and recurring weaknesses", async () => {
-    const strongest = competency({
-      id: "communication",
-      name: "Communication",
-      averageScore: 8.8,
-      recentScore: 9,
-      strengths: ["Summarizes recommendations crisply."],
-      weaknesses: [],
-    });
-    const weakest = competency({
-      id: "performance",
-      name: "Performance",
-      averageScore: 6.2,
-      recentScore: 6,
-      confidence: "medium",
-      strengths: ["Recognizes virtualization quickly."],
-      weaknesses: ["Quantify bottlenecks before proposing fixes."],
-    });
-
+  it("shows multi-dimension readiness insights and an improving trend from the server-computed model", async () => {
     await renderProgressView({
-      progress: {
-        readiness: 81,
-        latestScore: 8.4,
-        trend: "improving",
-        recentScores: [8.4, 7.3, 6.7],
-        strongest,
-        weakest,
-        recurringWeaknesses: [
-          "Quantify bottlenecks before proposing fixes.",
-          "State the baseline metric before the optimization.",
+      readiness: emptyReadiness({
+        overall: 81,
+        overallConfidence: "high",
+        overallTrend: "improving",
+        dimensions: [
+          readinessDimension({ dimension: "communication", score: 88, confidence: "high" }),
+          readinessDimension({ dimension: "system-design", score: 62, confidence: "medium" }),
         ],
-      },
-      profile: profile({ competencies: [strongest, weakest] }),
+      }),
+      profile: profile({ competencies: [] }),
       sessions: [session({ id: "latest", overallScore: 8.4 }), session({ id: "previous", overallScore: 7.3 })],
     });
 
     await waitFor(() => expect(screen.getByText("81")).toBeInTheDocument());
 
     expect(screen.getByText("A coaching signal based on your completed practice, not a hiring prediction.")).toBeInTheDocument();
-    expect(screen.getByText("8.4/10")).toBeInTheDocument();
     expect(screen.getAllByText("Improving")).toHaveLength(2);
-    expect(screen.getAllByText("Communication")).toHaveLength(2);
-    expect(screen.getAllByText("Performance")).toHaveLength(2);
-    expect(screen.getAllByText("Quantify bottlenecks before proposing fixes.")).toHaveLength(2);
-    expect(screen.getByText("State the baseline metric before the optimization.")).toBeInTheDocument();
+    expect(screen.getByText("High")).toBeInTheDocument();
+    expect(screen.getByText("System design")).toBeInTheDocument();
   });
 });
 
 describe("App profile view", () => {
   it("shows evidence-grounded readiness state on the profile screen", async () => {
     mockCoachData({
-      progress: {
-        readiness: 75,
-        latestScore: 8.2,
-        trend: "baseline",
-        recentScores: [8.2],
-        strongest: competency({}),
-        weakest: competency({}),
-        recurringWeaknesses: [],
-      },
+      readiness: emptyReadiness({ overall: 75, overallConfidence: "low", overallTrend: "unresolved" }),
       profile: profile({
         readiness: {
           ready: true,
@@ -841,15 +790,7 @@ describe("App profile view", () => {
 
   it("shows source-backed evidence and no-fabrication copy on the profile screen", async () => {
     mockCoachData({
-      progress: {
-        readiness: 75,
-        latestScore: 8.2,
-        trend: "baseline",
-        recentScores: [8.2],
-        strongest: competency({}),
-        weakest: competency({}),
-        recurringWeaknesses: [],
-      },
+      readiness: emptyReadiness({ overall: 75, overallConfidence: "low", overallTrend: "unresolved" }),
       profile: profile(),
     });
     render(<App />);
@@ -867,15 +808,7 @@ describe("App profile view", () => {
 describe("App home view", () => {
   it("does not block the recommended-practice CTA when the profile readiness is not ready", async () => {
     await renderHomeView({
-      progress: {
-        readiness: null,
-        latestScore: null,
-        trend: null,
-        recentScores: [],
-        strongest: null,
-        weakest: null,
-        recurringWeaknesses: [],
-      },
+      readiness: emptyReadiness(),
       profile: profile({
         readiness: {
           ready: false,
@@ -889,7 +822,7 @@ describe("App home view", () => {
   });
 
   it("navigates to Applications when its open-affordance button is clicked", async () => {
-    await renderHomeView({ progress: emptyProgress() });
+    await renderHomeView({ readiness: emptyReadiness() });
 
     fireEvent.click(screen.getByRole("button", { name: "Open applications" }));
 
@@ -900,7 +833,7 @@ describe("App home view", () => {
   // which render StoriesView/CoachView (Task 10). This proves both the navigation AND that a
   // real view -- not a dead target -- replaces Home's content.
   it("navigates to Stories with real content when Open story bank is clicked", async () => {
-    await renderHomeView({ progress: emptyProgress() });
+    await renderHomeView({ readiness: emptyReadiness() });
 
     fireEvent.click(screen.getByRole("button", { name: "Open story bank" }));
 
@@ -908,7 +841,7 @@ describe("App home view", () => {
   });
 
   it("navigates to Coach with real content when Open coach is clicked", async () => {
-    await renderHomeView({ progress: emptyProgress() });
+    await renderHomeView({ readiness: emptyReadiness() });
 
     fireEvent.click(screen.getByRole("button", { name: "Open coach" }));
 
@@ -935,7 +868,7 @@ describe("App applications view", () => {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
       "/api/career/dashboard": () => {
         dashboardCalls += 1;
-        return { body: dashboardPayload(profile(), [], emptyProgress(), { opportunities: dashboardCalls > 1 ? [created] : [] }) };
+        return { body: dashboardPayload(profile(), [], emptyReadiness(), { opportunities: dashboardCalls > 1 ? [created] : [] }) };
       },
       "/api/opportunities": (init) => {
         const body = requestBody(init);
@@ -999,7 +932,7 @@ describe("App stories view", () => {
     let storiesCalls = 0;
     mockRoutes({
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
       "/api/stories": (init) => {
         if (init?.method !== "POST") {
           storiesCalls += 1;
@@ -1060,7 +993,7 @@ describe("App coach view", () => {
     let observationsCalls = 0;
     mockRoutes({
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
       "/api/observations": (init) => {
         if (init?.method !== "POST") {
           observationsCalls += 1;
@@ -1092,15 +1025,7 @@ describe("App coach view", () => {
 describe("App practice view", () => {
   it("does not gate the recommended-practice action on profile readiness", async () => {
     await renderPracticeView({
-      progress: {
-        readiness: null,
-        latestScore: null,
-        trend: null,
-        recentScores: [],
-        strongest: null,
-        weakest: null,
-        recurringWeaknesses: [],
-      },
+      readiness: emptyReadiness(),
       profile: profile({
         readiness: {
           ready: false,
@@ -1124,7 +1049,7 @@ describe("App practice view", () => {
     const started = activeConversationSession();
     mockRoutes({
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
       "/api/practice": (init) => {
         const body = requestBody(init);
         if (body.action !== "start_manual") throw new Error(`Unexpected /api/practice action in this test: ${body.action}`);
@@ -1164,7 +1089,7 @@ describe("App practice view", () => {
     });
     mockRoutes({
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
       "/api/practice": () => ({ body: { plan: startedPracticePlan("targeted_drill"), session: planned } }),
     });
 
@@ -1194,7 +1119,7 @@ describe("App practice view", () => {
     });
     mockRoutes({
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
       "/api/practice": () => ({ body: { plan: startedPracticePlan("targeted_drill"), session: generic } }),
     });
 
@@ -1540,7 +1465,7 @@ describe("App authentication shell", () => {
   it("signs out back to the sign-in screen", async () => {
     mockRoutes({
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
     });
 
     render(<App />);
@@ -1571,7 +1496,7 @@ describe("App onboarding and profile review", () => {
       "/api/profile": (init) => init?.method
         ? { body: { profile: created, demoMode: false } }
         : { body: { profile: null, demoMode: false } },
-      "/api/career/dashboard": () => ({ body: dashboardPayload(created, [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(created, [], emptyReadiness()) }),
     });
 
     render(<App />);
@@ -1618,7 +1543,7 @@ describe("App onboarding and profile review", () => {
       "/api/profile": (init) => init?.method
         ? { body: { profile: created, demoMode: false } }
         : { body: { profile: null, demoMode: false } },
-      "/api/career/dashboard": () => ({ body: dashboardPayload(created, [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(created, [], emptyReadiness()) }),
     });
 
     render(<App />);
@@ -1650,7 +1575,7 @@ describe("App conversation interview", () => {
     const started = activeConversationSession();
     const fetchMock = await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
     });
 
     const startCall = fetchMock.mock.calls.find(([url, init]) => url === "/api/practice" && (init as RequestInit | undefined)?.method === "POST");
@@ -1706,7 +1631,7 @@ describe("App conversation interview", () => {
     });
     await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
     });
 
     expect(screen.getByText("Broader practice")).toBeInTheDocument();
@@ -1759,7 +1684,7 @@ describe("App conversation interview", () => {
     });
     await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
     });
 
     expect(screen.queryByText(/0 source evidence item/)).not.toBeInTheDocument();
@@ -1812,7 +1737,7 @@ describe("App conversation interview", () => {
     });
     await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
     });
 
     expect(screen.queryByText("Question objective")).not.toBeInTheDocument();
@@ -1833,7 +1758,7 @@ describe("App conversation interview", () => {
     });
     const fetchMock = await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
       "/api/interview": () => ({ body: { session: answered } }),
     });
 
@@ -1857,7 +1782,7 @@ describe("App conversation interview", () => {
     const completed = session({ id: "session-active", overallScore: 7.5, resultSummary: { summary: "Strong migration reasoning." } });
     await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [completed], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [completed], emptyReadiness()) }),
       "/api/interview": () => ({ body: { session: completed, profile: profile() } }),
     });
 
@@ -1873,7 +1798,7 @@ describe("App conversation interview", () => {
     const started = activeConversationSession();
     await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
       "/api/interview": () => ({ ok: false, status: 500, body: { error: "The coach is unavailable." } }),
     });
 
@@ -1910,7 +1835,7 @@ describe("App interview mode choice and pending turn state", () => {
     const nextSession = activeConversationSession();
     const fetchMock = await startInterviewFrom("conversation", activeConversationSession(), {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [withOpportunity], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [withOpportunity], emptyReadiness()) }),
       "/api/interview": (init) => {
         const body = requestBody(init);
         if (body.action === "respond") return { body: { session: withOpportunity, profile: profile() } };
@@ -1942,7 +1867,7 @@ describe("App hands-on interview", () => {
     const started = activeHandsOnSession();
     const fetchMock = await startInterviewFrom("hands-on", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
     });
 
     const startCall = fetchMock.mock.calls.find(([url, init]) => url === "/api/practice" && (init as RequestInit | undefined)?.method === "POST");
@@ -1968,7 +1893,7 @@ describe("App hands-on interview", () => {
     });
     const fetchMock = await startInterviewFrom("hands-on", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
       "/api/interview": () => ({ body: { session: withCheckpoint } }),
     });
 
@@ -2050,7 +1975,7 @@ describe("App answer transcription", () => {
     const started = activeConversationSession();
     await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
       "/api/transcribe": () => ({ body: { transcript: "I would phase the migration by route." } }),
     });
 
@@ -2068,7 +1993,7 @@ describe("App answer transcription", () => {
     const started = activeConversationSession();
     await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
       "/api/transcribe": () => ({ ok: false, status: 500, body: { error: "Could not transcribe recording." } }),
     });
 
@@ -2086,7 +2011,7 @@ describe("App answer transcription", () => {
     const started = activeConversationSession();
     await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
       "/api/transcribe": transcribe,
     });
 
@@ -2106,7 +2031,7 @@ describe("App answer transcription", () => {
     const started = activeConversationSession();
     await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
       "/api/transcribe": () => ({ body: { transcript: "I would phase the migration by route." } }),
     });
 
@@ -2121,7 +2046,7 @@ describe("App answer transcription", () => {
     const started = activeConversationSession();
     await startInterviewFrom("conversation", started, {
       "/api/profile": () => ({ body: { profile: profile(), demoMode: false } }),
-      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyProgress()) }),
+      "/api/career/dashboard": () => ({ body: dashboardPayload(profile(), [], emptyReadiness()) }),
     });
 
     fireEvent.click(screen.getByRole("button", { name: "● Record answer" }));

@@ -6,13 +6,14 @@ import { currentQuestion, isAwaitingAnswer } from "@/lib/interview-current-quest
 import { IMPLEMENTED_ROUNDS } from "@/lib/interview-rounds";
 import { isPreWrittenQuestion, resolveNextQuestionWrite } from "@/lib/interview-turn-write";
 import { completeLinkedPracticePlanBestEffort } from "@/lib/practice-service";
-import { calculateProgress } from "@/lib/progress";
+import { calculateReadiness } from "@/lib/readiness";
 import {
   completeHandsOnSession,
   completeSession,
   createHandsOnSession,
   createSessionWithBlueprint,
   getSession,
+  listReadinessEvidence,
   listRecentSessions,
   recordConversationTurn,
   revealFirstQuestion,
@@ -25,16 +26,18 @@ import type { Evaluation, InterviewMode, InterviewSession, PlannedQuestion, Prof
 
 export const runtime = "nodejs";
 
-/** Lists only interview sessions owned by the authenticated caller. */
+/** Lists only interview sessions owned by the authenticated caller, plus their evidence-backed readiness model. */
 export async function GET() {
   try {
     const { supabase, user } = await requireUser();
-    const profile = await getProfile(supabase, user.id);
-    const sessions = await listRecentSessions(supabase, user.id);
-    const completedSessions = sessions.filter((session) => session.status === "complete");
+    const now = new Date();
+    const [sessions, evidence] = await Promise.all([
+      listRecentSessions(supabase, user.id),
+      listReadinessEvidence(supabase, user.id),
+    ]);
     return NextResponse.json({
       sessions,
-      progress: calculateProgress(profile?.competencies ?? [], completedSessions),
+      readiness: calculateReadiness(evidence, now),
     });
   } catch (error) {
     return errorResponse(error);

@@ -17,6 +17,8 @@ import type {
   NonAnswerRecord,
   PlannedQuestion,
   PracticeSessionContext,
+  QuestionCategory,
+  ReadinessEvidence,
   RoundId,
   SessionCareerContext,
   SetAsideReason,
@@ -500,6 +502,159 @@ export async function listRecentSessions(supabase: SupabaseClient, userId: strin
     .limit(20);
   if (error) throw new RepositoryError("Could not load recent interviews.", error.code);
   return Promise.all(((data ?? []) as Row[]).map((session) => hydrateSession(supabase, userId, session)));
+}
+
+/** The base owned-table query `selectAllPages` refines: an explicit column list scoped to the caller's rows. */
+type EvidenceQuery = ReturnType<ReturnType<SupabaseClient["from"]>["select"]>;
+
+const PAGE_SIZE = 1000;
+
+/**
+ * Reads an entire owned table in blocks. PostgREST caps a single response, and
+ * readiness must see all history, so silently truncating here would quietly
+ * corrupt every downstream score.
+ *
+ * The `.order("id", ...)` is load-bearing, not cosmetic: `.range()` pages by
+ * asking Postgres for rows N..M of "the" result set, but without a stable
+ * unique sort key there is no guarantee that ordering is identical across the
+ * separate requests backing each page, so a row can be skipped or duplicated
+ * right at a page boundary -- the exact failure this unbounded read exists to
+ * avoid.
+ *
+ * `columns` is required rather than defaulting to `*`: these reads are
+ * unbounded over a user's whole history, and the wide columns on these tables
+ * (`result_summary`/`exercise` jsonb, every question prompt and answer, every
+ * evaluation's dimensions/strengths/weaknesses) are megabytes the readiness
+ * model never looks at.
+ *
+ * The cast on `.select` is what a runtime-chosen column list costs: postgrest-js
+ * parses the select string in the type system, and handed a plain `string` it
+ * gives up with "type instantiation is excessively deep". Rows are read back
+ * through `stringValue`/`Number(...)` anyway, so nothing downstream relies on
+ * the inference this discards.
+ */
+async function selectAllPages(
+  supabase: SupabaseClient,
+  table: string,
+  userId: string,
+  columns: string,
+  refine: (query: EvidenceQuery) => EvidenceQuery,
+): Promise<Row[]> {
+  const rows: Row[] = [];
+  for (let page = 0; ; page += 1) {
+    const from = supabase.from(table) as unknown as { select: (columns: string) => EvidenceQuery };
+    const { data, error } = await refine(
+      from.select(columns).eq("user_id", userId).order("id", { ascending: true }),
+    ).range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
+    if (error) throw new RepositoryError("Could not load readiness evidence.", error.code);
+    const batch = (data ?? []) as Row[];
+    rows.push(...batch);
+    if (batch.length < PAGE_SIZE) return rows;
+  }
+}
+
+/**
+ * Every graded answer the user has ever produced, flattened with the session
+ * conditions the readiness model needs to weight it.
+ *
+ * Deliberately unbounded, unlike `listRecentSessions`, which caps at 20: a
+ * readiness model that forgets the user's history cannot apply recency
+ * weighting, because it has nothing old to weigh the recent evidence against.
+ * Rows are paged in blocks so a long history does not hit PostgREST's limit.
+ *
+ * Skipped on purpose:
+ * - sessions that are not `complete` -- partial grades are not yet evidence.
+ *   `complete` (not `completed`) is the literal every completion RPC writes and
+ *   `hydrateSession` reads, and `InterviewSession["status"]` admits no other
+ *   finished value;
+ * - questions flagged `non_answer` -- never scored, so never proof of anything.
+ *
+ * The questions and evaluations reads are NOT narrowed by an id list. Putting
+ * every session or question id into an `.in(...)` puts them all in a URL query
+ * string -- a thousand uuids is roughly 38KB, past what proxies and PostgREST
+ * accept -- and those filters were redundant anyway: every table is scoped to
+ * `user_id`, and the join loop below drops any row that does not resolve back
+ * to a kept question and a completed session, which is what actually enforces
+ * the narrowing.
+ */
+export async function listReadinessEvidence(
+  supabase: SupabaseClient,
+  userId: string,
+): Promise<ReadinessEvidence[]> {
+  const sessions = await selectAllPages(
+    supabase,
+    "interview_sessions",
+    userId,
+    "id, status, mode, degraded",
+    (query) => query.eq("status", "complete"),
+  );
+  if (sessions.length === 0) return [];
+
+  const sessionById = new Map(sessions.map((row) => [stringValue(row.id), row]));
+  // `.not("non_answer", "is", true)` rather than `.neq("non_answer", true)`:
+  // `neq` compiles to `<> true`, which is NULL -- and so excluded -- for rows
+  // where the flag was never written, whereas `is not true` keeps them,
+  // matching the `row.non_answer !== true` check this replaced.
+  const questions = await selectAllPages(
+    supabase,
+    "interview_questions",
+    userId,
+    "id, session_id, category, competency_id, assistance, non_answer",
+    (query) => query.not("non_answer", "is", true),
+  );
+  if (questions.length === 0) return [];
+
+  const questionById = new Map(questions.map((row) => [stringValue(row.id), row]));
+  const evaluations = await selectAllPages(
+    supabase,
+    "question_evaluations",
+    userId,
+    "id, question_id, overall_score, created_at",
+    (query) => query,
+  );
+
+  // Narrowed to questions that actually join back to a completed session, since
+  // the questions read above is no longer session-scoped.
+  const competencyIds = [
+    ...new Set(
+      questions
+        .filter((row) => sessionById.has(stringValue(row.session_id)))
+        .map((row) => stringValue(row.competency_id))
+        .filter(Boolean),
+    ),
+  ];
+  // Bounded by the user's distinct competency count -- tens, not thousands --
+  // so this id list is safe in a query string where the two above were not.
+  const competencies = competencyIds.length
+    ? await selectAllPages(supabase, "competencies", userId, "id, name, relevance", (query) =>
+        query.in("id", competencyIds),
+      )
+    : [];
+  const competencyById = new Map(competencies.map((row) => [stringValue(row.id), row]));
+
+  const evidence: ReadinessEvidence[] = [];
+  for (const evaluation of evaluations) {
+    const question = questionById.get(stringValue(evaluation.question_id));
+    if (!question) continue;
+    const session = sessionById.get(stringValue(question.session_id));
+    if (!session) continue;
+    const competency = competencyById.get(stringValue(question.competency_id));
+    const assistance = Array.isArray(question.assistance) ? question.assistance : [];
+    evidence.push({
+      questionEvaluationId: stringValue(evaluation.id),
+      sessionId: stringValue(session.id),
+      recordedAt: stringValue(evaluation.created_at),
+      score: Number(evaluation.overall_score ?? 0),
+      competencyId: competency ? stringValue(competency.id) : null,
+      competencyName: competency ? stringValue(competency.name) : null,
+      category: (question.category as QuestionCategory | undefined) ?? null,
+      relevance: competency ? Number(competency.relevance ?? 1) : 1,
+      mode: session.mode === "coach" ? "coach" : "real",
+      degraded: session.degraded === true,
+      assistanceCount: assistance.length,
+    });
+  }
+  return evidence;
 }
 
 export async function createSessionWithPlan(

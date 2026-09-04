@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { recommendPractice } from "@/lib/practice-recommendation";
+import { calculateReadiness } from "@/lib/readiness";
 import type {
   CareerStory,
   CoachObservation,
@@ -8,7 +9,8 @@ import type {
   Opportunity,
   OpportunityStatus,
   PracticeRecommendationInput,
-  ProgressSnapshot,
+  ReadinessEvidence,
+  ReadinessModel,
 } from "@/lib/types";
 
 const now = new Date("2026-08-31T08:00:00.000Z");
@@ -93,15 +95,43 @@ const competency = (overrides: Partial<Competency> = {}): Competency => ({
   ...overrides,
 });
 
-const progress: ProgressSnapshot = {
-  readiness: 60,
-  latestScore: 7,
-  trend: "stable",
-  recentScores: [7],
-  strongest: null,
-  weakest: null,
-  recurringWeaknesses: [],
-};
+/** One graded answer, weighted at close to 1 (real mode, no assistance, recorded right at `now`). */
+const evidence = (overrides: Partial<ReadinessEvidence> = {}): ReadinessEvidence => ({
+  questionEvaluationId: "eval-1",
+  sessionId: "session-1",
+  recordedAt: "2026-08-31T08:00:00.000Z",
+  score: 8,
+  competencyId: "competency-1",
+  competencyName: "Backend systems",
+  category: "technical",
+  relevance: 1,
+  mode: "real",
+  degraded: false,
+  assistanceCount: 0,
+  ...overrides,
+});
+
+/** An empty, all-`unresolved` readiness model: no dimension has any confidence, so branch 5 never fires. */
+const emptyReadiness: ReadinessModel = calculateReadiness([], now);
+
+/**
+ * Four strong `backend` evidence rows (real mode, no assistance, scored 9)
+ * plus two weak `system-design` rows (scored 2) -- enough weight for both
+ * dimensions to carry non-null confidence, with `system-design` clearly the
+ * weaker of the two.
+ */
+const backendAndSystemDesignReadiness: ReadinessModel = calculateReadiness([
+  ...Array.from({ length: 4 }, (_, index) => evidence({
+    questionEvaluationId: `backend-${index}`,
+    competencyName: "Backend systems",
+    score: 9,
+  })),
+  ...Array.from({ length: 2 }, (_, index) => evidence({
+    questionEvaluationId: `system-design-${index}`,
+    competencyName: "System design fundamentals",
+    score: 2,
+  })),
+], now);
 
 const completedSession: InterviewSession = {
   id: "session-1",
@@ -126,14 +156,16 @@ const completedSession: InterviewSession = {
   opportunityId: null,
 };
 
-// A neutral baseline: one completed session (so branch 7 does not fire) and
-// no other signals, so the default falls through to the branch-8 fallback
-// unless a test overrides fields to exercise an earlier branch.
+// A neutral baseline: one completed session (so branch 7 does not fire), no
+// readiness evidence at all (so branch 5 does not fire), and no other
+// signals, so the default falls through to the branch-8 fallback unless a
+// test overrides fields to exercise an earlier branch.
 const baseInput: PracticeRecommendationInput = {
   opportunities: [],
   observations: [],
   stories: [],
-  progress,
+  readiness: emptyReadiness,
+  competencies: [],
   recentSessions: [completedSession],
   recentPlans: [],
   now,
@@ -149,7 +181,7 @@ describe("recommendPractice", () => {
         status: "interviewing",
         nextInterviewAt: "2026-09-03T10:00:00Z",
       }],
-      progress: { ...progress, recurringWeaknesses: ["Architecture framing"] },
+      readiness: backendAndSystemDesignReadiness,
     });
     expect(result).toMatchObject({ format: "role_prep", primaryOpportunityId: opportunity.id });
     expect(result.signals[0]).toMatchObject({ kind: "upcoming_interview", detail: "Example Co · in 3 days" });
@@ -292,25 +324,56 @@ describe("recommendPractice", () => {
     expect(result.signals[0]).toMatchObject({ kind: "story_bank_gap", detail: "no confirmed stories yet" });
   });
 
-  it("recommends a targeted drill for the weakest competency when no stronger signal exists", () => {
+  it("recommends practice for the weakest readiness dimension, mapped to the matching competency, when no higher tier applies", () => {
     const result = recommendPractice({
       ...baseInput,
-      progress: { ...progress, weakest: competency({ name: "System design" }) },
+      readiness: backendAndSystemDesignReadiness,
+      competencies: [
+        competency({ id: "backend-1", name: "Backend systems", averageScore: 9 }),
+        competency({ id: "system-design-1", name: "System design fundamentals", averageScore: 2 }),
+      ],
     });
     expect(result.format).toBe("targeted_drill");
-    expect(result.primaryFocus).toContain("System design");
+    expect(result.primaryFocus).toContain("System design fundamentals");
   });
 
-  it("recommends a targeted drill for a recurring weakness when there is no weakest competency", () => {
+  it("falls back to the humanized dimension name when no competency maps to the weakest dimension", () => {
     const result = recommendPractice({
       ...baseInput,
-      progress: { ...progress, recurringWeaknesses: ["Quantify trade-offs"] },
+      readiness: backendAndSystemDesignReadiness,
+      competencies: [],
     });
     expect(result.format).toBe("targeted_drill");
-    expect(result.primaryFocus).toContain("Quantify trade-offs");
+    expect(result.primaryFocus).toContain("system design");
   });
 
-  it("recommends role prep for an applied opportunity once stories and progress are covered", () => {
+  /**
+   * `backendOnlyReadiness` has evidence ONLY for `backend` (strong, score
+   * 90) -- every other dimension, including ones that would otherwise look
+   * "weak" at a null/zero score, has `confidence: null` because Relay has
+   * never actually observed them. A dimension with no evidence is an
+   * unknown, not a weakness (issue #14): the selector must still pick the
+   * one CONFIDENT dimension it has, not fall through past it in search of a
+   * lower number that was never really measured.
+   */
+  it("ignores dimensions with no evidence (unresolved confidence) when picking the weakest", () => {
+    const backendOnlyReadiness = calculateReadiness(
+      Array.from({ length: 4 }, (_, index) => evidence({ questionEvaluationId: `backend-${index}`, score: 9 })),
+      now,
+    );
+    expect(backendOnlyReadiness.dimensions.filter((dimension) => dimension.confidence !== null)).toHaveLength(1);
+
+    const result = recommendPractice({
+      ...baseInput,
+      readiness: backendOnlyReadiness,
+      competencies: [competency({ id: "backend-1", name: "Backend systems", averageScore: 9 })],
+    });
+
+    expect(result.format).toBe("targeted_drill");
+    expect(result.primaryFocus).toContain("Backend systems");
+  });
+
+  it("recommends role prep for an applied opportunity once stories and readiness are covered", () => {
     const result = recommendPractice({
       ...baseInput,
       opportunities: [{ ...opportunity, status: "applied" }],

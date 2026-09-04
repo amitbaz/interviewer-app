@@ -51,7 +51,7 @@ const sectionButtonClass = "mt-5 text-sm font-semibold text-[var(--pine)]";
  * show rather than inventing filler.
  */
 export function HomeView({ dashboard, busy, onStartRecommended, onOpenApplications, onOpenStories, onOpenCoach, onOpenProgress }: HomeViewProps) {
-  const { profile, recommendation, opportunities, observations, stories, progress } = dashboard;
+  const { profile, recommendation, opportunities, observations, stories, readiness } = dashboard;
   // A sparse profile never disables Start -- it only changes what the first
   // session looks like (broader discovery questions instead of grounded
   // ones). `readinessSparse` gates the guidance copy below, not the CTA.
@@ -152,11 +152,11 @@ export function HomeView({ dashboard, busy, onStartRecommended, onOpenApplicatio
 
       <section aria-label="Progress" className={cardClass}>
         <h2 className="text-xl font-semibold">Progress</h2>
-        {progress.readiness === null ? (
+        {readiness.overall === null ? (
           <p className="mt-3 leading-6 text-[var(--ink-muted)]">Complete your first practice session to see progress.</p>
         ) : (
           <p className="mt-3 text-3xl font-semibold">
-            {progress.readiness}<span className="ml-1 text-base font-normal text-[var(--ink-muted)]">/ 100</span>
+            {readiness.overall}<span className="ml-1 text-base font-normal text-[var(--ink-muted)]">/ 100</span>
           </p>
         )}
         <button onClick={onOpenProgress} className={sectionButtonClass}>Open progress <span aria-hidden="true">→</span></button>

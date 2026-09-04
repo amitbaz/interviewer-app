@@ -66,7 +66,7 @@ function upcomingOpportunities(opportunities: Opportunity[], now: Date): Opportu
  * Builds the single canonical Career Brain dashboard read model for
  * `userId`. Composes `loadPracticeInputs` (the same profile/opportunities/
  * observations/stories/sessions/plans loader `src/lib/practice-service.ts`
- * uses for the Practice view, so both views load and compute progress
+ * uses for the Practice view, so both views load and compute readiness
  * identically) with `recommendPractice` -- AGGREGATION ONLY, never
  * persistence: this issues no writes, so it is safe to call on every
  * `GET /api/career/dashboard` request without creating or reconciling any
@@ -75,8 +75,10 @@ function upcomingOpportunities(opportunities: Opportunity[], now: Date): Opportu
  * Resolves each non-dismissed observation's evidence and each story's
  * evidence count in parallel, after `loadPracticeInputs` resolves (each of
  * those needs its rows first). `now` is never read from the clock here -- it
- * is threaded straight through to `recommendPractice`, matching that
- * selector's own determinism contract.
+ * is threaded straight through to both `loadPracticeInputs` (as the
+ * readiness model's `asOf`) and `recommendPractice`, so the readiness that
+ * feeds a recommendation and the `now` beside it are always computed
+ * against the same clock reading.
  *
  * Throws {@link CareerDashboardError} with code `PROFILE_REQUIRED` when the
  * caller has no profile yet; every other empty Career Brain table (no
@@ -89,7 +91,7 @@ export async function loadCareerDashboard(
   now: Date,
   coachMode: "demo" | "live",
 ): Promise<CareerDashboard> {
-  const inputs = await loadPracticeInputs(supabase, userId);
+  const inputs = await loadPracticeInputs(supabase, userId, now);
   if (!inputs.profile) throw new CareerDashboardError("Create your profile first.", "PROFILE_REQUIRED");
 
   const [observationSummaries, storySummaries] = await Promise.all([
@@ -105,7 +107,8 @@ export async function loadCareerDashboard(
     opportunities: inputs.opportunities,
     observations: inputs.observations,
     stories: inputs.stories,
-    progress: inputs.progress,
+    readiness: inputs.readiness,
+    competencies: inputs.profile.competencies,
     recentSessions: inputs.sessions,
     recentPlans: inputs.plans,
     now,
@@ -114,7 +117,7 @@ export async function loadCareerDashboard(
   return {
     profile: inputs.profile,
     coachMode,
-    progress: inputs.progress,
+    readiness: inputs.readiness,
     recentSessions: inputs.sessions,
     opportunities: inputs.opportunities,
     upcomingOpportunities: upcomingOpportunities(inputs.opportunities, now),

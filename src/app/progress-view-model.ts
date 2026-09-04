@@ -1,20 +1,21 @@
-import type { Competency, ProgressSnapshot } from "@/lib/types";
+import { weakestConfidentDimension } from "@/lib/readiness";
+import type { ReadinessDimensionResult, ReadinessModel } from "@/lib/types";
 
-export type ProgressViewModel = {
+export type ReadinessViewModel = {
   hasEvidence: boolean;
   readiness: number | null;
-  weakest: Competency | null;
+  weakest: ReadinessDimensionResult | null;
 };
 
 /**
- * Selects the server-calculated progress fields that drive readiness UI.
- * The page deliberately consumes the snapshot as-is instead of rebuilding
+ * Selects the server-calculated readiness fields that drive the UI. The
+ * page deliberately consumes the model as-is instead of rebuilding
  * readiness or practice focus from profile competency aggregates.
  */
-export function progressViewModel(progress: ProgressSnapshot | null): ProgressViewModel {
+export function readinessViewModel(model: ReadinessModel | null): ReadinessViewModel {
   return {
-    hasEvidence: progress !== null && progress.readiness !== null,
-    readiness: progress?.readiness ?? null,
-    weakest: progress?.weakest ?? null,
+    hasEvidence: model !== null && model.overall !== null,
+    readiness: model?.overall ?? null,
+    weakest: model ? weakestConfidentDimension(model) : null,
   };
 }

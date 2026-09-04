@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   getProfile: vi.fn(),
   getSession: vi.fn(),
   listRecentSessions: vi.fn(),
+  listReadinessEvidence: vi.fn(),
   createHandsOnSession: vi.fn(),
   createSessionWithPlan: vi.fn(),
   createSessionWithBlueprint: vi.fn(),
@@ -37,6 +38,7 @@ vi.mock("@/lib/repositories/profile", async () => {
 vi.mock("@/lib/repositories/interviews", () => ({
   getSession: mocks.getSession,
   listRecentSessions: mocks.listRecentSessions,
+  listReadinessEvidence: mocks.listReadinessEvidence,
   createHandsOnSession: mocks.createHandsOnSession,
   createSessionWithPlan: mocks.createSessionWithPlan,
   createSessionWithBlueprint: mocks.createSessionWithBlueprint,
@@ -986,13 +988,28 @@ describe("GET /api/interview", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.requireUser.mockResolvedValue({ supabase: { client: true }, user: { id: "user-1" } });
-    mocks.getProfile.mockResolvedValue(profile);
+    mocks.listReadinessEvidence.mockResolvedValue([]);
   });
 
-  it("returns completed-session progress with the authenticated session list", async () => {
+  it("serves the evidence-backed readiness model with the authenticated session list", async () => {
     mocks.listRecentSessions.mockResolvedValue([
       session([question(1, "answered")], "complete"),
       session([question(1, "answered")]),
+    ]);
+    mocks.listReadinessEvidence.mockResolvedValue([
+      {
+        questionEvaluationId: "eval-1",
+        sessionId: "session-1",
+        recordedAt: "2026-08-29T10:00:00.000Z",
+        score: 8,
+        competencyId: "react-id",
+        competencyName: "React architecture",
+        category: "technical",
+        relevance: 1,
+        mode: "real",
+        degraded: false,
+        assistanceCount: 0,
+      },
     ]);
 
     const response = await GET();
@@ -1000,20 +1017,14 @@ describe("GET /api/interview", () => {
 
     expect(response.status).toBe(200);
     expect(body.sessions).toHaveLength(2);
-    expect(body.progress).toMatchObject({
-      readiness: 81,
-      latestScore: 7,
-      trend: "baseline",
-      recentScores: [7],
-      strongest: expect.objectContaining({ id: "react-id" }),
-      weakest: expect.objectContaining({ id: "react-id" }),
-      recurringWeaknesses: [],
-    });
-    expect(mocks.getProfile).toHaveBeenCalledWith(expect.anything(), "user-1");
+    expect(body.readiness.dimensions).toHaveLength(7);
+    expect(body.readiness.overall).toBeGreaterThanOrEqual(0);
+    expect(body).not.toHaveProperty("progress");
     expect(mocks.listRecentSessions).toHaveBeenCalledWith(expect.anything(), "user-1");
+    expect(mocks.listReadinessEvidence).toHaveBeenCalledWith(expect.anything(), "user-1");
   });
 
-  it("returns 401 without exposing progress when authentication is absent", async () => {
+  it("returns 401 without exposing readiness when authentication is absent", async () => {
     mocks.requireUser.mockRejectedValue(new Error("UNAUTHENTICATED"));
 
     const response = await GET();
@@ -1021,7 +1032,7 @@ describe("GET /api/interview", () => {
 
     expect(response.status).toBe(401);
     expect(body).toEqual({ error: "Sign in to continue." });
-    expect(mocks.getProfile).not.toHaveBeenCalled();
     expect(mocks.listRecentSessions).not.toHaveBeenCalled();
+    expect(mocks.listReadinessEvidence).not.toHaveBeenCalled();
   });
 });

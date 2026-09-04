@@ -62,6 +62,7 @@ const mocks = vi.hoisted(() => ({
   createHandsOnPracticeSession: vi.fn(),
   recordConversationTurn: vi.fn(),
   completeSession: vi.fn(),
+  listReadinessEvidence: vi.fn(),
 }));
 
 vi.mock("@/lib/repositories/profile", async () => {
@@ -82,6 +83,7 @@ vi.mock("@/lib/repositories/interviews", async () => {
     createHandsOnPracticeSession: mocks.createHandsOnPracticeSession,
     recordConversationTurn: mocks.recordConversationTurn,
     completeSession: mocks.completeSession,
+    listReadinessEvidence: mocks.listReadinessEvidence,
   };
 });
 vi.mock("@/lib/repositories/practice-plans", async () => {
@@ -96,7 +98,7 @@ vi.mock("@/lib/repositories/practice-plans", async () => {
   };
 });
 
-// `@/lib/coach`, `@/lib/practice-recommendation`, `@/lib/progress`, and
+// `@/lib/coach`, `@/lib/practice-recommendation`, `@/lib/readiness`, and
 // `@/lib/practice-service` are deliberately NOT mocked anywhere in this file.
 import { completeSession as summarizeSession, EVALUATION_DIMENSIONS, nextTurn } from "@/lib/coach";
 import { canExplicitlyCompleteConversation } from "@/lib/conversation-completion";
@@ -384,6 +386,10 @@ describe("Release 2 flow: recommendation through practice-plan completion", () =
     mocks.listCareerStories.mockResolvedValue([]);
     mocks.listRecentSessions.mockResolvedValue([]);
     mocks.listPracticePlans.mockResolvedValue([]);
+    // No readiness evidence yet -- every dimension is unresolved, so this
+    // flow's story-gap branch (precedence #4) still wins over the readiness
+    // weakness branch (#5), exactly as it did under the old progress model.
+    mocks.listReadinessEvidence.mockResolvedValue([]);
 
     let currentPlan: PracticePlan;
     mocks.createPracticePlan.mockImplementation(async (_client, userId, input) => {

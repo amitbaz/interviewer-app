@@ -3,10 +3,11 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { generatePracticeBlueprint, handsOnExercise } from "@/lib/coach";
 import { recommendPractice } from "@/lib/practice-recommendation";
-import { calculateProgress } from "@/lib/progress";
+import { calculateReadiness } from "@/lib/readiness";
 import {
   createHandsOnPracticeSession,
   createSessionWithPracticeBlueprint,
+  listReadinessEvidence,
   listRecentSessions,
 } from "@/lib/repositories/interviews";
 import { listCoachObservations } from "@/lib/repositories/observations";
@@ -32,7 +33,7 @@ import type {
   PracticeRecommendation,
   PracticeSessionContext,
   Profile,
-  ProgressSnapshot,
+  ReadinessModel,
 } from "@/lib/types";
 
 /** Longest a practice plan may claim to take; matches the `practice_plans.estimated_minutes` check constraint. */
@@ -89,9 +90,9 @@ export type PracticeOverview = {
 /**
  * Everything the deterministic selector and the blueprint generator need,
  * loaded once per request. Exported so other Career Brain read models that
- * need the same six repository calls plus the same `calculateProgress` call
- * -- currently `loadCareerDashboard` in `src/lib/career-dashboard.ts` --
- * reuse `loadPracticeInputs` instead of maintaining a second copy of the
+ * need the same seven repository calls plus the same `calculateReadiness`
+ * call -- currently `loadCareerDashboard` in `src/lib/career-dashboard.ts`
+ * -- reuse `loadPracticeInputs` instead of maintaining a second copy of the
  * loading logic that could silently drift from this one.
  */
 export type PracticeInputs = {
@@ -102,7 +103,7 @@ export type PracticeInputs = {
   sessions: InterviewSession[];
   /** The caller's most recent plans only -- `listPracticePlans` is always bounded. */
   plans: PracticePlan[];
-  progress: ProgressSnapshot;
+  readiness: ReadinessModel;
 };
 
 /** The plan fields plus opportunity links a start request resolves to, before anything is persisted. */
@@ -140,20 +141,26 @@ function userSafeGenerationFailure(error: unknown): string {
 
 /**
  * Loads the profile, opportunities, coach observations, career stories,
- * recent sessions, and recent practice plans a request needs, plus the
- * progress snapshot derived from them, in one call. Every other Career Brain
- * read model that needs this same combination should call this rather than
- * re-issuing the six repository calls itself -- see the note on
- * {@link PracticeInputs}.
+ * recent sessions, recent practice plans, and readiness evidence a request
+ * needs, in one call, plus the readiness model computed from that evidence
+ * (a separate seventh read, not derived from the other six). Every other
+ * Career Brain read model that needs this same combination should call this
+ * rather than re-issuing the seven repository calls itself -- see the note
+ * on {@link PracticeInputs}.
+ *
+ * `now` is caller-supplied and threaded straight into `calculateReadiness`
+ * as `asOf` -- this function never reads the clock itself, matching that
+ * function's own determinism contract (see `src/lib/readiness.ts`).
  */
-export async function loadPracticeInputs(supabase: SupabaseClient, userId: string): Promise<PracticeInputs> {
-  const [profile, opportunities, observations, stories, sessions, plans] = await Promise.all([
+export async function loadPracticeInputs(supabase: SupabaseClient, userId: string, now: Date): Promise<PracticeInputs> {
+  const [profile, opportunities, observations, stories, sessions, plans, evidence] = await Promise.all([
     getProfile(supabase, userId),
     listOpportunities(supabase, userId),
     listCoachObservations(supabase, userId),
     listCareerStories(supabase, userId),
     listRecentSessions(supabase, userId),
     listPracticePlans(supabase, userId),
+    listReadinessEvidence(supabase, userId),
   ]);
   return {
     profile,
@@ -162,7 +169,7 @@ export async function loadPracticeInputs(supabase: SupabaseClient, userId: strin
     stories,
     sessions,
     plans,
-    progress: calculateProgress(profile?.competencies ?? [], sessions),
+    readiness: calculateReadiness(evidence, now),
   };
 }
 
@@ -171,7 +178,8 @@ function recommendFrom(inputs: PracticeInputs, now: Date): PracticeRecommendatio
     opportunities: inputs.opportunities,
     observations: inputs.observations,
     stories: inputs.stories,
-    progress: inputs.progress,
+    readiness: inputs.readiness,
+    competencies: inputs.profile?.competencies ?? [],
     recentSessions: inputs.sessions,
     recentPlans: inputs.plans,
     now,
@@ -193,7 +201,7 @@ export async function loadPracticeOverview(
   userId: string,
   now: Date,
 ): Promise<PracticeOverview> {
-  const inputs = await loadPracticeInputs(supabase, userId);
+  const inputs = await loadPracticeInputs(supabase, userId, now);
   return { recommendation: recommendFrom(inputs, now), plans: inputs.plans };
 }
 
@@ -216,7 +224,7 @@ export async function startRecommendedPractice(
   userId: string,
   now: Date,
 ): Promise<StartedPractice> {
-  const inputs = await loadPracticeInputs(supabase, userId);
+  const inputs = await loadPracticeInputs(supabase, userId, now);
   const profile = requireProfile(inputs.profile);
   const recommendation = recommendFrom(inputs, now);
   return startPractice(supabase, userId, profile, inputs, {
@@ -250,7 +258,13 @@ export async function startManualPractice(
   request: ManualPracticeRequest,
 ): Promise<StartedPractice> {
   const draft = validateManualRequest(request);
-  const inputs = await loadPracticeInputs(supabase, userId);
+  // No `now` is supplied by the caller here (manual practice never computes
+  // a recommendation, so the readiness model `loadPracticeInputs` loads
+  // alongside everything else is otherwise unused) -- read the clock once,
+  // right here at the top of the request, same as every `now`-needing
+  // service function in this file gets it from ITS caller reading the clock
+  // once (see `startRecommendedPractice`/`loadPracticeOverview` above).
+  const inputs = await loadPracticeInputs(supabase, userId, new Date());
   const profile = requireProfile(inputs.profile);
   if (draft.primaryOpportunityId && !inputs.opportunities.some((item) => item.id === draft.primaryOpportunityId)) {
     throw new PracticeServiceError("That opportunity was not found.", "OPPORTUNITY_NOT_FOUND");
