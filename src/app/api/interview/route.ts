@@ -134,6 +134,11 @@ export async function POST(request: Request) {
       // non-answer there would leave the row unanswered with its planned
       // prompt unchanged, silently discarding what the candidate wrote.
       const nonAnswer = turn.nonAnswer && !isPreWrittenQuestion(hydratedQuestion);
+      // Gated on `nonAnswer` for the same reason it is: a pre-written session
+      // (planned practice, or a legacy conversation) is not driven by the
+      // coverage plan, so its rows always advance by being answered and must
+      // never be set aside.
+      const setAsideReason = nonAnswer ? turn.setAside : null;
 
       const updated = await recordConversationTurn(
         supabase,
@@ -154,8 +159,7 @@ export async function POST(request: Request) {
           assistance: [...question.assistance, ...(turn.assistance ? [turn.assistance] : [])],
           nonAnswer,
           degraded: turn.degraded,
-          // Wired up by a later task; this task only adds the column.
-          setAsideReason: null,
+          setAsideReason,
         },
       );
       if (!currentQuestion(updated.questions)) {

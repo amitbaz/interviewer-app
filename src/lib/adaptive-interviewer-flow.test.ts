@@ -676,6 +676,11 @@ async function runScriptedSession(options: {
     // carries the next prompt is exactly the seam this flow is here to cover,
     // and a local copy is what let it drift out of step with `route.ts`.
     const write = resolveNextQuestionWrite(session, question, turn);
+    // Gated on `turn.nonAnswer` for the same reason `route.ts` gates on its
+    // own `nonAnswer`: a pre-written session must never be set aside. This
+    // harness never drives one, so the gate is always a no-op here, but it
+    // stays in step with the route rather than assuming that away.
+    const setAsideReason = turn.nonAnswer ? turn.setAside : null;
 
     session = await recordConversationTurn(
       supabase as never,
@@ -694,7 +699,7 @@ async function runScriptedSession(options: {
         assistance: [...question.assistance, ...(turn.assistance ? [turn.assistance] : [])],
         nonAnswer: turn.nonAnswer,
         degraded: turn.degraded,
-        setAsideReason: null,
+        setAsideReason,
       },
     );
   }
@@ -764,24 +769,19 @@ describe("adaptive interviewer flow", () => {
     const rescues = session.questions.flatMap((question) => question.assistance);
     expect(rescues.length).toBeGreaterThan(0);
     expect(rescues.map((rescue) => rescue.style)).toContain("park");
-    // NOT `expect(session.questions.some((question) => question.nonAnswer)).toBe(true)`
-    // (the brief's original line): a rescue continuation after a non-answer
-    // reuses the SAME row rather than opening a new one (unlike a same-target
-    // continuation after a REAL answer -- see `followUpDraftForContinuation`'s
-    // doc comment in route.ts), because a non-answer never sets that row's
-    // `answer` column. So once the candidate recovers, that row's `nonAnswer`
-    // correctly flips to `false` -- it now carries a real, scored answer --
-    // which `interview-coverage.ts`'s `scored` filter and the results UI's
-    // "Not attempted" label both require (neither should treat a genuinely
-    // answered question as unattempted just because it was rescued earlier).
-    // Giving every rescue attempt its own row instead would need a new
-    // migration: the live SQL already refuses a follow-up row whose parent
-    // is itself a follow-up row, so a second consecutive same-target
-    // continuation would hit that wall regardless of answer/non-answer.
-    // Asserting the recovery directly instead: the rescued question ends up
-    // with a real, non-empty answer.
+    // The rescued row is the one that was PARKED, so it correctly stays
+    // unanswered: park sets it aside and moves the interview to a different
+    // target, and this three-answer script has no turns left to come back to
+    // it (spec §8.2, "return later if turns remain"). The candidate's recovery
+    // therefore lands on the destination row, not this one. Before issue #10
+    // was fixed this test asserted the opposite -- that a parked row kept
+    // receiving the candidate's next answer -- which was the blackout bug
+    // itself, not intended behaviour.
     const rescuedQuestion = session.questions.find((question) => question.assistance.length > 0);
-    expect(rescuedQuestion?.answer).toBeTruthy();
+    expect(rescuedQuestion?.setAsideReason).toBe("parked");
+    expect(rescuedQuestion?.answer).toBeNull();
+    const answered = session.questions.filter((question) => question.answer);
+    expect(answered.some((question) => question.id !== rescuedQuestion?.id)).toBe(true);
   });
 
   // Issue #10. Four consecutive blackouts in coach mode: narrow rescue, park,
@@ -792,7 +792,7 @@ describe("adaptive interviewer flow", () => {
   // of the prompts: once unscored attempts are replayed in the transcript, a
   // re-ask of the SAME row produces fresh phrasing, so distinct message text
   // proves nothing about which question the candidate was actually served.
-  it.fails("moves the candidate onto a different question after a blackout", async () => {
+  it("moves the candidate onto a different question after a blackout", async () => {
     const session = await runScriptedSession({
       mode: "coach",
       answers: ["i don't know", "i am having a blackout", "i don't know", "i am having a blackout"],
