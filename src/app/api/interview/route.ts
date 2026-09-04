@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { completeSession as summarizeSession, EVALUATION_DIMENSIONS, evaluateHandsOn, generateInterviewBlueprint, handsOnCheckpoint, handsOnExercise, nextTurn, openingTurn } from "@/lib/coach";
 import { canExplicitlyCompleteConversation } from "@/lib/conversation-completion";
+import { currentQuestion, isAwaitingAnswer } from "@/lib/interview-current-question";
 import { IMPLEMENTED_ROUNDS } from "@/lib/interview-rounds";
 import { isPreWrittenQuestion, resolveNextQuestionWrite } from "@/lib/interview-turn-write";
 import { completeLinkedPracticePlanBestEffort } from "@/lib/practice-service";
@@ -109,7 +110,7 @@ export async function POST(request: Request) {
       if (session.kind === "hands-on") return NextResponse.json({ error: "Use a coding checkpoint for a hands-on session." }, { status: 400 });
       const answer = typeof body.answer === "string" ? body.answer.trim() : "";
       if (!answer) return NextResponse.json({ error: "Write an answer before sending." }, { status: 400 });
-      const question = session.questions.find((item) => !item.answer);
+      const question = currentQuestion(session.questions);
       if (!question) return finishConversation(supabase, user.id, profile, session);
 
       const hydratedQuestion = hydratePlannedQuestion(session, question);
@@ -157,7 +158,7 @@ export async function POST(request: Request) {
           setAsideReason: null,
         },
       );
-      if (!updated.questions.some((item) => !item.answer)) {
+      if (!currentQuestion(updated.questions)) {
         return finishConversation(supabase, user.id, profile, updated);
       }
       return NextResponse.json({ session: visibleConversation(updated) });
@@ -230,8 +231,10 @@ function incompleteConversationMessage(session: InterviewSession): string {
 
 function visibleConversation(session: InterviewSession): InterviewSession {
   if (!session.questions) return session;
-  const visibleQuestionIds = new Set(session.questions.filter((question) => question.answer).map((question) => question.id));
-  const nextQuestion = session.questions.find((question) => !question.answer);
+  const visibleQuestionIds = new Set(
+    session.questions.filter((question) => !isAwaitingAnswer(question)).map((question) => question.id),
+  );
+  const nextQuestion = currentQuestion(session.questions);
   if (nextQuestion) visibleQuestionIds.add(nextQuestion.id);
   return {
     ...session,

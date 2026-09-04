@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EVALUATION_DIMENSIONS, generateInterviewBlueprint, nextTurn, openingTurn } from "@/lib/coach";
+import { currentQuestion } from "@/lib/interview-current-question";
 import { deriveCoverageState } from "@/lib/interview-coverage";
 import { resolveNextQuestionWrite } from "@/lib/interview-turn-write";
 import {
@@ -650,7 +651,7 @@ async function runScriptedSession(options: {
 
   const partialTurns = new Set(options.partialCoverageTurns ?? []);
   for (const [index, answer] of options.answers.entries()) {
-    const question = session.questions.find((item) => !item.answer);
+    const question = currentQuestion(session.questions);
     if (!question) break;
     // A follow-up row carries its parent's signals, so read them off the row
     // being answered rather than only off `targets` (which holds base rows).
@@ -785,18 +786,19 @@ describe("adaptive interviewer flow", () => {
 
   // Issue #10. Four consecutive blackouts in coach mode: narrow rescue, park,
   // then the rescue budget is spent. The director advances to a second target
-  // on turn 3 and writes its question down -- but the candidate is shown the
-  // first row's prompt on every single turn, because a row with no answer is
-  // still "the current question". Flipped to `it` in the final task.
+  // and writes its question down -- but the candidate is shown the first row
+  // on every single turn, because a row with no answer is still "the current
+  // question". Asserted on the ROWS the candidate blanked on, not on the text
+  // of the prompts: once unscored attempts are replayed in the transcript, a
+  // re-ask of the SAME row produces fresh phrasing, so distinct message text
+  // proves nothing about which question the candidate was actually served.
   it.fails("moves the candidate onto a different question after a blackout", async () => {
     const session = await runScriptedSession({
       mode: "coach",
       answers: ["i don't know", "i am having a blackout", "i don't know", "i am having a blackout"],
     });
-    const asked = session.messages
-      .filter((message) => message.role === "interviewer")
-      .map((message) => message.content);
-    expect(new Set(asked).size).toBeGreaterThan(1);
+    const blanked = session.questions.filter((question) => question.nonAnswers.length > 0);
+    expect(blanked.length).toBeGreaterThan(1);
   });
 
   it("never scores a non-answer", async () => {

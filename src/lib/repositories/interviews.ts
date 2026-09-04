@@ -21,6 +21,7 @@ import type {
   SessionCareerContext,
   SetAsideReason,
 } from "@/lib/types";
+import { isAwaitingAnswer } from "@/lib/interview-current-question";
 import { RepositoryError } from "@/lib/repositories/profile";
 
 type Row = Record<string, unknown>;
@@ -180,26 +181,45 @@ function mapCheckpoint(row: Row): HandsOnCheckpoint {
 
 /**
  * Renders the planned questions as a conversation transcript, stopping after
- * the first unanswered question. The whole plan is persisted when the session
- * starts, but revealing it at once would show the candidate every upcoming
- * question (and, through the blueprint panel, its expected signals) before
- * they answer the current one. Completed sessions are unaffected: every
- * question carries an answer, so nothing is trimmed.
+ * the question the candidate is currently on. The whole plan is persisted when
+ * the session starts, but revealing it at once would show the candidate every
+ * upcoming question (and, through the blueprint panel, its expected signals)
+ * before they answer the current one.
+ *
+ * A row can carry more than one exchange: each unscored attempt overwrites the
+ * row's `prompt`, so the prompts and answers of those attempts are replayed
+ * from `nonAnswers` before the row's current prompt. Without that, a candidate
+ * who blanked twice and then recovered would see a transcript in which neither
+ * blank ever happened.
  */
 function transcriptFor(questions: PlannedQuestion[], answerTimes: Map<string, string>): Message[] {
-  const firstUnanswered = questions.findIndex((question) => !question.answer);
-  const revealed = firstUnanswered === -1 ? questions : questions.slice(0, firstUnanswered + 1);
+  const current = questions.findIndex(isAwaitingAnswer);
+  const revealed = current === -1 ? questions : questions.slice(0, current + 1);
   return revealed.flatMap((question) => {
-    const interviewer = {
+    const attempts: Message[] = question.nonAnswers.flatMap((record, index) => [
+      {
+        id: `${question.id}:attempt-${index}:question`,
+        role: "interviewer" as const,
+        content: record.prompt,
+        createdAt: record.at,
+      },
+      {
+        id: `${question.id}:attempt-${index}:answer`,
+        role: "candidate" as const,
+        content: record.answer,
+        createdAt: record.at,
+      },
+    ]);
+    const interviewer: Message = {
       id: `${question.id}:question`,
-      role: "interviewer" as const,
+      role: "interviewer",
       // Null until the interviewer authors it (revealFirstQuestion or a
       // later turn); render an empty bubble rather than widen Message.
       content: question.prompt ?? "",
       createdAt: question.createdAt,
     };
-    if (!question.answer) return [interviewer];
-    return [interviewer, {
+    if (!question.answer) return [...attempts, interviewer];
+    return [...attempts, interviewer, {
       id: `${question.id}:answer`,
       role: "candidate" as const,
       content: question.answer,
