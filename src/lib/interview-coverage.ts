@@ -100,3 +100,34 @@ export function deriveCoverageState(
     };
   });
 }
+
+/** One coverage target the interview finished without covering, and why. */
+export type UncoveredTarget = {
+  targetId: string;
+  competencyName: string | null;
+  reason: string;
+};
+
+const UNCOVERED_REASONS: Record<Exclude<TargetStatus, "satisfied">, string> = {
+  unasked: "Never reached before the interview ended.",
+  open: "Asked, but the expected signals never came out.",
+  parked: "Set aside when the candidate could not answer, and never returned to.",
+  skipped: "Set aside after the rescue attempts for it were spent.",
+};
+
+/**
+ * What the session did not cover, in target order (spec §9.3 rule 5). Everything
+ * short of `satisfied` counts: at close there is no difference between a target
+ * never asked and one asked without result, other than the reason to report.
+ * Callers render this; it is deliberately plain text rather than a status code,
+ * because its only consumer is prose shown to the candidate.
+ */
+export function uncoveredTargets(states: TargetState[]): UncoveredTarget[] {
+  return states
+    .filter((state) => state.status !== "satisfied")
+    .map((state) => ({
+      targetId: state.target.id,
+      competencyName: state.target.competencyName,
+      reason: UNCOVERED_REASONS[state.status as Exclude<TargetStatus, "satisfied">],
+    }));
+}

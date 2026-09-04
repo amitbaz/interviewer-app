@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canContinueOnAnsweredRow, deriveCoverageState, rescuesSpentInSession, targetIdOf } from "@/lib/interview-coverage";
+import { canContinueOnAnsweredRow, deriveCoverageState, rescuesSpentInSession, targetIdOf, uncoveredTargets } from "@/lib/interview-coverage";
 import type { CoverageTarget, Evaluation, PlannedQuestion } from "@/lib/types";
 
 function target(id: string, overrides: Partial<CoverageTarget> = {}): CoverageTarget {
@@ -159,6 +159,42 @@ describe("deriveCoverageState", () => {
     });
     const state = deriveCoverageState([target("a")], [blank], []);
     expect(state[0].status).toBe("open");
+  });
+});
+
+describe("uncoveredTargets", () => {
+  it("reports every target the session closed without covering, with a reason", () => {
+    const states = deriveCoverageState(
+      [target("a"), target("b"), target("c"), target("d")],
+      [
+        question("a", { askedIntent: { kind: "open", targetId: "a" } }),
+        question("b", {
+          askedIntent: { kind: "open", targetId: "b" },
+          setAsideAt: "2026-09-04T09:01:00.000Z",
+          setAsideReason: "parked",
+        }),
+        question("c", {
+          askedIntent: { kind: "open", targetId: "c" },
+          setAsideAt: "2026-09-04T09:02:00.000Z",
+          setAsideReason: "rescue-budget-spent",
+        }),
+        question("d"),
+      ],
+      [],
+    );
+    expect(uncoveredTargets(states).map((item) => item.targetId)).toEqual(["a", "b", "c", "d"]);
+    expect(uncoveredTargets(states)[1].reason).toBe(
+      "Set aside when the candidate could not answer, and never returned to.",
+    );
+  });
+
+  it("leaves satisfied targets out of the report", () => {
+    const states = deriveCoverageState(
+      [target("a")],
+      [question("a", { askedIntent: { kind: "open", targetId: "a" } })],
+      [evaluation("a", ["ownership", "impact"])],
+    );
+    expect(uncoveredTargets(states)).toEqual([]);
   });
 });
 

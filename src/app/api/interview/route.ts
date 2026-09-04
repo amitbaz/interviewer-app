@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { completeSession as summarizeSession, EVALUATION_DIMENSIONS, evaluateHandsOn, generateInterviewBlueprint, handsOnCheckpoint, handsOnExercise, nextTurn, openingTurn } from "@/lib/coach";
 import { canExplicitlyCompleteConversation } from "@/lib/conversation-completion";
+import { deriveCoverageState, uncoveredTargets, type UncoveredTarget } from "@/lib/interview-coverage";
 import { currentQuestion, isAwaitingAnswer } from "@/lib/interview-current-question";
 import { IMPLEMENTED_ROUNDS } from "@/lib/interview-rounds";
 import { isPreWrittenQuestion, resolveNextQuestionWrite } from "@/lib/interview-turn-write";
@@ -196,6 +197,7 @@ export async function POST(request: Request) {
         // Always present, `null` when there is nothing to warn about: clients
         // read this as a nullable field, never as an optional key.
         practicePlanWarning: warning,
+        coverage: coverageFor(completed),
       });
     }
     return NextResponse.json({ error: "Unknown action." }, { status: 400 });
@@ -217,6 +219,7 @@ async function finishConversation(
     session: visibleConversation(completed),
     profile: refreshedProfile ?? profile,
     practicePlanWarning: warning,
+    coverage: coverageFor(completed),
   });
 }
 
@@ -231,6 +234,15 @@ function incompleteConversationMessage(session: InterviewSession): string {
   return session.practicePlanId
     ? "Answer every question in this practice before completing it."
     : "Answer at least five questions before completing this interview.";
+}
+
+/**
+ * The coverage report attached to a finished interview. Empty for a hands-on
+ * or legacy session, which have no coverage plan to report against.
+ */
+function coverageFor(session: InterviewSession): UncoveredTarget[] {
+  if (session.kind !== "conversation" || !session.blueprint) return [];
+  return uncoveredTargets(deriveCoverageState(session.blueprint.targets, session.questions, session.evaluations));
 }
 
 function visibleConversation(session: InterviewSession): InterviewSession {
