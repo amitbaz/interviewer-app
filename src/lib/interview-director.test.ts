@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { decideIntent, type DirectorInput } from "@/lib/interview-director";
 import { modePolicyFor, roundFor } from "@/lib/interview-rounds";
-import type { CoverageTarget, Intent, ModePolicy, TargetState } from "@/lib/types";
+import type { CoverageTarget, Intent, InterviewMode, ModePolicy, TargetState, TargetStatus } from "@/lib/types";
 
 function target(id: string, required = true): CoverageTarget {
   return {
@@ -46,6 +46,100 @@ function input(overrides: Partial<DirectorInput> = {}): DirectorInput {
     ...overrides,
   };
 }
+
+/**
+ * Shorthand builder for the "stuck" branch's own tests. Fixes every field the
+ * park-destination tests don't vary, so each test only states the target
+ * shape and mode that its assertion actually depends on.
+ */
+function stuckInput(options: {
+  mode: InterviewMode;
+  states: Array<{ id: string; status: TargetStatus; rescuesSpent: number; askedIntents: Intent[] }>;
+  currentTargetId: string | null;
+}): DirectorInput {
+  return {
+    round: roundFor("tech-lead"),
+    policy: modePolicyFor(options.mode),
+    states: options.states.map((state) => ({
+      target: {
+        id: state.id,
+        competencyId: null,
+        competencyName: null,
+        category: "communication",
+        evidenceIds: [],
+        difficulty: "foundational",
+        objective: "",
+        expectedSignals: ["signal"],
+        rubricCriteria: [],
+        required: true,
+      },
+      status: state.status,
+      turnsSpent: 1,
+      rescuesSpent: state.rescuesSpent,
+      askedIntents: state.askedIntents,
+    })),
+    currentTargetId: options.currentTargetId,
+    read: "stuck",
+    unsupportedClaims: [],
+    answer: "i don't know",
+    turnsUsed: 1,
+    turnBudget: 8,
+    sessionRescues: 1,
+    canContinueCurrentTarget: true,
+    now: "2026-09-04T09:00:00.000Z",
+  };
+}
+
+describe("decideIntent — park destination", () => {
+  it("parks by moving to a different target and naming the one it leaves", () => {
+    const decision = decideIntent(stuckInput({
+      mode: "coach",
+      states: [
+        { id: "a", status: "open", rescuesSpent: 1, askedIntents: [{ kind: "rescue", targetId: "a", style: "narrow", hook: null }] },
+        { id: "b", status: "unasked", rescuesSpent: 0, askedIntents: [] },
+      ],
+      currentTargetId: "a",
+    }));
+    expect(decision.intent).toMatchObject({ kind: "rescue", style: "park", targetId: "b", parkedTargetId: "a" });
+    expect(decision.setAside).toBe("parked");
+  });
+
+  it("sets the stuck target aside when the rescue budget is spent", () => {
+    const decision = decideIntent(stuckInput({
+      mode: "real",
+      states: [
+        { id: "a", status: "open", rescuesSpent: 1, askedIntents: [{ kind: "rescue", targetId: "a", style: "narrow", hook: null }] },
+        { id: "b", status: "unasked", rescuesSpent: 0, askedIntents: [] },
+      ],
+      currentTargetId: "a",
+    }));
+    expect(decision.intent).toMatchObject({ kind: "advance", targetId: "b", reason: "rescue-budget-spent" });
+    expect(decision.setAside).toBe("rescue-budget-spent");
+  });
+
+  it("never advances back onto the target it is leaving", () => {
+    const decision = decideIntent(stuckInput({
+      mode: "real",
+      states: [
+        { id: "a", status: "parked", rescuesSpent: 1, askedIntents: [{ kind: "rescue", targetId: "a", style: "narrow", hook: null }] },
+      ],
+      currentTargetId: "a",
+    }));
+    expect(decision.intent.kind).toBe("candidate-questions");
+  });
+
+  it("does not park when there is nowhere to move to", () => {
+    const decision = decideIntent(stuckInput({
+      mode: "coach",
+      states: [
+        { id: "a", status: "open", rescuesSpent: 1, askedIntents: [{ kind: "rescue", targetId: "a", style: "narrow", hook: null }] },
+      ],
+      currentTargetId: "a",
+    }));
+    expect(decision.intent.kind).toBe("candidate-questions");
+    expect(decision.setAside).toBe("rescue-budget-spent");
+  });
+});
 
 describe("decideIntent — stuck candidates", () => {
   it("rescues rather than probes when the candidate is stuck", () => {
@@ -93,14 +187,24 @@ describe("decideIntent — stuck candidates", () => {
       askedIntents: [{ kind: "rescue", targetId: "a", style: "narrow", hook: null }],
     });
     const coach = decideIntent(input({ read: "stuck", states: [stuckTwice, state("b")], policy: modePolicyFor("coach") }));
-    expect(coach.intent).toMatchObject({ kind: "rescue", style: "park" });
+    // Park moves to "b" and names "a" as the target it leaves -- it must never
+    // hand back the stuck target itself (that was the bug, issue #10).
+    expect(coach.intent).toMatchObject({ kind: "rescue", style: "park", targetId: "b", parkedTargetId: "a" });
 
     const real = decideIntent(input({ read: "stuck", states: [stuckTwice, state("b")], policy: modePolicyFor("real") }));
     expect(real.intent.kind).toBe("advance");
   });
 
   it("stops rescuing once the session budget is spent", () => {
-    const decision = decideIntent(input({ read: "stuck", sessionRescues: 5, policy: modePolicyFor("coach") }));
+    // A second target is required here: `advance` never returns to the target
+    // being left (see the park-destination tests below), so with only "a" in
+    // play there would be nowhere to advance to.
+    const decision = decideIntent(input({
+      read: "stuck",
+      states: [state("a"), state("b")],
+      sessionRescues: 5,
+      policy: modePolicyFor("coach"),
+    }));
     expect(decision.intent.kind).toBe("advance");
   });
 
