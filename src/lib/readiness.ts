@@ -16,7 +16,7 @@
  * the same result.
  */
 import { READINESS_DIMENSIONS, dimensionFor, type ReadinessDimension } from "@/lib/readiness-dimensions";
-import { evidenceStrength, recencyFactor } from "@/lib/readiness-weighting";
+import { RECENCY_HALF_LIFE_DAYS, evidenceStrength, recencyFactor } from "@/lib/readiness-weighting";
 import type {
   ReadinessContribution,
   ReadinessDimensionResult,
@@ -76,8 +76,52 @@ function contributionsFor(items: ReadonlyArray<WeightedEvidence>): ReadinessCont
     .sort((a, b) => b.weight - a.weight);
 }
 
-function trendFor(_items: ReadonlyArray<WeightedEvidence>, _asOf: Date): ReadinessTrend {
-  return "unresolved";
+/**
+ * Comparison boundary on the 0-10 rubric scale. This compares weighted means
+ * of two windows rather than two raw session scores, so it needs a wider
+ * boundary than the old score-to-score comparison did to stop a single weak
+ * answer from flipping the trend -- which is the swing issue #14 asks to
+ * eliminate.
+ */
+const TREND_DELTA_BOUNDARY = 1.25;
+
+/**
+ * Each half of the comparison needs this much weight before a trend is
+ * claimed. Below it the honest answer is `unresolved`, not a guess -- the
+ * fourth trend value exists precisely so sparse history has somewhere to go.
+ */
+const TREND_MINIMUM_WEIGHT = 0.75;
+
+/**
+ * Splits the evidence at one half-life ago and compares the weighted means of
+ * the two halves.
+ *
+ * A window comparison rather than a last-two-scores comparison: the old rule
+ * flipped on any single weak answer, which is exactly the swing issue #14 asks
+ * us to stop.
+ */
+function trendFor(items: ReadonlyArray<WeightedEvidence>, asOf: Date): ReadinessTrend {
+  const boundary = asOf.getTime() - RECENCY_HALF_LIFE_DAYS * 86_400_000;
+  const recent: WeightedEvidence[] = [];
+  const older: WeightedEvidence[] = [];
+  for (const item of items) {
+    const at = new Date(item.recordedAt).getTime();
+    if (Number.isNaN(at)) continue;
+    (at >= boundary ? recent : older).push(item);
+  }
+
+  const recentWeight = recent.reduce((sum, item) => sum + item.weight, 0);
+  const olderWeight = older.reduce((sum, item) => sum + item.weight, 0);
+  if (recentWeight < TREND_MINIMUM_WEIGHT || olderWeight < TREND_MINIMUM_WEIGHT) return "unresolved";
+
+  const recentMean = weightedMean(recent);
+  const olderMean = weightedMean(older);
+  if (recentMean === null || olderMean === null) return "unresolved";
+
+  const delta = recentMean - olderMean;
+  if (delta >= TREND_DELTA_BOUNDARY) return "improving";
+  if (delta <= -TREND_DELTA_BOUNDARY) return "worsening";
+  return "stable";
 }
 
 export function calculateReadiness(evidence: ReadinessEvidence[], asOf: Date = new Date()): ReadinessModel {

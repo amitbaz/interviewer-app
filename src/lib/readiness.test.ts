@@ -113,3 +113,60 @@ describe("calculateReadiness", () => {
     expect(model.dimensions.every((entry) => entry.score === null)).toBe(true);
   });
 });
+
+describe("calculateReadiness trend", () => {
+  const older = (score: number) => evidence({ score, recordedAt: daysAgo(90) });
+  const newer = (score: number) => evidence({ score, recordedAt: daysAgo(5) });
+
+  it("reports unresolved when one side of the comparison has too little weight", () => {
+    const model = calculateReadiness([newer(9), newer(9)], NOW);
+    expect(dimension(model, "frontend").trend).toBe("unresolved");
+  });
+
+  it("reports improving when recent evidence is clearly stronger", () => {
+    const model = calculateReadiness(
+      [...Array.from({ length: 4 }, () => older(4)), ...Array.from({ length: 4 }, () => newer(9))],
+      NOW,
+    );
+    expect(dimension(model, "frontend").trend).toBe("improving");
+  });
+
+  it("reports worsening when recent evidence is clearly weaker", () => {
+    const model = calculateReadiness(
+      [...Array.from({ length: 4 }, () => older(9)), ...Array.from({ length: 4 }, () => newer(4))],
+      NOW,
+    );
+    expect(dimension(model, "frontend").trend).toBe("worsening");
+  });
+
+  it("reports stable when the two halves are close", () => {
+    const model = calculateReadiness(
+      [...Array.from({ length: 4 }, () => older(7)), ...Array.from({ length: 4 }, () => newer(7.2))],
+      NOW,
+    );
+    expect(dimension(model, "frontend").trend).toBe("stable");
+  });
+
+  it("does not flip the trend on a single bad answer", () => {
+    const model = calculateReadiness(
+      [
+        ...Array.from({ length: 5 }, () => older(8)),
+        ...Array.from({ length: 5 }, () => newer(8)),
+        newer(1),
+      ],
+      NOW,
+    );
+    expect(dimension(model, "frontend").trend).not.toBe("worsening");
+  });
+
+  it("derives an overall trend across every dimension", () => {
+    const model = calculateReadiness(
+      [
+        ...Array.from({ length: 4 }, () => older(4)),
+        ...Array.from({ length: 4 }, () => newer(9)),
+      ],
+      NOW,
+    );
+    expect(model.overallTrend).toBe("improving");
+  });
+});
