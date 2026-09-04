@@ -17,6 +17,8 @@ import type {
   NonAnswerRecord,
   PlannedQuestion,
   PracticeSessionContext,
+  QuestionCategory,
+  ReadinessEvidence,
   RoundId,
   SessionCareerContext,
   SetAsideReason,
@@ -500,6 +502,102 @@ export async function listRecentSessions(supabase: SupabaseClient, userId: strin
     .limit(20);
   if (error) throw new RepositoryError("Could not load recent interviews.", error.code);
   return Promise.all(((data ?? []) as Row[]).map((session) => hydrateSession(supabase, userId, session)));
+}
+
+/** The base owned-table query `selectAllPages` refines: `select("*")` scoped to the caller's rows. */
+type EvidenceQuery = ReturnType<ReturnType<SupabaseClient["from"]>["select"]>;
+
+const PAGE_SIZE = 1000;
+
+/**
+ * Reads an entire owned table in blocks. PostgREST caps a single response, and
+ * readiness must see all history, so silently truncating here would quietly
+ * corrupt every downstream score.
+ */
+async function selectAllPages(
+  supabase: SupabaseClient,
+  table: string,
+  userId: string,
+  refine: (query: EvidenceQuery) => EvidenceQuery,
+): Promise<Row[]> {
+  const rows: Row[] = [];
+  for (let page = 0; ; page += 1) {
+    const { data, error } = await refine(
+      supabase.from(table).select("*").eq("user_id", userId),
+    ).range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
+    if (error) throw new RepositoryError("Could not load readiness evidence.", error.code);
+    const batch = (data ?? []) as Row[];
+    rows.push(...batch);
+    if (batch.length < PAGE_SIZE) return rows;
+  }
+}
+
+/**
+ * Every graded answer the user has ever produced, flattened with the session
+ * conditions the readiness model needs to weight it.
+ *
+ * Deliberately unbounded, unlike `listRecentSessions`, which caps at 20: a
+ * readiness model that forgets the user's history cannot apply recency
+ * weighting, because it has nothing old to weigh the recent evidence against.
+ * Rows are paged in blocks so a long history does not hit PostgREST's limit.
+ *
+ * Skipped on purpose:
+ * - sessions that are not `completed` -- partial grades are not yet evidence;
+ * - questions flagged `non_answer` -- never scored, so never proof of anything.
+ */
+export async function listReadinessEvidence(
+  supabase: SupabaseClient,
+  userId: string,
+): Promise<ReadinessEvidence[]> {
+  const sessions = await selectAllPages(supabase, "interview_sessions", userId, (query) =>
+    query.eq("status", "completed"),
+  );
+  if (sessions.length === 0) return [];
+
+  const sessionById = new Map(sessions.map((row) => [stringValue(row.id), row]));
+  const questions = (
+    await selectAllPages(supabase, "interview_questions", userId, (query) =>
+      query.in("session_id", [...sessionById.keys()]),
+    )
+  ).filter((row) => row.non_answer !== true);
+  if (questions.length === 0) return [];
+
+  const questionById = new Map(questions.map((row) => [stringValue(row.id), row]));
+  const evaluations = await selectAllPages(supabase, "question_evaluations", userId, (query) =>
+    query.in("question_id", [...questionById.keys()]),
+  );
+
+  const competencyIds = [
+    ...new Set(questions.map((row) => stringValue(row.competency_id)).filter(Boolean)),
+  ];
+  const competencies = competencyIds.length
+    ? await selectAllPages(supabase, "competencies", userId, (query) => query.in("id", competencyIds))
+    : [];
+  const competencyById = new Map(competencies.map((row) => [stringValue(row.id), row]));
+
+  const evidence: ReadinessEvidence[] = [];
+  for (const evaluation of evaluations) {
+    const question = questionById.get(stringValue(evaluation.question_id));
+    if (!question) continue;
+    const session = sessionById.get(stringValue(question.session_id));
+    if (!session) continue;
+    const competency = competencyById.get(stringValue(question.competency_id));
+    const assistance = Array.isArray(question.assistance) ? question.assistance : [];
+    evidence.push({
+      questionEvaluationId: stringValue(evaluation.id),
+      sessionId: stringValue(session.id),
+      recordedAt: stringValue(evaluation.created_at),
+      score: Number(evaluation.overall_score ?? 0),
+      competencyId: competency ? stringValue(competency.id) : null,
+      competencyName: competency ? stringValue(competency.name) : null,
+      category: (question.category as QuestionCategory | undefined) ?? null,
+      relevance: competency ? Number(competency.relevance ?? 1) : 1,
+      mode: session.mode === "coach" ? "coach" : "real",
+      degraded: session.degraded === true,
+      assistanceCount: assistance.length,
+    });
+  }
+  return evidence;
 }
 
 export async function createSessionWithPlan(

@@ -12,6 +12,7 @@ import {
   createSessionWithPlan,
   createSessionWithPracticeBlueprint,
   linkSessionCareerContext,
+  listReadinessEvidence,
   mapSession,
   questionIdForTarget,
   recordAnswerAndEvaluation,
@@ -1825,3 +1826,203 @@ function rpcHydrationClient(
     from: (table: string) => ({ select: () => table === "interview_sessions" ? sessionQuery : emptyQuery }),
   };
 }
+
+/**
+ * A generic, table-backed Supabase double for read-only paged queries: each
+ * `.eq()`/`.in()` narrows the in-memory row set for that table, and
+ * `.range()` is the terminal call (matching `selectAllPages`'s paging),
+ * resolving to `{ data, error: null }`. Tables not passed in behave as
+ * empty. Unlike `tableStub`/`careerContextSupabase`, this mock does not
+ * distinguish "which query is running" -- it just filters rows -- which is
+ * enough for `listReadinessEvidence`'s straight-line reads.
+ */
+function mockSupabase(tables: Record<string, Row[]>) {
+  const from = vi.fn((table: string) => {
+    let rows = tables[table] ?? [];
+    const builder = {
+      select: () => builder,
+      eq: (field: string, value: unknown) => {
+        rows = rows.filter((row) => row[field] === value);
+        return builder;
+      },
+      in: (field: string, values: unknown[]) => {
+        const allowed = new Set(values);
+        rows = rows.filter((row) => allowed.has(row[field]));
+        return builder;
+      },
+      range: async () => ({ data: rows, error: null }),
+    };
+    return builder;
+  });
+  return { from };
+}
+
+describe("listReadinessEvidence", () => {
+  it("flattens graded answers with the session conditions needed to weight them", async () => {
+    const supabase = mockSupabase({
+      interview_sessions: [
+        { id: "session-1", user_id: "user-1", status: "completed", mode: "real", degraded: false },
+      ],
+      interview_questions: [
+        {
+          id: "question-1",
+          user_id: "user-1",
+          session_id: "session-1",
+          category: "technical",
+          competency_id: "competency-1",
+          assistance: [{ style: "hook", at: "2026-09-01T10:00:00.000Z" }],
+          non_answer: false,
+        },
+      ],
+      question_evaluations: [
+        {
+          id: "eval-1",
+          user_id: "user-1",
+          question_id: "question-1",
+          overall_score: 8,
+          created_at: "2026-09-01T10:05:00.000Z",
+        },
+      ],
+      competencies: [
+        { id: "competency-1", user_id: "user-1", name: "React architecture", relevance: 0.9 },
+      ],
+    });
+
+    const evidence = await listReadinessEvidence(supabase as never, "user-1");
+
+    expect(evidence).toEqual([
+      {
+        questionEvaluationId: "eval-1",
+        sessionId: "session-1",
+        recordedAt: "2026-09-01T10:05:00.000Z",
+        score: 8,
+        competencyId: "competency-1",
+        competencyName: "React architecture",
+        category: "technical",
+        relevance: 0.9,
+        mode: "real",
+        degraded: false,
+        assistanceCount: 1,
+      },
+    ]);
+  });
+
+  it("skips questions the candidate never attempted", async () => {
+    // non_answer: true rows are never scored, so they must never become evidence.
+    const supabase = mockSupabase({
+      interview_sessions: [
+        { id: "session-1", user_id: "user-1", status: "completed", mode: "real", degraded: false },
+      ],
+      interview_questions: [
+        {
+          id: "question-1", user_id: "user-1", session_id: "session-1", category: "behavioral",
+          competency_id: "competency-1", assistance: [], non_answer: false,
+        },
+        {
+          id: "question-2", user_id: "user-1", session_id: "session-1", category: "technical",
+          competency_id: "competency-1", assistance: [], non_answer: true,
+        },
+      ],
+      question_evaluations: [
+        {
+          id: "eval-1", user_id: "user-1", question_id: "question-1", overall_score: 6,
+          created_at: "2026-09-01T10:05:00.000Z",
+        },
+        {
+          // Should never occur in practice -- non-answers are never graded -- but proves
+          // the skip is driven by the question's non_answer flag, not by a missing evaluation.
+          id: "eval-2", user_id: "user-1", question_id: "question-2", overall_score: 9,
+          created_at: "2026-09-01T10:06:00.000Z",
+        },
+      ],
+      competencies: [
+        { id: "competency-1", user_id: "user-1", name: "Ownership", relevance: 1 },
+      ],
+    });
+
+    const evidence = await listReadinessEvidence(supabase as never, "user-1");
+
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0].questionEvaluationId).toBe("eval-1");
+  });
+
+  it("skips sessions that are not completed", async () => {
+    // An in-flight session's partial grades must not move readiness.
+    const supabase = mockSupabase({
+      interview_sessions: [
+        { id: "session-1", user_id: "user-1", status: "active", mode: "real", degraded: false },
+      ],
+      interview_questions: [
+        {
+          id: "question-1", user_id: "user-1", session_id: "session-1", category: "technical",
+          competency_id: "competency-1", assistance: [], non_answer: false,
+        },
+      ],
+      question_evaluations: [
+        {
+          id: "eval-1", user_id: "user-1", question_id: "question-1", overall_score: 7,
+          created_at: "2026-09-01T10:05:00.000Z",
+        },
+      ],
+      competencies: [
+        { id: "competency-1", user_id: "user-1", name: "React architecture", relevance: 0.9 },
+      ],
+    });
+
+    const evidence = await listReadinessEvidence(supabase as never, "user-1");
+
+    expect(evidence).toEqual([]);
+  });
+
+  it("defaults relevance to 1 when an answer has no competency", async () => {
+    const supabase = mockSupabase({
+      interview_sessions: [
+        { id: "session-1", user_id: "user-1", status: "completed", mode: "coach", degraded: true },
+      ],
+      interview_questions: [
+        {
+          id: "question-1", user_id: "user-1", session_id: "session-1", category: "communication",
+          competency_id: null, assistance: [], non_answer: false,
+        },
+      ],
+      question_evaluations: [
+        {
+          id: "eval-1", user_id: "user-1", question_id: "question-1", overall_score: 5,
+          created_at: "2026-09-01T10:05:00.000Z",
+        },
+      ],
+      competencies: [],
+    });
+
+    const evidence = await listReadinessEvidence(supabase as never, "user-1");
+
+    expect(evidence).toEqual([
+      {
+        questionEvaluationId: "eval-1",
+        sessionId: "session-1",
+        recordedAt: "2026-09-01T10:05:00.000Z",
+        score: 5,
+        competencyId: null,
+        competencyName: null,
+        category: "communication",
+        relevance: 1,
+        mode: "coach",
+        degraded: true,
+        assistanceCount: 0,
+      },
+    ]);
+  });
+
+  it("returns an empty list when the user has no completed sessions", async () => {
+    const supabase = mockSupabase({
+      interview_sessions: [],
+      interview_questions: [],
+      question_evaluations: [],
+      competencies: [],
+    });
+
+    const evidence = await listReadinessEvidence(supabase as never, "user-1");
+
+    expect(evidence).toEqual([]);
+  });
+});
