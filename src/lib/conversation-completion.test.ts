@@ -19,6 +19,9 @@ function question(sequence: number, answer: string | null, isFollowUp = false): 
     askedIntent: null,
     assistance: [],
     nonAnswer: false,
+    setAsideAt: null,
+    setAsideReason: null,
+    nonAnswers: [],
   };
 }
 

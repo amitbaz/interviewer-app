@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { completeSession as summarizeSession, EVALUATION_DIMENSIONS, evaluateHandsOn, generateInterviewBlueprint, handsOnCheckpoint, handsOnExercise, nextTurn, openingTurn } from "@/lib/coach";
 import { canExplicitlyCompleteConversation } from "@/lib/conversation-completion";
+import { deriveCoverageState, uncoveredTargets, type UncoveredTarget } from "@/lib/interview-coverage";
+import { currentQuestion, isAwaitingAnswer } from "@/lib/interview-current-question";
 import { IMPLEMENTED_ROUNDS } from "@/lib/interview-rounds";
 import { isPreWrittenQuestion, resolveNextQuestionWrite } from "@/lib/interview-turn-write";
 import { completeLinkedPracticePlanBestEffort } from "@/lib/practice-service";
@@ -109,7 +111,7 @@ export async function POST(request: Request) {
       if (session.kind === "hands-on") return NextResponse.json({ error: "Use a coding checkpoint for a hands-on session." }, { status: 400 });
       const answer = typeof body.answer === "string" ? body.answer.trim() : "";
       if (!answer) return NextResponse.json({ error: "Write an answer before sending." }, { status: 400 });
-      const question = session.questions.find((item) => !item.answer);
+      const question = currentQuestion(session.questions);
       if (!question) return finishConversation(supabase, user.id, profile, session);
 
       const hydratedQuestion = hydratePlannedQuestion(session, question);
@@ -133,6 +135,11 @@ export async function POST(request: Request) {
       // non-answer there would leave the row unanswered with its planned
       // prompt unchanged, silently discarding what the candidate wrote.
       const nonAnswer = turn.nonAnswer && !isPreWrittenQuestion(hydratedQuestion);
+      // Gated on `nonAnswer` for the same reason it is: a pre-written session
+      // (planned practice, or a legacy conversation) is not driven by the
+      // coverage plan, so its rows always advance by being answered and must
+      // never be set aside.
+      const setAsideReason = nonAnswer ? turn.setAside : null;
 
       const updated = await recordConversationTurn(
         supabase,
@@ -153,9 +160,10 @@ export async function POST(request: Request) {
           assistance: [...question.assistance, ...(turn.assistance ? [turn.assistance] : [])],
           nonAnswer,
           degraded: turn.degraded,
+          setAsideReason,
         },
       );
-      if (!updated.questions.some((item) => !item.answer)) {
+      if (!currentQuestion(updated.questions)) {
         return finishConversation(supabase, user.id, profile, updated);
       }
       return NextResponse.json({ session: visibleConversation(updated) });
@@ -189,6 +197,7 @@ export async function POST(request: Request) {
         // Always present, `null` when there is nothing to warn about: clients
         // read this as a nullable field, never as an optional key.
         practicePlanWarning: warning,
+        coverage: coverageFor(completed),
       });
     }
     return NextResponse.json({ error: "Unknown action." }, { status: 400 });
@@ -210,6 +219,7 @@ async function finishConversation(
     session: visibleConversation(completed),
     profile: refreshedProfile ?? profile,
     practicePlanWarning: warning,
+    coverage: coverageFor(completed),
   });
 }
 
@@ -226,10 +236,21 @@ function incompleteConversationMessage(session: InterviewSession): string {
     : "Answer at least five questions before completing this interview.";
 }
 
+/**
+ * The coverage report attached to a finished interview. Empty for a hands-on
+ * or legacy session, which have no coverage plan to report against.
+ */
+function coverageFor(session: InterviewSession): UncoveredTarget[] {
+  if (session.kind !== "conversation" || !session.blueprint) return [];
+  return uncoveredTargets(deriveCoverageState(session.blueprint.targets, session.questions, session.evaluations));
+}
+
 function visibleConversation(session: InterviewSession): InterviewSession {
   if (!session.questions) return session;
-  const visibleQuestionIds = new Set(session.questions.filter((question) => question.answer).map((question) => question.id));
-  const nextQuestion = session.questions.find((question) => !question.answer);
+  const visibleQuestionIds = new Set(
+    session.questions.filter((question) => !isAwaitingAnswer(question)).map((question) => question.id),
+  );
+  const nextQuestion = currentQuestion(session.questions);
   if (nextQuestion) visibleQuestionIds.add(nextQuestion.id);
   return {
     ...session,

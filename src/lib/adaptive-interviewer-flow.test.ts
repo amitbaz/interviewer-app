@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EVALUATION_DIMENSIONS, generateInterviewBlueprint, nextTurn, openingTurn } from "@/lib/coach";
+import { currentQuestion } from "@/lib/interview-current-question";
 import { deriveCoverageState } from "@/lib/interview-coverage";
 import { resolveNextQuestionWrite } from "@/lib/interview-turn-write";
 import {
@@ -373,6 +374,9 @@ function makeFakeSupabase() {
         asked_intent: null,
         assistance: [],
         non_answer: false,
+        set_aside_at: null,
+        set_aside_reason: null,
+        non_answers: [],
         answer: null,
         answered_at: null,
         asked_at: null,
@@ -441,6 +445,18 @@ function makeFakeSupabase() {
 
     question.non_answer = nonAnswer;
     question.assistance = args.p_assistance ?? [];
+    // Mirrors 202609040001: append the unscored exchange, and set (never
+    // clear) the set-aside marker on the answered row.
+    if (nonAnswer) {
+      question.non_answers = [
+        ...(Array.isArray(question.non_answers) ? question.non_answers : []),
+        { prompt: (question.prompt as string) ?? "", answer: args.p_answer, at: nowIso() },
+      ];
+    }
+    if (args.p_set_aside_reason != null) {
+      question.set_aside_at = nowIso();
+      question.set_aside_reason = args.p_set_aside_reason;
+    }
     question.updated_at = nowIso();
 
     if (args.p_follow_up != null) {
@@ -501,6 +517,9 @@ function makeFakeSupabase() {
         asked_intent: args.p_asked_intent ?? null,
         assistance: [],
         non_answer: false,
+        set_aside_at: null,
+        set_aside_reason: null,
+        non_answers: [],
         answer: null,
         answered_at: null,
         asked_at: nowIso(),
@@ -519,6 +538,9 @@ function makeFakeSupabase() {
       if (!eligible) return { data: null, error: { code: "P0002", message: "Owned next question was not found" } };
       next!.prompt = typeof args.p_next_prompt === "string" ? args.p_next_prompt.trim() : null;
       next!.asked_intent = args.p_asked_intent ?? null;
+      // Mirrors 202609040001: asking a row again makes it current again.
+      next!.set_aside_at = null;
+      next!.set_aside_reason = null;
       next!.asked_at = nowIso();
       next!.updated_at = nowIso();
     }
@@ -629,7 +651,7 @@ async function runScriptedSession(options: {
 
   const partialTurns = new Set(options.partialCoverageTurns ?? []);
   for (const [index, answer] of options.answers.entries()) {
-    const question = session.questions.find((item) => !item.answer);
+    const question = currentQuestion(session.questions);
     if (!question) break;
     // A follow-up row carries its parent's signals, so read them off the row
     // being answered rather than only off `targets` (which holds base rows).
@@ -654,6 +676,11 @@ async function runScriptedSession(options: {
     // carries the next prompt is exactly the seam this flow is here to cover,
     // and a local copy is what let it drift out of step with `route.ts`.
     const write = resolveNextQuestionWrite(session, question, turn);
+    // Gated on `turn.nonAnswer` for the same reason `route.ts` gates on its
+    // own `nonAnswer`: a pre-written session must never be set aside. This
+    // harness never drives one, so the gate is always a no-op here, but it
+    // stays in step with the route rather than assuming that away.
+    const setAsideReason = turn.nonAnswer ? turn.setAside : null;
 
     session = await recordConversationTurn(
       supabase as never,
@@ -672,6 +699,7 @@ async function runScriptedSession(options: {
         assistance: [...question.assistance, ...(turn.assistance ? [turn.assistance] : [])],
         nonAnswer: turn.nonAnswer,
         degraded: turn.degraded,
+        setAsideReason,
       },
     );
   }
@@ -724,15 +752,10 @@ describe("adaptive interviewer flow", () => {
     expect(followUp?.askedIntent).toMatchObject({ targetId: openingTargetId });
   });
 
-  // NOT "and returns to the parked target": it does not, and this test never
-  // checked that it did. A park issues `{ kind: "rescue", targetId: <the same
-  // target>, style: "park" }` and a non-answer never sets the row's `answer`,
-  // so the parked row stays the first unanswered row and therefore stays the
-  // question the candidate is shown -- the conversation cannot move off it,
-  // which is the §2.1 blackout spec §8.2 names park as the fix for. Moving it
-  // needs a way for a non-answered row to stop being the current row, which is
-  // a persistence change, not a director one. Tracked in
-  // `final-review-fix-report.md` (I1).
+  // A park issues `{ kind: "rescue", targetId: <the same target>, style:
+  // "park" }`, and the set-aside marker (not `answer`) is what lets the
+  // parked row stop being the current row -- see the inner comment below for
+  // what this test actually asserts about where the conversation lands.
   it("rescues a blanking candidate in coach mode and records the rescue on the question", async () => {
     const session = await runScriptedSession({
       mode: "coach",
@@ -741,24 +764,36 @@ describe("adaptive interviewer flow", () => {
     const rescues = session.questions.flatMap((question) => question.assistance);
     expect(rescues.length).toBeGreaterThan(0);
     expect(rescues.map((rescue) => rescue.style)).toContain("park");
-    // NOT `expect(session.questions.some((question) => question.nonAnswer)).toBe(true)`
-    // (the brief's original line): a rescue continuation after a non-answer
-    // reuses the SAME row rather than opening a new one (unlike a same-target
-    // continuation after a REAL answer -- see `followUpDraftForContinuation`'s
-    // doc comment in route.ts), because a non-answer never sets that row's
-    // `answer` column. So once the candidate recovers, that row's `nonAnswer`
-    // correctly flips to `false` -- it now carries a real, scored answer --
-    // which `interview-coverage.ts`'s `scored` filter and the results UI's
-    // "Not attempted" label both require (neither should treat a genuinely
-    // answered question as unattempted just because it was rescued earlier).
-    // Giving every rescue attempt its own row instead would need a new
-    // migration: the live SQL already refuses a follow-up row whose parent
-    // is itself a follow-up row, so a second consecutive same-target
-    // continuation would hit that wall regardless of answer/non-answer.
-    // Asserting the recovery directly instead: the rescued question ends up
-    // with a real, non-empty answer.
+    // The rescued row is the one that was PARKED, so it correctly stays
+    // unanswered: park sets it aside and moves the interview to a different
+    // target, and this three-answer script has no turns left to come back to
+    // it (spec §8.2, "return later if turns remain"). The candidate's recovery
+    // therefore lands on the destination row, not this one. Before issue #10
+    // was fixed this test asserted the opposite -- that a parked row kept
+    // receiving the candidate's next answer -- which was the blackout bug
+    // itself, not intended behaviour.
     const rescuedQuestion = session.questions.find((question) => question.assistance.length > 0);
-    expect(rescuedQuestion?.answer).toBeTruthy();
+    expect(rescuedQuestion?.setAsideReason).toBe("parked");
+    expect(rescuedQuestion?.answer).toBeNull();
+    const answered = session.questions.filter((question) => question.answer);
+    expect(answered.some((question) => question.id !== rescuedQuestion?.id)).toBe(true);
+  });
+
+  // Issue #10. Four consecutive blackouts in coach mode: narrow rescue, park,
+  // then the rescue budget is spent. The director advances to a second target
+  // and writes its question down -- but the candidate is shown the first row
+  // on every single turn, because a row with no answer is still "the current
+  // question". Asserted on the ROWS the candidate blanked on, not on the text
+  // of the prompts: once unscored attempts are replayed in the transcript, a
+  // re-ask of the SAME row produces fresh phrasing, so distinct message text
+  // proves nothing about which question the candidate was actually served.
+  it("moves the candidate onto a different question after a blackout", async () => {
+    const session = await runScriptedSession({
+      mode: "coach",
+      answers: ["i don't know", "i am having a blackout", "i don't know", "i am having a blackout"],
+    });
+    const blanked = session.questions.filter((question) => question.nonAnswers.length > 0);
+    expect(blanked.length).toBeGreaterThan(1);
   });
 
   it("never scores a non-answer", async () => {
@@ -781,5 +816,48 @@ describe("adaptive interviewer flow", () => {
     });
     const targets = session.blueprint!.targets.filter((target) => target.required).map((target) => target.competencyName);
     expect(targets).toContain("Observability");
+  });
+
+  it("keeps the candidate's unanswered attempts in the transcript", async () => {
+    const session = await runScriptedSession({
+      mode: "coach",
+      answers: ["i don't know", "i am having a blackout", "ok — I owned the design system migration at Acme."],
+    });
+    const said = session.messages.filter((message) => message.role === "candidate").map((message) => message.content);
+    expect(said).toContain("i don't know");
+    expect(said).toContain("i am having a blackout");
+  });
+
+  it("sets a parked target aside as parked and a budget-spent one as skipped", async () => {
+    const coach = await runScriptedSession({
+      mode: "coach",
+      answers: ["i don't know", "i am having a blackout", "i don't know", "i am having a blackout"],
+    });
+    const coachReasons = coach.questions.map((question) => question.setAsideReason).filter(Boolean);
+    expect(coachReasons).toContain("parked");
+
+    const real = await runScriptedSession({
+      mode: "real",
+      answers: ["i don't know", "i am having a blackout", "i don't know"],
+    });
+    const realReasons = real.questions.map((question) => question.setAsideReason).filter(Boolean);
+    expect(realReasons).toContain("rescue-budget-spent");
+    expect(realReasons).not.toContain("parked");
+  });
+
+  it("comes back to a parked target once nothing required is unasked", async () => {
+    const session = await runScriptedSession({
+      mode: "coach",
+      answers: [
+        "i don't know",
+        "i am having a blackout",
+        ...strongAnswers(),
+      ],
+    });
+    // The parked row was returned to: its marker was cleared and it carries a
+    // real answer by the end.
+    const parked = session.questions.find((question) => question.nonAnswers.length > 0);
+    expect(parked?.setAsideAt).toBeNull();
+    expect(parked?.answer).toBeTruthy();
   });
 });

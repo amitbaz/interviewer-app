@@ -314,6 +314,65 @@ describe("mapSession", () => {
     ]);
   });
 
+  it("replays a set-aside row's unscored attempts without also showing its own blanked prompt again", () => {
+    // question-2 was parked after two blackouts: each unscored attempt is
+    // logged in `non_answers` (the row's `prompt` column is overwritten by
+    // each re-ask, so `non_answers` is the only record of what was actually
+    // asked and answered). question-3 is where the director moved the
+    // interview to after parking (issue #10).
+    const session = mapSession(
+      {
+        id: "session-1", user_id: "user-1", kind: "conversation", status: "active",
+        started_at: "2026-08-29T10:00:00.000Z", completed_at: null, exercise: {}, result_summary: {},
+        overall_score: null, created_at: "2026-08-29T10:00:00.000Z", updated_at: "2026-08-29T10:00:00.000Z",
+      },
+      [
+        {
+          id: "question-1", sequence: 1, category: "introduction", competency_id: null,
+          difficulty: "senior", is_follow_up: false, prompt: "Introduce yourself.", answer: "I own frontend architecture.",
+          created_at: "2026-08-29T10:01:00.000Z", answered_at: "2026-08-29T10:02:00.000Z",
+        },
+        {
+          id: "question-2", sequence: 2, category: "experience", competency_id: null,
+          difficulty: "senior", is_follow_up: false,
+          prompt: "Which constraint shaped that decision the most?", answer: null,
+          created_at: "2026-08-29T10:03:00.000Z", answered_at: null,
+          set_aside_at: "2026-08-29T10:05:00.000Z", set_aside_reason: "parked",
+          non_answers: [
+            { prompt: "What surprised you most about that outcome?", answer: "i don't know", at: "2026-08-29T10:03:30.000Z" },
+            { prompt: "Which constraint shaped that decision the most?", answer: "i am having a blackout", at: "2026-08-29T10:04:30.000Z" },
+          ],
+        },
+        {
+          id: "question-3", sequence: 3, category: "behavioral", competency_id: null,
+          difficulty: "senior", is_follow_up: false,
+          prompt: "How did the team respond once that shipped?", answer: null,
+          created_at: "2026-08-29T10:05:00.000Z", answered_at: null,
+        },
+      ],
+      [], [], new Map(),
+    );
+
+    expect(session.messages.map((message) => message.id)).toEqual([
+      "question-1:question",
+      "question-1:answer",
+      "question-2:attempt-0:question",
+      "question-2:attempt-0:answer",
+      "question-2:attempt-1:question",
+      "question-2:attempt-1:answer",
+      "question-3:question",
+    ]);
+    expect(session.messages.map((message) => message.content)).toEqual([
+      "Introduce yourself.",
+      "I own frontend architecture.",
+      "What surprised you most about that outcome?",
+      "i don't know",
+      "Which constraint shaped that decision the most?",
+      "i am having a blackout",
+      "How did the team respond once that shipped?",
+    ]);
+  });
+
   it("orders question evaluations by their persisted question sequence before hydrating results feedback", () => {
     const mapped = mapSession(
       {
@@ -608,10 +667,10 @@ describe("mapSession", () => {
 
   it("rejects a plan that is not the exact five-question backbone before persistence", () => {
     expect(() => assertConversationPlan([
-      { id: "1", sequence: 1, category: "introduction", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "one", answer: null, createdAt: "", askedIntent: null, assistance: [], nonAnswer: false },
-      { id: "2", sequence: 2, category: "experience", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "two", answer: null, createdAt: "", askedIntent: null, assistance: [], nonAnswer: false },
-      { id: "3", sequence: 3, category: "technical", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "three", answer: null, createdAt: "", askedIntent: null, assistance: [], nonAnswer: false },
-      { id: "4", sequence: 4, category: "architecture", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "four", answer: null, createdAt: "", askedIntent: null, assistance: [], nonAnswer: false },
+      { id: "1", sequence: 1, category: "introduction", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "one", answer: null, createdAt: "", askedIntent: null, assistance: [], nonAnswer: false, setAsideAt: null, setAsideReason: null, nonAnswers: [] },
+      { id: "2", sequence: 2, category: "experience", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "two", answer: null, createdAt: "", askedIntent: null, assistance: [], nonAnswer: false, setAsideAt: null, setAsideReason: null, nonAnswers: [] },
+      { id: "3", sequence: 3, category: "technical", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "three", answer: null, createdAt: "", askedIntent: null, assistance: [], nonAnswer: false, setAsideAt: null, setAsideReason: null, nonAnswers: [] },
+      { id: "4", sequence: 4, category: "architecture", competencyId: null, competencyName: null, difficulty: "senior", isFollowUp: false, prompt: "four", answer: null, createdAt: "", askedIntent: null, assistance: [], nonAnswer: false, setAsideAt: null, setAsideReason: null, nonAnswers: [] },
     ])).toThrow("five-question backbone");
   });
 
@@ -702,6 +761,9 @@ describe("mapSession", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
         {
           id: "question-2",
@@ -723,6 +785,9 @@ describe("mapSession", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
         {
           id: "question-3",
@@ -744,6 +809,9 @@ describe("mapSession", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
         {
           id: "question-4",
@@ -765,6 +833,9 @@ describe("mapSession", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
         {
           id: "question-5",
@@ -786,6 +857,9 @@ describe("mapSession", () => {
           askedIntent: null,
           assistance: [],
           nonAnswer: false,
+          setAsideAt: null,
+          setAsideReason: null,
+          nonAnswers: [],
         },
       ],
       roundId: "tech-lead",
@@ -953,6 +1027,9 @@ describe("mapSession", () => {
       askedIntent: null,
       assistance: [],
       nonAnswer: false,
+      setAsideAt: null,
+      setAsideReason: null,
+      nonAnswers: [],
     });
     const supabase = {
       rpc: async (name: string, payload: unknown) => {
@@ -1114,6 +1191,7 @@ describe("mapSession", () => {
         assistance: [],
         nonAnswer: false,
         degraded: false,
+        setAsideReason: null,
       },
     );
 
@@ -1187,6 +1265,7 @@ describe("mapSession", () => {
         assistance: [],
         nonAnswer: false,
         degraded: false,
+        setAsideReason: null,
       },
     );
 
@@ -1228,6 +1307,7 @@ describe("mapSession", () => {
         assistance: [{ style: "narrow", at: "2026-09-01T00:00:00.000Z" }],
         nonAnswer: false,
         degraded: true,
+        setAsideReason: null,
       },
     );
 
@@ -1374,6 +1454,9 @@ function practiceBlueprint(questionCount: number): InterviewBlueprint {
       askedIntent: null,
       assistance: [],
       nonAnswer: false,
+      setAsideAt: null,
+      setAsideReason: null,
+      nonAnswers: [],
     })),
     // A practice-plan blueprint never consumes the round/coverage-target system.
     roundId: "tech-lead",

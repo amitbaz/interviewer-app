@@ -4,6 +4,7 @@ import type {
   Intent,
   InterviewBlueprint,
   PlannedQuestion,
+  SetAsideReason,
   TargetState,
   TargetStatus,
 } from "@/lib/types";
@@ -44,6 +45,7 @@ function statusFor(
   target: CoverageTarget,
   intents: Intent[],
   answeredEvaluations: Evaluation[],
+  setAside: SetAsideReason | null,
 ): TargetStatus {
   if (intents.length === 0) return "unasked";
 
@@ -54,8 +56,12 @@ function statusFor(
     && target.expectedSignals.every((signal) => signalsPresent.has(signal));
   if (covered) return "satisfied";
 
-  const last = intents[intents.length - 1];
-  if (last.kind === "rescue" && last.style === "park") return "parked";
+  // Read off the persisted marker, not off the newest intent. An intent is
+  // overwritten every time its row is re-asked, so the old last-intent rule
+  // could report `parked` for a target that had since been answered, and could
+  // never report `skipped` at all (spec §9.3 rule 5).
+  if (setAside === "parked") return "parked";
+  if (setAside === "rescue-budget-spent") return "skipped";
   return "open";
 }
 
@@ -83,13 +89,45 @@ export function deriveCoverageState(
     const relevantEvaluations = evaluations.filter(
       (item) => item.questionId != null && scoredIds.has(item.questionId),
     );
+    const setAside = forTarget.find((question) => question.setAsideAt !== null)?.setAsideReason ?? null;
 
     return {
       target,
-      status: statusFor(target, intents, relevantEvaluations),
+      status: statusFor(target, intents, relevantEvaluations, setAside),
       turnsSpent: forTarget.length,
       rescuesSpent: forTarget.reduce((total, question) => total + question.assistance.length, 0),
       askedIntents: intents,
     };
   });
+}
+
+/** One coverage target the interview finished without covering, and why. */
+export type UncoveredTarget = {
+  targetId: string;
+  competencyName: string | null;
+  reason: string;
+};
+
+const UNCOVERED_REASONS: Record<Exclude<TargetStatus, "satisfied">, string> = {
+  unasked: "Never reached before the interview ended.",
+  open: "Asked, but the expected signals never came out.",
+  parked: "Set aside when the candidate could not answer, and never returned to.",
+  skipped: "Set aside after the rescue attempts for it were spent.",
+};
+
+/**
+ * What the session did not cover, in target order (spec §9.3 rule 5). Everything
+ * short of `satisfied` counts: at close there is no difference between a target
+ * never asked and one asked without result, other than the reason to report.
+ * Callers render this; it is deliberately plain text rather than a status code,
+ * because its only consumer is prose shown to the candidate.
+ */
+export function uncoveredTargets(states: TargetState[]): UncoveredTarget[] {
+  return states
+    .filter((state) => state.status !== "satisfied")
+    .map((state) => ({
+      targetId: state.target.id,
+      competencyName: state.target.competencyName,
+      reason: UNCOVERED_REASONS[state.status as Exclude<TargetStatus, "satisfied">],
+    }));
 }

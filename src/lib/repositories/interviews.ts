@@ -14,11 +14,14 @@ import type {
   InterviewMode,
   InterviewSession,
   Message,
+  NonAnswerRecord,
   PlannedQuestion,
   PracticeSessionContext,
   RoundId,
   SessionCareerContext,
+  SetAsideReason,
 } from "@/lib/types";
+import { isAwaitingAnswer } from "@/lib/interview-current-question";
 import { RepositoryError } from "@/lib/repositories/profile";
 
 type Row = Record<string, unknown>;
@@ -88,6 +91,9 @@ function mapQuestion(row: Row, competencyNames: Map<string, string>): PlannedQue
     askedIntent: (row.asked_intent as Intent | null) ?? null,
     assistance: Array.isArray(row.assistance) ? (row.assistance as AssistanceRecord[]) : [],
     nonAnswer: row.non_answer === true,
+    setAsideAt: typeof row.set_aside_at === "string" ? row.set_aside_at : null,
+    setAsideReason: (row.set_aside_reason as PlannedQuestion["setAsideReason"]) ?? null,
+    nonAnswers: Array.isArray(row.non_answers) ? (row.non_answers as NonAnswerRecord[]) : [],
     objective: typeof row.objective === "string" && row.objective.trim() ? row.objective.trim() : undefined,
     evidenceIds: stringArray(row.evidence_ids),
     expectedSignals: stringArray(row.expected_signals),
@@ -175,26 +181,56 @@ function mapCheckpoint(row: Row): HandsOnCheckpoint {
 
 /**
  * Renders the planned questions as a conversation transcript, stopping after
- * the first unanswered question. The whole plan is persisted when the session
- * starts, but revealing it at once would show the candidate every upcoming
- * question (and, through the blueprint panel, its expected signals) before
- * they answer the current one. Completed sessions are unaffected: every
- * question carries an answer, so nothing is trimmed.
+ * the question the candidate is currently on. The whole plan is persisted when
+ * the session starts, but revealing it at once would show the candidate every
+ * upcoming question (and, through the blueprint panel, its expected signals)
+ * before they answer the current one.
+ *
+ * A row can carry more than one exchange: each unscored attempt overwrites the
+ * row's `prompt`, so the prompts and answers of those attempts are replayed
+ * from `nonAnswers` before the row's current prompt. Without that, a candidate
+ * who blanked twice and then recovered would see a transcript in which neither
+ * blank ever happened.
  */
 function transcriptFor(questions: PlannedQuestion[], answerTimes: Map<string, string>): Message[] {
-  const firstUnanswered = questions.findIndex((question) => !question.answer);
-  const revealed = firstUnanswered === -1 ? questions : questions.slice(0, firstUnanswered + 1);
+  const current = questions.findIndex(isAwaitingAnswer);
+  const revealed = current === -1 ? questions : questions.slice(0, current + 1);
   return revealed.flatMap((question) => {
-    const interviewer = {
+    const attempts: Message[] = question.nonAnswers.flatMap((record, index) => [
+      {
+        id: `${question.id}:attempt-${index}:question`,
+        role: "interviewer" as const,
+        content: record.prompt,
+        createdAt: record.at,
+      },
+      {
+        id: `${question.id}:attempt-${index}:answer`,
+        role: "candidate" as const,
+        content: record.answer,
+        createdAt: record.at,
+      },
+    ]);
+    const interviewer: Message = {
       id: `${question.id}:question`,
-      role: "interviewer" as const,
+      role: "interviewer",
       // Null until the interviewer authors it (revealFirstQuestion or a
       // later turn); render an empty bubble rather than widen Message.
       content: question.prompt ?? "",
       createdAt: question.createdAt,
     };
-    if (!question.answer) return [interviewer];
-    return [interviewer, {
+    // A set-aside row's current prompt is already on screen: it was copied
+    // into the last `nonAnswers` entry above as that attempt's question, so
+    // emitting the row's own bubble here would show the candidate the exact
+    // same question twice in a row, right after they blanked on it (issue
+    // #10). Guarded on `attempts.length > 0` rather than dropping the row
+    // outright: today a set-aside row always has at least one attempt
+    // (`route.ts` only sends a set-aside reason when `nonAnswer` is true, and
+    // the SQL appends to `non_answers` on exactly that condition), but if
+    // that ever stopped holding, the bare form would silently erase the row
+    // from the transcript instead of just losing this de-dup.
+    if (question.setAsideAt !== null && attempts.length > 0) return attempts;
+    if (!question.answer) return [...attempts, interviewer];
+    return [...attempts, interviewer, {
       id: `${question.id}:answer`,
       role: "candidate" as const,
       content: question.answer,
@@ -293,6 +329,7 @@ export function mapSession(
       id: "", sequence: 0, category: "communication", competencyId: null, competencyName: null,
       difficulty: "foundational", isFollowUp: false, prompt: "", answer: null, createdAt: "",
       askedIntent: null, assistance: [], nonAnswer: false,
+      setAsideAt: null, setAsideReason: null, nonAnswers: [],
     });
     });
   const checkpoints = [...checkpointRows]
@@ -689,6 +726,8 @@ export type ConversationTurnPersistence = {
   nonAnswer: boolean;
   /** True when this turn fell back to a deterministic evaluation or line. */
   degraded: boolean;
+  /** Set when this turn finishes the answered row without an answer; null otherwise. */
+  setAsideReason: SetAsideReason | null;
 };
 
 /** Atomically records answer evidence and persists the exact next interviewer question. */
@@ -718,6 +757,7 @@ export async function recordConversationTurn(
     p_assistance: next.assistance,
     p_non_answer: next.nonAnswer,
     p_degraded: next.degraded,
+    p_set_aside_reason: next.setAsideReason,
   });
   if (error || !data) throw new RepositoryError("Could not record your interview turn.", error?.code ?? "NO_OWNED_ROW");
   const result = Array.isArray(data) ? data[0] as Row | undefined : data as Row;

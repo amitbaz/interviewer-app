@@ -36,6 +36,7 @@ import type {
   QuestionCategory,
   RescueStyle,
   RoundId,
+  SetAsideReason,
   GroundedEvaluation,
 } from "@/lib/types";
 
@@ -862,6 +863,9 @@ function normalizeBlueprintQuestion(
     askedIntent: null,
     assistance: [],
     nonAnswer: false,
+    setAsideAt: null,
+    setAsideReason: null,
+    nonAnswers: [],
   };
 }
 
@@ -1335,6 +1339,9 @@ function buildFallbackPracticeBlueprint(
       askedIntent: null,
       assistance: [],
       nonAnswer: false,
+      setAsideAt: null,
+      setAsideReason: null,
+      nonAnswers: [],
     };
   });
 
@@ -1736,6 +1743,8 @@ export type NextTurnResult = {
   assistance: AssistanceRecord | null;
   targetId: string | null;
   degraded: boolean;
+  /** How this turn finishes the answered row without an answer, or null. */
+  setAside: SetAsideReason | null;
 };
 
 function targetById(blueprint: InterviewBlueprint, id: string | null): CoverageTarget | null {
@@ -1838,6 +1847,7 @@ export async function nextTurn(input: NextTurnInput): Promise<NextTurnResult> {
     assistance: decision.assistance,
     targetId: nextTargetId,
     degraded,
+    setAside: decision.setAside,
   };
 }
 

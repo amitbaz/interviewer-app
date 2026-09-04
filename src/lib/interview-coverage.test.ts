@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canContinueOnAnsweredRow, deriveCoverageState, rescuesSpentInSession, targetIdOf } from "@/lib/interview-coverage";
+import { canContinueOnAnsweredRow, deriveCoverageState, rescuesSpentInSession, targetIdOf, uncoveredTargets } from "@/lib/interview-coverage";
 import type { CoverageTarget, Evaluation, PlannedQuestion } from "@/lib/types";
 
 function target(id: string, overrides: Partial<CoverageTarget> = {}): CoverageTarget {
@@ -33,6 +33,9 @@ function question(id: string, overrides: Partial<PlannedQuestion> = {}): Planned
     askedIntent: null,
     assistance: [],
     nonAnswer: false,
+    setAsideAt: null,
+    setAsideReason: null,
+    nonAnswers: [],
     ...overrides,
   };
 }
@@ -76,12 +79,50 @@ describe("deriveCoverageState", () => {
     expect(complete[0].status).toBe("satisfied");
   });
 
-  it("marks a target parked when its last intent was a park rescue", () => {
+  it("marks a target parked when its row was set aside to come back to", () => {
     const asked = question("q1", {
       askedIntent: { kind: "rescue", targetId: "a", style: "park", hook: null },
+      setAsideAt: "2026-09-01T00:00:00.000Z",
+      setAsideReason: "parked",
     });
     const state = deriveCoverageState([target("a")], [asked], []);
     expect(state[0].status).toBe("parked");
+  });
+
+  it("marks a target parked when one of its rows was set aside to come back to", () => {
+    const state = deriveCoverageState(
+      [target("a")],
+      [question("a", { askedIntent: { kind: "open", targetId: "a" }, setAsideAt: "2026-09-04T09:01:00.000Z", setAsideReason: "parked" })],
+      [],
+    );
+    expect(state[0].status).toBe("parked");
+  });
+
+  it("marks a target skipped when it was set aside for good", () => {
+    const state = deriveCoverageState(
+      [target("a")],
+      [question("a", { askedIntent: { kind: "open", targetId: "a" }, setAsideAt: "2026-09-04T09:01:00.000Z", setAsideReason: "rescue-budget-spent" })],
+      [],
+    );
+    expect(state[0].status).toBe("skipped");
+  });
+
+  it("does not mark the destination of a park as parked itself", () => {
+    const state = deriveCoverageState(
+      [target("b")],
+      [question("b", { askedIntent: { kind: "rescue", targetId: "b", style: "park", hook: null, parkedTargetId: "a" } })],
+      [],
+    );
+    expect(state[0].status).toBe("open");
+  });
+
+  it("reopens a target whose row was asked again", () => {
+    const state = deriveCoverageState(
+      [target("a")],
+      [question("a", { askedIntent: { kind: "advance", targetId: "a", reason: "satisfied" }, setAsideAt: null, setAsideReason: null })],
+      [],
+    );
+    expect(state[0].status).toBe("open");
   });
 
   it("collects every intent already issued for a target", () => {
@@ -118,6 +159,42 @@ describe("deriveCoverageState", () => {
     });
     const state = deriveCoverageState([target("a")], [blank], []);
     expect(state[0].status).toBe("open");
+  });
+});
+
+describe("uncoveredTargets", () => {
+  it("reports every target the session closed without covering, with a reason", () => {
+    const states = deriveCoverageState(
+      [target("a"), target("b"), target("c"), target("d")],
+      [
+        question("a", { askedIntent: { kind: "open", targetId: "a" } }),
+        question("b", {
+          askedIntent: { kind: "open", targetId: "b" },
+          setAsideAt: "2026-09-04T09:01:00.000Z",
+          setAsideReason: "parked",
+        }),
+        question("c", {
+          askedIntent: { kind: "open", targetId: "c" },
+          setAsideAt: "2026-09-04T09:02:00.000Z",
+          setAsideReason: "rescue-budget-spent",
+        }),
+        question("d"),
+      ],
+      [],
+    );
+    expect(uncoveredTargets(states).map((item) => item.targetId)).toEqual(["a", "b", "c", "d"]);
+    expect(uncoveredTargets(states)[1].reason).toBe(
+      "Set aside when the candidate could not answer, and never returned to.",
+    );
+  });
+
+  it("leaves satisfied targets out of the report", () => {
+    const states = deriveCoverageState(
+      [target("a")],
+      [question("a", { askedIntent: { kind: "open", targetId: "a" } })],
+      [evaluation("a", ["ownership", "impact"])],
+    );
+    expect(uncoveredTargets(states)).toEqual([]);
   });
 });
 

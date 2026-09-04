@@ -7,6 +7,7 @@ import type {
   ModePolicy,
   ProbeAspect,
   RescueStyle,
+  SetAsideReason,
   TargetState,
 } from "@/lib/types";
 
@@ -36,6 +37,12 @@ export type DirectorDecision = {
   intent: Intent;
   /** Non-null exactly when the intent spends rescue budget. */
   assistance: AssistanceRecord | null;
+  /**
+   * How this decision finishes the row the candidate just failed to answer, or
+   * null when it finishes nothing. Persisted as the row's set-aside reason,
+   * which is what stops it from being served again (issue #10).
+   */
+  setAside: SetAsideReason | null;
 };
 
 /**
@@ -55,9 +62,17 @@ function askedAspects(state: TargetState): Set<ProbeAspect> {
   );
 }
 
+/**
+ * Rescue styles already spent ON this target. A `park` intent is stored against
+ * the target it moved TO, not the one it set aside, so it is excluded here --
+ * it is not a rescue of the target whose row happens to carry it. Parking the
+ * same target twice is prevented by its per-question rescue budget instead.
+ */
 function usedRescueStyles(state: TargetState): Set<RescueStyle> {
   return new Set(
-    state.askedIntents.flatMap((intent) => (intent.kind === "rescue" ? [intent.style] : [])),
+    state.askedIntents.flatMap((intent) =>
+      intent.kind === "rescue" && !intent.parkedTargetId ? [intent.style] : [],
+    ),
   );
 }
 
@@ -76,14 +91,24 @@ function parkedTargets(input: DirectorInput): TargetState[] {
   return input.states.filter((state) => state.status === "parked");
 }
 
-function advance(input: DirectorInput, reason: AdvanceReason): DirectorDecision | null {
-  const next = unaskedTargets(input)[0] ?? parkedTargets(input)[0] ?? null;
-  if (!next) return null;
-  return { intent: { kind: "advance", targetId: next.target.id, reason }, assistance: null };
+/**
+ * The next target to work on, never the one being left. Excluding it matters
+ * because a just-parked target is itself `parked`, so the parked fallback below
+ * would otherwise hand back the very target the interview is trying to escape.
+ */
+function nextTarget(input: DirectorInput, leaving: string | null): TargetState | null {
+  const elsewhere = (state: TargetState) => state.target.id !== leaving;
+  return unaskedTargets(input).find(elsewhere) ?? parkedTargets(input).find(elsewhere) ?? null;
 }
 
-function closing(input: DirectorInput): DirectorDecision {
-  return { intent: { kind: input.round.closing } as Intent, assistance: null };
+function advance(input: DirectorInput, reason: AdvanceReason, setAside: SetAsideReason | null = null): DirectorDecision | null {
+  const next = nextTarget(input, input.currentTargetId);
+  if (!next) return null;
+  return { intent: { kind: "advance", targetId: next.target.id, reason }, assistance: null, setAside };
+}
+
+function closing(input: DirectorInput, setAside: SetAsideReason | null = null): DirectorDecision {
+  return { intent: { kind: input.round.closing } as Intent, assistance: null, setAside };
 }
 
 /**
@@ -128,12 +153,28 @@ export function decideIntent(input: DirectorInput): DirectorDecision {
     const style = nextRescueStyle(state, input.policy);
 
     if (questionBudget && sessionBudget && style) {
-      return {
-        intent: { kind: "rescue", targetId: state.target.id, style, hook: style === "hook" ? hookFor(state) : null },
-        assistance: { style, at: input.now },
-      };
+      if (style !== "park") {
+        return {
+          intent: { kind: "rescue", targetId: state.target.id, style, hook: style === "hook" ? hookFor(state) : null },
+          assistance: { style, at: input.now },
+          setAside: null,
+        };
+      }
+      // Park is "acknowledge, move to another target, come back later if turns
+      // remain" (spec §8.2), so it only exists when there is another target.
+      // With nowhere to go, "I'll come back to it" would re-ask the same
+      // question -- the exact blackout this move exists to prevent.
+      const destination = nextTarget(input, state.target.id);
+      if (destination) {
+        return {
+          intent: { kind: "rescue", targetId: destination.target.id, style: "park", hook: null, parkedTargetId: state.target.id },
+          assistance: { style: "park", at: input.now },
+          setAside: "parked",
+        };
+      }
     }
-    return advance(input, "rescue-budget-spent") ?? closing(input);
+    return advance(input, "rescue-budget-spent", "rescue-budget-spent")
+      ?? closing(input, "rescue-budget-spent");
   }
 
   // Rule 4: unasked required coverage outranks deepening when turns run short.
@@ -149,7 +190,7 @@ export function decideIntent(input: DirectorInput): DirectorDecision {
   }
 
   if (state.status === "unasked") {
-    return { intent: { kind: "open", targetId: state.target.id }, assistance: null };
+    return { intent: { kind: "open", targetId: state.target.id }, assistance: null, setAside: null };
   }
 
   // Every intent below deepens the current target, and after a real answer
@@ -161,7 +202,7 @@ export function decideIntent(input: DirectorInput): DirectorDecision {
   const unsupported = input.unsupportedClaims[0];
   const alreadyChallenged = state.askedIntents.some((intent) => intent.kind === "challenge" && intent.claim === unsupported);
   if (unsupported && !alreadyChallenged && input.round.moves.includes("challenge")) {
-    return { intent: { kind: "challenge", targetId: state.target.id, claim: unsupported }, assistance: null };
+    return { intent: { kind: "challenge", targetId: state.target.id, claim: unsupported }, assistance: null, setAside: null };
   }
 
   // Rule 1: never repeat an intent already issued for this target.
@@ -171,6 +212,7 @@ export function decideIntent(input: DirectorInput): DirectorDecision {
     return {
       intent: { kind: "probe", targetId: state.target.id, aspect, basis: input.answer },
       assistance: null,
+      setAside: null,
     };
   }
 

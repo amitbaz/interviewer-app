@@ -48,6 +48,9 @@ const planned = (overrides: Partial<PlannedQuestion>): PlannedQuestion => ({
   askedIntent: null,
   assistance: [],
   nonAnswer: false,
+  setAsideAt: null,
+  setAsideReason: null,
+  nonAnswers: [],
   ...overrides,
 });
 
@@ -294,6 +297,9 @@ function answeredQuestion(id: string, intent: Intent, overrides: Partial<Planned
     askedIntent: intent,
     assistance: [],
     nonAnswer: false,
+    setAsideAt: null,
+    setAsideReason: null,
+    nonAnswers: [],
     ...overrides,
   };
 }
