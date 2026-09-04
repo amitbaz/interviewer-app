@@ -7,7 +7,7 @@ import type {
   Opportunity,
   PracticeRecommendation,
   Profile,
-  ProgressSnapshot,
+  ReadinessModel,
 } from "@/lib/types";
 import { HomeView } from "@/app/views/home-view";
 
@@ -30,15 +30,14 @@ function profile(overrides: Partial<Profile> = {}): Profile {
   };
 }
 
-function progress(overrides: Partial<ProgressSnapshot> = {}): ProgressSnapshot {
+function readinessModel(overrides: Partial<ReadinessModel> = {}): ReadinessModel {
   return {
-    readiness: null,
-    latestScore: null,
-    trend: null,
-    recentScores: [],
-    strongest: null,
-    weakest: null,
-    recurringWeaknesses: [],
+    overall: null,
+    overallConfidence: null,
+    overallTrend: "unresolved",
+    dimensions: [],
+    unmappedEvidenceCount: 0,
+    computedAt: "2026-08-29T10:00:00.000Z",
     ...overrides,
   };
 }
@@ -140,7 +139,7 @@ function dashboard(overrides: Partial<CareerDashboard> = {}): CareerDashboard {
   return {
     profile: profile(),
     coachMode: "demo",
-    progress: progress(),
+    readiness: readinessModel(),
     recentSessions: [],
     opportunities: [],
     upcomingOpportunities: [],
@@ -285,13 +284,13 @@ describe("HomeView", () => {
   });
 
   it("shows an honest empty state for progress when there is no readiness score yet", () => {
-    renderHome({ progress: progress({ readiness: null }) });
+    renderHome({ readiness: readinessModel({ overall: null }) });
 
     expect(screen.getByText(/complete your first practice session/i)).toBeInTheDocument();
   });
 
-  it("shows the readiness score when progress data exists", () => {
-    renderHome({ progress: progress({ readiness: 81, trend: "improving" }) });
+  it("shows the readiness score when readiness data exists", () => {
+    renderHome({ readiness: readinessModel({ overall: 81, overallTrend: "improving" }) });
 
     expect(screen.getByText(/81/)).toBeInTheDocument();
   });

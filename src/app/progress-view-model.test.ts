@@ -1,46 +1,70 @@
 import { describe, expect, it } from "vitest";
-import type { Competency, ProgressSnapshot } from "@/lib/types";
-import { progressViewModel } from "@/app/progress-view-model";
+import type { ReadinessModel } from "@/lib/types";
+import { readinessViewModel } from "@/app/progress-view-model";
 
-function competency(overrides: Partial<Competency> = {}): Competency {
+function readinessModel(overrides: Partial<ReadinessModel> = {}): ReadinessModel {
   return {
-    id: "competency-1",
-    name: "System design",
-    relevance: 5,
-    expectedLevel: "senior",
-    estimatedLevel: "senior",
-    confidence: "high",
-    lastPracticedAt: "2026-08-29T10:00:00.000Z",
-    questionCount: 4,
-    averageScore: 4.2,
-    recentScore: 4.5,
-    strengths: ["Frames trade-offs."],
-    weaknesses: ["Needs crisper sequencing."],
+    overall: null,
+    overallConfidence: null,
+    overallTrend: "unresolved",
+    dimensions: [],
+    unmappedEvidenceCount: 0,
+    computedAt: "2026-08-29T10:00:00.000Z",
     ...overrides,
   };
 }
 
-describe("progressViewModel", () => {
-  it("uses the server snapshot as the single source of readiness and weakest focus", () => {
-    const snapshot: ProgressSnapshot = {
-      readiness: 81,
-      latestScore: 7,
-      trend: "baseline",
-      recentScores: [7],
-      strongest: competency({ id: "strongest", name: "React architecture", averageScore: 9.1 }),
-      weakest: competency({ id: "weakest", name: "Communication", averageScore: 3.3 }),
-      recurringWeaknesses: ["Lead with the decision."],
-    };
-
-    expect(progressViewModel(snapshot)).toEqual({
-      hasEvidence: true,
-      readiness: 81,
-      weakest: expect.objectContaining({ id: "weakest", name: "Communication" }),
+describe("readinessViewModel", () => {
+  it("exposes the overall readiness score and the weakest confident dimension", () => {
+    const model = readinessModel({
+      overall: 72,
+      overallConfidence: "medium",
+      dimensions: [
+        {
+          dimension: "backend",
+          score: 88,
+          confidence: "high",
+          trend: "stable",
+          evidenceCount: 4,
+          totalWeight: 4,
+          contributions: [],
+        },
+        {
+          dimension: "system-design",
+          score: 41,
+          confidence: "medium",
+          trend: "stable",
+          evidenceCount: 2,
+          totalWeight: 2,
+          contributions: [],
+        },
+        // No evidence at all -- an unknown, not a weakness, so it must
+        // never be picked over a lower-scoring but confident dimension.
+        {
+          dimension: "communication",
+          score: null,
+          confidence: null,
+          trend: "unresolved",
+          evidenceCount: 0,
+          totalWeight: 0,
+          contributions: [],
+        },
+      ],
     });
+
+    const view = readinessViewModel(model);
+
+    expect(view.hasEvidence).toBe(true);
+    expect(view.readiness).toBe(72);
+    expect(view.weakest?.dimension).toBe("system-design");
   });
 
-  it("returns the empty-state model when no progress snapshot is available", () => {
-    expect(progressViewModel(null)).toEqual({
+  it("reports no evidence when nothing has been graded yet", () => {
+    expect(readinessViewModel(readinessModel()).hasEvidence).toBe(false);
+  });
+
+  it("returns the empty-state model when no readiness model is available", () => {
+    expect(readinessViewModel(null)).toEqual({
       hasEvidence: false,
       readiness: null,
       weakest: null,

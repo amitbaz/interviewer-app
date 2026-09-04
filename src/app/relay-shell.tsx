@@ -51,11 +51,11 @@ import type {
   OpportunityEvent,
   OpportunityStatus,
   Profile,
-  ProgressSnapshot,
+  ReadinessModel,
   UpdateOpportunityDetailsInput,
 } from "@/lib/types";
 import { profileReadinessCopy } from "@/app/profile-readiness";
-import { progressViewModel } from "@/app/progress-view-model";
+import { readinessViewModel } from "@/app/progress-view-model";
 import { canExplicitlyCompleteConversation } from "@/lib/conversation-completion";
 import { createBrowserSupabaseClient } from "@/lib/supabase/client";
 import { MAX_CV_PDF_BYTES } from "@/lib/upload-limits";
@@ -102,9 +102,9 @@ const EMPTY_OBSERVATIONS: ObservationsOverview = { active: [], history: [] };
  * vs. home branch (and carries `demoMode`, which reflects process
  * configuration rather than Career Brain data); when a profile exists,
  * `/api/career/dashboard` -- the single canonical Career Brain read model --
- * is fetched for progress, sessions, opportunities, observations, stories,
+ * is fetched for readiness, sessions, opportunities, observations, stories,
  * and the current practice recommendation. Replaces the old `loadCoachData`,
- * which read progress/sessions from `GET /api/interview`; that endpoint is
+ * which read readiness/sessions from `GET /api/interview`; that endpoint is
  * still used for interview actions (`POST /api/interview`), just no longer
  * for the shell's bootstrapping read model.
  *
@@ -127,34 +127,36 @@ async function loadCareerData(): Promise<CareerData> {
   return { profile: dashboard.profile, demoMode: profileResult.demoMode, dashboard, stories, observations };
 }
 
-function progressTrendLabel(trend: ProgressSnapshot["trend"]): string | null {
+function progressTrendLabel(trend: ReadinessModel["overallTrend"]): string {
   switch (trend) {
-    case "baseline":
-      return "Baseline established";
     case "improving":
       return "Improving";
     case "stable":
       return "Stable";
-    case "declining":
+    case "worsening":
       return "Needs attention";
-    default:
-      return null;
+    case "unresolved":
+      return "Not enough evidence yet";
   }
 }
 
-function progressTrendDescription(trend: ProgressSnapshot["trend"]): string {
+function progressTrendDescription(trend: ReadinessModel["overallTrend"]): string {
   switch (trend) {
-    case "baseline":
-      return "Your first completed session sets the starting point for future comparisons.";
     case "improving":
       return "Your latest sessions are trending upward against your earlier practice history.";
     case "stable":
       return "Your recent sessions are holding steady, which makes focused practice the next lever.";
-    case "declining":
-      return "Recent sessions dipped below your earlier baseline, so revisit the recurring weak spots next.";
-    default:
-      return "Complete a few sessions to unlock a clearer progress trend.";
+    case "worsening":
+      return "Recent sessions dipped below your earlier trend, so revisit the recurring weak spots next.";
+    case "unresolved":
+      return "There isn't enough evidence yet to call a trend -- keep practicing to build a reliable signal.";
   }
+}
+
+/** Turns a machine dimension id like `"system-design"` into display text like `"System design"`. */
+function humanizeDimension(dimension: string): string {
+  const spaced = dimension.replace(/-/g, " ");
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
 function evidenceLabel(item: EvidenceItem): string {
@@ -228,7 +230,7 @@ export function RelayShell() {
   const [observations, setObservations] = useState<ObservationsOverview>(EMPTY_OBSERVATIONS);
   const [session, setSession] = useState<InterviewSession | null>(null);
   const [sessions, setSessions] = useState<InterviewSession[]>([]);
-  const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
+  const [readinessModel, setReadinessModel] = useState<ReadinessModel | null>(null);
   const [view, setView] = useState<View>("onboarding");
   const [authState, setAuthState] = useState<AuthState>("loading");
   const [coachDataLoading, setCoachDataLoading] = useState(true);
@@ -284,7 +286,7 @@ export function RelayShell() {
       setDemoMode(careerData.demoMode);
       setDashboard(careerData.dashboard);
       setSessions(careerData.dashboard?.recentSessions ?? []);
-      setProgress(careerData.dashboard?.progress ?? null);
+      setReadinessModel(careerData.dashboard?.readiness ?? null);
       setStories(careerData.stories);
       setObservations(careerData.observations);
       setView(careerData.profile ? "home" : "onboarding");
@@ -292,7 +294,7 @@ export function RelayShell() {
     }).catch((caught) => {
       if (!active) return;
       if (caught instanceof ApiError && caught.status === 401) {
-        setProfile(null); setProgress(null); setSession(null); setSessions([]); setDashboard(null); setStories([]); setObservations(EMPTY_OBSERVATIONS); setView("onboarding"); setAuthState("signed-out"); setCoachDataLoading(false);
+        setProfile(null); setReadinessModel(null); setSession(null); setSessions([]); setDashboard(null); setStories([]); setObservations(EMPTY_OBSERVATIONS); setView("onboarding"); setAuthState("signed-out"); setCoachDataLoading(false);
         return;
       }
       setError(caught instanceof Error ? caught.message : "Could not open your coach data.");
@@ -304,8 +306,8 @@ export function RelayShell() {
   /**
    * Re-fetches the canonical Career Brain dashboard after a mutation
    * (interview completion, an opportunity change) and mirrors it into the
-   * shell's flat `profile`/`sessions`/`progress` state so every view stays
-   * consistent with a single source of truth.
+   * shell's flat `profile`/`sessions`/`readinessModel` state so every view
+   * stays consistent with a single source of truth.
    */
   async function refreshDashboard(): Promise<CareerDashboard | null> {
     try {
@@ -313,7 +315,7 @@ export function RelayShell() {
       setProfile(next.profile);
       setDashboard(next);
       setSessions(next.recentSessions);
-      setProgress(next.progress);
+      setReadinessModel(next.readiness);
       return next;
     } catch (caught) {
       handleRequestError(caught, "Could not refresh your dashboard.");
@@ -345,7 +347,7 @@ export function RelayShell() {
     }
   }
 
-  const { hasEvidence, readiness, weakest } = progressViewModel(progress);
+  const { hasEvidence, readiness, weakest } = readinessViewModel(readinessModel);
   const handsOn = session?.kind === "hands-on";
   const exercise = handsOn ? session?.exercise as HandsOnExercise : null;
   const sessionSummary = session ? String(session.resultSummary.summary ?? "Complete a few questions to receive personalized feedback.") : "";
@@ -356,13 +358,13 @@ export function RelayShell() {
   // would leave the control permanently dead for every 2-4 question format.
   const canFinishConversation = session ? canExplicitlyCompleteConversation(session) : false;
   const conversationLabel = session?.practicePlanId ? "Practice session" : "Mixed interview";
-  const progressTrend = progress?.trend ?? null;
+  const progressTrend = readinessModel?.overallTrend ?? "unresolved";
   const progressTrendName = progressTrendLabel(progressTrend);
-  const latestScore = progress?.latestScore ?? null;
-  const strongest = progress?.strongest ?? null;
-  const recurringWeaknesses = progress?.recurringWeaknesses ?? [];
-  const progressHasBaseline = progressTrend === "baseline";
-  const progressHasRecurringWeaknesses = recurringWeaknesses.length > 0;
+  const overallConfidence = readinessModel?.overallConfidence ?? null;
+  const confidenceLabel = overallConfidence
+    ? overallConfidence.charAt(0).toUpperCase() + overallConfidence.slice(1)
+    : "Not enough evidence yet";
+  const weakestDimensionLabel = weakest ? humanizeDimension(weakest.dimension) : null;
   const profileReadinessNote = profileReadinessCopy(profile?.readiness);
 
   function navigate(next: View) {
@@ -375,7 +377,7 @@ export function RelayShell() {
   }
   function handleRequestError(caught: unknown, fallback: string) {
     if (caught instanceof ApiError && caught.status === 401) {
-      setProfile(null); setProgress(null); setSession(null); setSessions([]); setView("onboarding"); setAuthState("signed-out");
+      setProfile(null); setReadinessModel(null); setSession(null); setSessions([]); setView("onboarding"); setAuthState("signed-out");
       return;
     }
     setError(caught instanceof Error ? caught.message : fallback);
@@ -702,7 +704,7 @@ export function RelayShell() {
     try {
       const { error: authError } = await supabase.current.auth.signOut();
       if (authError) throw authError;
-      setProfile(null); setProgress(null); setSession(null); setSessions([]); setAnswer(""); setCode(""); setCheckpointNote(""); setView("onboarding"); setAuthState("signed-out");
+      setProfile(null); setReadinessModel(null); setSession(null); setSessions([]); setAnswer(""); setCode(""); setCheckpointNote(""); setView("onboarding"); setAuthState("signed-out");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not sign out.");
     } finally { setBusy(false); }
@@ -772,7 +774,7 @@ export function RelayShell() {
         { value: "real" as const, label: "Real", hint: "Lets you fail, so the feedback is honest." },
         { value: "coach" as const, label: "Coach", hint: "Helps you when you get stuck." },
       ]).map((option) => <label key={option.value} className="flex cursor-pointer items-start gap-3 py-2"><input type="radio" name="interview-mode" value={option.value} checked={mode === option.value} onChange={() => setMode(option.value)} className="mt-1" /><span><span className="block text-sm font-medium">{option.label}</span><span className="block text-xs text-[var(--ink-muted)]">{option.hint}</span></span></label>)}</fieldset>}<button onClick={() => startInterview(handsOn ? "hands-on" : "conversation")} disabled={busy} className="rounded-full bg-[var(--pine)] px-5 py-3 text-sm font-semibold text-white">Start another {handsOn ? "hands-on interview" : "interview"}</button></div></>}
-      {view === "progress" && <><p className="text-sm text-[var(--ink-muted)]">Progress</p><h1 className="mt-1 text-4xl font-semibold tracking-[-.04em]">Practice with a memory.</h1>{profileReadinessNote && <p className="mt-3 max-w-xl text-sm leading-6 text-[var(--ink-muted)]">{profileReadinessNote}</p>}{hasEvidence && readiness !== null ? <div className="mt-7 grid gap-6 xl:grid-cols-[.8fr_1.2fr]"><div className="space-y-6"><article className="rounded-3xl bg-[#e7efd9] p-6"><p className="text-sm text-[#537053]">Interview readiness</p><strong className="mt-2 block text-6xl tracking-[-.06em]">{readiness}<span className="ml-2 text-2xl text-[#537053]">/ 100</span></strong><p className="mt-4 text-sm leading-6 text-[#537053]">A coaching signal based on your completed practice, not a hiring prediction.</p></article><article className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><p className="text-sm font-semibold text-[var(--ink-muted)]">{progressHasBaseline ? "Baseline" : "Recent signal"}</p><h2 className="mt-2 text-2xl font-semibold">{progressTrendName ?? "Recent sessions"}</h2><p className="mt-3 text-sm text-[var(--ink-muted)]">{progressTrendDescription(progressTrend)}</p><div className="mt-5 grid gap-4 sm:grid-cols-2"><div className="rounded-2xl bg-[#f3f5ef] p-4"><p className="text-xs font-semibold uppercase tracking-[.12em] text-[var(--ink-muted)]">Latest score</p><p className="mt-2 text-3xl font-semibold">{latestScore === null ? "Not available yet" : `${latestScore}/10`}</p></div><div className="rounded-2xl bg-[#f3f5ef] p-4"><p className="text-xs font-semibold uppercase tracking-[.12em] text-[var(--ink-muted)]">Trend</p><p className="mt-2 text-3xl font-semibold">{progressTrendName ?? "Building"}</p></div></div></article></div><div className="space-y-6"><div className="grid gap-6 lg:grid-cols-2"><article className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><p className="text-sm font-semibold text-[var(--ink-muted)]">Strongest competency</p><h2 className="mt-2 text-2xl font-semibold">{strongest?.name ?? "Still emerging"}</h2><p className="mt-3 leading-6 text-[var(--ink-muted)]">{strongest?.strengths[0] ?? "Complete more sessions to identify your steadiest interview strength."}</p></article><article className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><p className="text-sm font-semibold text-[var(--ink-muted)]">Recommended focus</p><h2 className="mt-2 text-2xl font-semibold">{weakest?.name ?? "Choose a fresh practice area"}</h2><p className="mt-3 leading-6 text-[var(--ink-muted)]">{weakest?.weaknesses[0] ?? "Relay will surface the next coaching target once enough evidence accumulates."}</p></article></div><article className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-sm font-semibold text-[var(--ink-muted)]">Recurring weaknesses</p><h2 className="mt-2 text-2xl font-semibold">{progressHasRecurringWeaknesses ? "Patterns worth practicing" : "No repeated pattern yet"}</h2></div>{progress?.recentScores.length ? <p className="rounded-full bg-[#eef3e7] px-3 py-1 text-xs font-semibold text-[#38502e]">{progress.recentScores.length} scored session{progress.recentScores.length === 1 ? "" : "s"}</p> : null}</div>{progressHasRecurringWeaknesses ? <ul className="mt-4 space-y-3 text-sm leading-6 text-[var(--ink-muted)]">{recurringWeaknesses.map((weakness) => <li key={weakness} className="rounded-2xl bg-[#f3f5ef] px-4 py-3">{weakness}</li>)}</ul> : <p className="mt-4 leading-6 text-[var(--ink-muted)]">Keep practicing across a few sessions and Relay will highlight the coaching themes that repeat.</p>}</article><article className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><h2 className="font-semibold">Competencies</h2><div className="mt-5 space-y-4">{profile.competencies.map((item) => <div key={item.id}><div className="mb-2 flex justify-between text-sm"><span>{item.name}</span><span className="text-[var(--ink-muted)]">{item.averageScore === null ? "Not assessed" : `${item.averageScore}/10`}</span></div>{item.averageScore !== null && <div className="h-2 overflow-hidden rounded-full bg-[#e6e9e1]"><div className="h-full rounded-full bg-[var(--pine)]" style={{ width: `${item.averageScore * 10}%` }} /></div>}</div>)}</div></article></div></div> : <article className="mt-7 rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><h2 className="text-2xl font-semibold">Not enough data yet</h2><p className="mt-3 max-w-xl leading-6 text-[var(--ink-muted)]">Finish your first mixed interview to establish a baseline before Relay shows readiness or competency scores.</p></article>}<p className="mt-7 text-sm text-[var(--ink-muted)]">{sessions.filter((item) => item.status === "complete").length} completed interviews saved to your account, including {sessions.filter((item) => item.status === "complete" && item.kind === "hands-on").length} hands-on sessions.</p></>}
+      {view === "progress" && <><p className="text-sm text-[var(--ink-muted)]">Progress</p><h1 className="mt-1 text-4xl font-semibold tracking-[-.04em]">Practice with a memory.</h1>{profileReadinessNote && <p className="mt-3 max-w-xl text-sm leading-6 text-[var(--ink-muted)]">{profileReadinessNote}</p>}{hasEvidence && readiness !== null ? <div className="mt-7 grid gap-6 xl:grid-cols-[.8fr_1.2fr]"><div className="space-y-6"><article className="rounded-3xl bg-[#e7efd9] p-6"><p className="text-sm text-[#537053]">Interview readiness</p><strong className="mt-2 block text-6xl tracking-[-.06em]">{readiness}<span className="ml-2 text-2xl text-[#537053]">/ 100</span></strong><p className="mt-4 text-sm leading-6 text-[#537053]">A coaching signal based on your completed practice, not a hiring prediction.</p></article><article className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><p className="text-sm font-semibold text-[var(--ink-muted)]">Trend</p><h2 className="mt-2 text-2xl font-semibold">{progressTrendName}</h2><p className="mt-3 text-sm text-[var(--ink-muted)]">{progressTrendDescription(progressTrend)}</p><div className="mt-5 grid gap-4 sm:grid-cols-2"><div className="rounded-2xl bg-[#f3f5ef] p-4"><p className="text-xs font-semibold uppercase tracking-[.12em] text-[var(--ink-muted)]">Confidence</p><p className="mt-2 text-3xl font-semibold">{confidenceLabel}</p></div><div className="rounded-2xl bg-[#f3f5ef] p-4"><p className="text-xs font-semibold uppercase tracking-[.12em] text-[var(--ink-muted)]">Trend</p><p className="mt-2 text-3xl font-semibold">{progressTrendName}</p></div></div></article></div><div className="space-y-6"><article className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><p className="text-sm font-semibold text-[var(--ink-muted)]">Recommended focus</p><h2 className="mt-2 text-2xl font-semibold">{weakestDimensionLabel ?? "Choose a fresh practice area"}</h2><p className="mt-3 leading-6 text-[var(--ink-muted)]">{weakest ? `Scoring ${weakest.score}/100 with ${weakest.confidence} confidence.` : "Relay will surface the next coaching target once enough evidence accumulates."}</p></article><article className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><h2 className="font-semibold">Competencies</h2><div className="mt-5 space-y-4">{profile.competencies.map((item) => <div key={item.id}><div className="mb-2 flex justify-between text-sm"><span>{item.name}</span><span className="text-[var(--ink-muted)]">{item.averageScore === null ? "Not assessed" : `${item.averageScore}/10`}</span></div>{item.averageScore !== null && <div className="h-2 overflow-hidden rounded-full bg-[#e6e9e1]"><div className="h-full rounded-full bg-[var(--pine)]" style={{ width: `${item.averageScore * 10}%` }} /></div>}</div>)}</div></article></div></div> : <article className="mt-7 rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><h2 className="text-2xl font-semibold">Not enough data yet</h2><p className="mt-3 max-w-xl leading-6 text-[var(--ink-muted)]">Finish your first mixed interview to establish a baseline before Relay shows readiness or competency scores.</p></article>}<p className="mt-7 text-sm text-[var(--ink-muted)]">{sessions.filter((item) => item.status === "complete").length} completed interviews saved to your account, including {sessions.filter((item) => item.status === "complete" && item.kind === "hands-on").length} hands-on sessions.</p></>}
       {view === "profile" && <><p className="text-sm text-[var(--ink-muted)]">Professional profile</p><h1 className="mt-1 text-4xl font-semibold tracking-[-.04em]">{profile.role}</h1><p className="mt-2 text-lg text-[var(--ink-muted)]">{profile.seniority} · personal coaching profile</p>{profileReadinessNote && <p className="mt-3 max-w-2xl text-sm leading-6 text-[var(--ink-muted)]">{profileReadinessNote}</p>}<article className="mt-7 rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-6"><h2 className="font-semibold">Professional narrative</h2><p className="mt-3 max-w-2xl leading-7 text-[var(--ink-muted)]">{profile.narrative}</p><h2 className="mt-7 font-semibold">Primary expertise</h2><div className="mt-3 flex flex-wrap gap-2">{profile.expertise.map((item) => <span key={item} className="rounded-full bg-[#edf0e8] px-3 py-1.5 text-sm">{item}</span>)}</div>{profile.evidence?.length ? <div className="mt-7 border-t border-[var(--line)] pt-7"><h2 className="text-2xl font-semibold">Grounded evidence</h2><p className="mt-3 max-w-2xl text-sm leading-6 text-[var(--ink-muted)]">Relay will only plan and critique against source-backed details shown here.</p><div className="mt-5 space-y-4">{profile.evidence.map((item) => <article key={item.id} className="rounded-2xl border border-[var(--line)] bg-[#f8f7f2] p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="font-semibold">{item.projectOrEmployer ?? item.ownership ?? "Source-backed experience"}</h3><p className="mt-1 text-sm leading-6 text-[var(--ink-muted)]">{item.sourceExcerpt}</p></div><span className="rounded-full bg-[#eef3e7] px-3 py-1 text-xs font-semibold text-[#38502e]">{Math.round(item.confidence * 100)}% extraction confidence</span></div><p className="mt-3 text-sm leading-6 text-[var(--ink-muted)]">{evidenceSummary(item)}</p>{item.technologies.length > 0 && <div className="mt-3 flex flex-wrap gap-2">{item.technologies.map((technology) => <span key={technology} className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-[#38502e]">{technology}</span>)}</div>}</article>)}</div></div> : null}<button onClick={() => beginProfileReview(profile)} className="mt-8 rounded-full border border-[var(--pine)] px-4 py-2 text-sm font-semibold text-[var(--pine)]">Review and edit profile</button><button onClick={() => { setCvText(profile.source.cvText); setCoverLetter(profile.source.coverLetter); navigate("onboarding"); }} className="mt-3 block text-sm font-semibold text-[var(--ink-muted)]">Replace source information</button></article></>}
       {view === "practice" && dashboard && <PracticeView dashboard={dashboard} busy={busy} onStartRecommended={handleStartRecommended} onStartManual={handleStartManualPractice} />}
     </section></div>}
