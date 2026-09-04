@@ -1839,12 +1839,29 @@ function rpcHydrationClient(
  * this mock does not distinguish "which query is running" -- it just
  * filters/sorts/slices rows -- which is enough for `listReadinessEvidence`'s
  * straight-line reads, while still exercising real multi-page paging.
+ *
+ * `.select(columns)` genuinely PROJECTS: rows come back carrying only the
+ * requested columns. Without that, every read behaved like `select("*")` here
+ * and a column missing from a production select list would surface as
+ * `undefined` only in production, invisible to this suite -- so the whole-row
+ * `toEqual` assertions below would have been guarding nothing. Projection
+ * happens in `.range()`, not in `.select()`, because PostgREST filters
+ * server-side against the full row and narrows only the response: `.eq(
+ * "user_id", ...)` has to keep working on a column no select list asks for.
  */
 function mockSupabase(tables: Record<string, Row[]>) {
   const from = vi.fn((table: string) => {
     let rows = tables[table] ?? [];
+    let projection: string[] | null = null;
+    const project = (row: Row): Row =>
+      projection === null
+        ? row
+        : Object.fromEntries(projection.filter((column) => column in row).map((column) => [column, row[column]]));
     const builder = {
-      select: () => builder,
+      select: (columns = "*") => {
+        projection = columns === "*" ? null : columns.split(",").map((column) => column.trim());
+        return builder;
+      },
       eq: (field: string, value: unknown) => {
         rows = rows.filter((row) => row[field] === value);
         return builder;
@@ -1871,7 +1888,7 @@ function mockSupabase(tables: Record<string, Row[]>) {
         });
         return builder;
       },
-      range: async (from: number, to: number) => ({ data: rows.slice(from, to + 1), error: null }),
+      range: async (from: number, to: number) => ({ data: rows.slice(from, to + 1).map(project), error: null }),
     };
     return builder;
   });
