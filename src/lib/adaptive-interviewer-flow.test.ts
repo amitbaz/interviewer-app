@@ -822,4 +822,47 @@ describe("adaptive interviewer flow", () => {
     const targets = session.blueprint!.targets.filter((target) => target.required).map((target) => target.competencyName);
     expect(targets).toContain("Observability");
   });
+
+  it("keeps the candidate's unanswered attempts in the transcript", async () => {
+    const session = await runScriptedSession({
+      mode: "coach",
+      answers: ["i don't know", "i am having a blackout", "ok — I owned the design system migration at Acme."],
+    });
+    const said = session.messages.filter((message) => message.role === "candidate").map((message) => message.content);
+    expect(said).toContain("i don't know");
+    expect(said).toContain("i am having a blackout");
+  });
+
+  it("sets a parked target aside as parked and a budget-spent one as skipped", async () => {
+    const coach = await runScriptedSession({
+      mode: "coach",
+      answers: ["i don't know", "i am having a blackout", "i don't know", "i am having a blackout"],
+    });
+    const coachReasons = coach.questions.map((question) => question.setAsideReason).filter(Boolean);
+    expect(coachReasons).toContain("parked");
+
+    const real = await runScriptedSession({
+      mode: "real",
+      answers: ["i don't know", "i am having a blackout", "i don't know"],
+    });
+    const realReasons = real.questions.map((question) => question.setAsideReason).filter(Boolean);
+    expect(realReasons).toContain("rescue-budget-spent");
+    expect(realReasons).not.toContain("parked");
+  });
+
+  it("comes back to a parked target once nothing required is unasked", async () => {
+    const session = await runScriptedSession({
+      mode: "coach",
+      answers: [
+        "i don't know",
+        "i am having a blackout",
+        ...strongAnswers(),
+      ],
+    });
+    // The parked row was returned to: its marker was cleared and it carries a
+    // real answer by the end.
+    const parked = session.questions.find((question) => question.nonAnswers.length > 0);
+    expect(parked?.setAsideAt).toBeNull();
+    expect(parked?.answer).toBeTruthy();
+  });
 });
