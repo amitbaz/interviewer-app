@@ -761,6 +761,22 @@ describe("adaptive interviewer flow", () => {
     expect(rescuedQuestion?.answer).toBeTruthy();
   });
 
+  // Issue #10. Four consecutive blackouts in coach mode: narrow rescue, park,
+  // then the rescue budget is spent. The director advances to a second target
+  // on turn 3 and writes its question down -- but the candidate is shown the
+  // first row's prompt on every single turn, because a row with no answer is
+  // still "the current question". Flipped to `it` in the final task.
+  it.fails("moves the candidate onto a different question after a blackout", async () => {
+    const session = await runScriptedSession({
+      mode: "coach",
+      answers: ["i don't know", "i am having a blackout", "i don't know", "i am having a blackout"],
+    });
+    const asked = session.messages
+      .filter((message) => message.role === "interviewer")
+      .map((message) => message.content);
+    expect(new Set(asked).size).toBeGreaterThan(1);
+  });
+
   it("never scores a non-answer", async () => {
     const session = await runScriptedSession({ mode: "coach", answers: ["i am having a blackout"] });
     const blanks = session.questions.filter((question) => question.nonAnswer).map((question) => question.id);
