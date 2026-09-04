@@ -52,3 +52,5 @@ next-env.d.ts
 
 # Subagent-driven development scratch workspace
 .superpowers/
+
+.claude/
