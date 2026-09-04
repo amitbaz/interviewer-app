@@ -7,7 +7,7 @@ import type {
   PracticePlan,
   PracticeRecommendation,
   Profile,
-  ProgressSnapshot,
+  ReadinessModel,
 } from "@/lib/types";
 import type { PracticeInputs } from "@/lib/practice-service";
 
@@ -51,14 +51,13 @@ const profile: Profile = {
   updatedAt: "2026-08-29T10:00:00.000Z",
 };
 
-const progress: ProgressSnapshot = {
-  readiness: 62,
-  latestScore: 7.5,
-  trend: "stable",
-  recentScores: [7.5],
-  strongest: null,
-  weakest: null,
-  recurringWeaknesses: [],
+const readiness: ReadinessModel = {
+  overall: 62,
+  overallConfidence: "medium",
+  overallTrend: "stable",
+  dimensions: [],
+  unmappedEvidenceCount: 0,
+  computedAt: "2026-08-31T09:00:00.000Z",
 };
 
 function opportunity(id: string, overrides: Partial<Opportunity> = {}): Opportunity {
@@ -163,7 +162,7 @@ function practiceInputs(overrides: Partial<PracticeInputs> = {}): PracticeInputs
     stories: [],
     sessions: [],
     plans: [],
-    progress,
+    readiness,
     ...overrides,
   };
 }
@@ -331,12 +330,12 @@ describe("loadCareerDashboard", () => {
     expect(dashboard.upcomingOpportunities.map((item) => item.id)).toEqual(["opp-soon", "opp-later"]);
   });
 
-  it("passes the progress snapshot from loadPracticeInputs straight through, uncomputed here", async () => {
-    mocks.loadPracticeInputs.mockResolvedValue(practiceInputs({ progress }));
+  it("passes the readiness model from loadPracticeInputs straight through, uncomputed here", async () => {
+    mocks.loadPracticeInputs.mockResolvedValue(practiceInputs({ readiness }));
 
     const dashboard = await loadCareerDashboard(supabase as never, "user-1", now, "demo");
 
-    expect(dashboard.progress).toBe(progress);
+    expect(dashboard.readiness).toBe(readiness);
   });
 
   it("passes recentPracticePlans and recentSessions straight through, and forwards now to the recommendation selector", async () => {

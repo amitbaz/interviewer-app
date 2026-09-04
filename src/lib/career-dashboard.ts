@@ -66,7 +66,7 @@ function upcomingOpportunities(opportunities: Opportunity[], now: Date): Opportu
  * Builds the single canonical Career Brain dashboard read model for
  * `userId`. Composes `loadPracticeInputs` (the same profile/opportunities/
  * observations/stories/sessions/plans loader `src/lib/practice-service.ts`
- * uses for the Practice view, so both views load and compute progress
+ * uses for the Practice view, so both views load and compute readiness
  * identically) with `recommendPractice` -- AGGREGATION ONLY, never
  * persistence: this issues no writes, so it is safe to call on every
  * `GET /api/career/dashboard` request without creating or reconciling any
@@ -105,7 +105,8 @@ export async function loadCareerDashboard(
     opportunities: inputs.opportunities,
     observations: inputs.observations,
     stories: inputs.stories,
-    progress: inputs.progress,
+    readiness: inputs.readiness,
+    competencies: inputs.profile.competencies,
     recentSessions: inputs.sessions,
     recentPlans: inputs.plans,
     now,
@@ -114,7 +115,7 @@ export async function loadCareerDashboard(
   return {
     profile: inputs.profile,
     coachMode,
-    progress: inputs.progress,
+    readiness: inputs.readiness,
     recentSessions: inputs.sessions,
     opportunities: inputs.opportunities,
     upcomingOpportunities: upcomingOpportunities(inputs.opportunities, now),

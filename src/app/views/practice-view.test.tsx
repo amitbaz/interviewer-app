@@ -120,7 +120,7 @@ function dashboard(overrides: Partial<CareerDashboard> = {}): CareerDashboard {
   return {
     profile: profile(),
     coachMode: "demo",
-    progress: { readiness: null, latestScore: null, trend: null, recentScores: [], strongest: null, weakest: null, recurringWeaknesses: [] },
+    readiness: { overall: null, overallConfidence: null, overallTrend: "unresolved", dimensions: [], unmappedEvidenceCount: 0, computedAt: "2026-08-29T10:00:00.000Z" },
     recentSessions: [],
     opportunities: [],
     upcomingOpportunities: [],
