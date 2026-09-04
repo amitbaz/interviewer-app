@@ -3,10 +3,11 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { generatePracticeBlueprint, handsOnExercise } from "@/lib/coach";
 import { recommendPractice } from "@/lib/practice-recommendation";
-import { calculateProgress } from "@/lib/progress";
+import { calculateReadiness } from "@/lib/readiness";
 import {
   createHandsOnPracticeSession,
   createSessionWithPracticeBlueprint,
+  listReadinessEvidence,
   listRecentSessions,
 } from "@/lib/repositories/interviews";
 import { listCoachObservations } from "@/lib/repositories/observations";
@@ -32,7 +33,7 @@ import type {
   PracticeRecommendation,
   PracticeSessionContext,
   Profile,
-  ProgressSnapshot,
+  ReadinessModel,
 } from "@/lib/types";
 
 /** Longest a practice plan may claim to take; matches the `practice_plans.estimated_minutes` check constraint. */
@@ -89,9 +90,9 @@ export type PracticeOverview = {
 /**
  * Everything the deterministic selector and the blueprint generator need,
  * loaded once per request. Exported so other Career Brain read models that
- * need the same six repository calls plus the same `calculateProgress` call
- * -- currently `loadCareerDashboard` in `src/lib/career-dashboard.ts` --
- * reuse `loadPracticeInputs` instead of maintaining a second copy of the
+ * need the same seven repository calls plus the same `calculateReadiness`
+ * call -- currently `loadCareerDashboard` in `src/lib/career-dashboard.ts`
+ * -- reuse `loadPracticeInputs` instead of maintaining a second copy of the
  * loading logic that could silently drift from this one.
  */
 export type PracticeInputs = {
@@ -102,7 +103,7 @@ export type PracticeInputs = {
   sessions: InterviewSession[];
   /** The caller's most recent plans only -- `listPracticePlans` is always bounded. */
   plans: PracticePlan[];
-  progress: ProgressSnapshot;
+  readiness: ReadinessModel;
 };
 
 /** The plan fields plus opportunity links a start request resolves to, before anything is persisted. */
@@ -147,13 +148,14 @@ function userSafeGenerationFailure(error: unknown): string {
  * {@link PracticeInputs}.
  */
 export async function loadPracticeInputs(supabase: SupabaseClient, userId: string): Promise<PracticeInputs> {
-  const [profile, opportunities, observations, stories, sessions, plans] = await Promise.all([
+  const [profile, opportunities, observations, stories, sessions, plans, evidence] = await Promise.all([
     getProfile(supabase, userId),
     listOpportunities(supabase, userId),
     listCoachObservations(supabase, userId),
     listCareerStories(supabase, userId),
     listRecentSessions(supabase, userId),
     listPracticePlans(supabase, userId),
+    listReadinessEvidence(supabase, userId),
   ]);
   return {
     profile,
@@ -162,7 +164,7 @@ export async function loadPracticeInputs(supabase: SupabaseClient, userId: strin
     stories,
     sessions,
     plans,
-    progress: calculateProgress(profile?.competencies ?? [], sessions),
+    readiness: calculateReadiness(evidence),
   };
 }
 
@@ -171,7 +173,8 @@ function recommendFrom(inputs: PracticeInputs, now: Date): PracticeRecommendatio
     opportunities: inputs.opportunities,
     observations: inputs.observations,
     stories: inputs.stories,
-    progress: inputs.progress,
+    readiness: inputs.readiness,
+    competencies: inputs.profile?.competencies ?? [],
     recentSessions: inputs.sessions,
     recentPlans: inputs.plans,
     now,

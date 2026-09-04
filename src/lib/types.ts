@@ -1011,7 +1011,9 @@ export type PracticeRecommendationInput = {
   opportunities: Opportunity[];
   observations: CoachObservation[];
   stories: CareerStory[];
-  progress: ProgressSnapshot;
+  readiness: ReadinessModel;
+  /** The profile's current competencies, used to map a weak readiness dimension back to a competency to practise. */
+  competencies: Competency[];
   recentSessions: InterviewSession[];
   recentPlans: PracticePlan[];
   now: Date;
@@ -1053,7 +1055,7 @@ export type PracticeBlueprintContext = {
 export type CareerDashboard = {
   profile: Profile;
   coachMode: "demo" | "live";
-  progress: ProgressSnapshot;
+  readiness: ReadinessModel;
   recentSessions: InterviewSession[];
   opportunities: Opportunity[];
   upcomingOpportunities: Opportunity[];
