@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evidenceStrength } from "@/lib/readiness-weighting";
+import { MINIMUM_RECENCY_FACTOR, RECENCY_HALF_LIFE_DAYS, evidenceStrength, recencyFactor } from "@/lib/readiness-weighting";
 
 const conditions = (overrides: Partial<Parameters<typeof evidenceStrength>[0]> = {}) => ({
   mode: "real" as const,
@@ -41,5 +41,34 @@ describe("evidenceStrength", () => {
     const worst = evidenceStrength(conditions({ mode: "coach", degraded: true, assistanceCount: 9 }));
     expect(worst).toBeGreaterThan(0);
     expect(worst).toBeLessThan(0.1);
+  });
+});
+
+describe("recencyFactor", () => {
+  const now = new Date("2026-09-04T12:00:00.000Z");
+  const daysAgo = (days: number) => new Date(now.getTime() - days * 86_400_000).toISOString();
+
+  it("gives evidence recorded right now its full weight", () => {
+    expect(recencyFactor(daysAgo(0), now)).toBe(1);
+  });
+
+  it("halves the weight after exactly one half-life", () => {
+    expect(recencyFactor(daysAgo(RECENCY_HALF_LIFE_DAYS), now)).toBeCloseTo(0.5, 3);
+  });
+
+  it("quarters the weight after two half-lives", () => {
+    expect(recencyFactor(daysAgo(RECENCY_HALF_LIFE_DAYS * 2), now)).toBeCloseTo(0.25, 3);
+  });
+
+  it("never lets old evidence reach zero", () => {
+    expect(recencyFactor(daysAgo(5000), now)).toBe(MINIMUM_RECENCY_FACTOR);
+  });
+
+  it("treats an unparseable timestamp as the oldest possible evidence", () => {
+    expect(recencyFactor("not-a-date", now)).toBe(MINIMUM_RECENCY_FACTOR);
+  });
+
+  it("does not reward a timestamp in the future", () => {
+    expect(recencyFactor(new Date(now.getTime() + 86_400_000).toISOString(), now)).toBe(1);
   });
 });
