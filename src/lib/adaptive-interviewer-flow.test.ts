@@ -192,6 +192,7 @@ function assessorResponse(read: "answered" | "stuck", expectedSignals: string[])
       expectedSignalsPresent: answered ? expectedSignals : [],
       unsupportedClaims: [],
       dimensionReasons: dimensionRecord("Reasoned against the rubric."),
+      answerTier: answered ? "strong" : "incorrect",
     },
   };
 }

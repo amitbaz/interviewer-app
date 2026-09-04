@@ -241,6 +241,7 @@ function sampleGroundedEvaluation(overrides: Partial<GroundedEvaluation> = {}): 
     expectedSignalsPresent: ["ownership"],
     unsupportedClaims: [],
     dimensionReasons: dimensionReasonSample,
+    answerTier: "strong",
     ...overrides,
   };
 }
@@ -589,6 +590,7 @@ describe("nextTurn / evaluateAnswer", () => {
                   confidence: "It states the ownership directly.",
                   relevance: "It answers the checkout migration question.",
                 },
+                answerTier: "strong",
               },
             }),
           }],
@@ -673,6 +675,7 @@ describe("nextTurn / evaluateAnswer", () => {
                   confidence: "It is stated directly.",
                   relevance: "It answers the checkout migration question.",
                 },
+                answerTier: "strong",
               },
             }),
           }],
@@ -703,6 +706,81 @@ describe("nextTurn / evaluateAnswer", () => {
     expect(evaluation.dimensionReasons).toBeDefined();
     expect(evaluation.dimensionReasons?.correctness).toContain("migration question");
     expect(evaluation.dimensionReasons?.relevance).toContain("checkout migration question");
+  });
+
+  it("classifies a correct-but-shallow answer separately from a senior one", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+    vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{
+        content: {
+          parts: [{
+            text: JSON.stringify({
+              read: "answered",
+              evaluation: {
+                ...sampleGroundedEvaluation(),
+                answerTier: "shallow",
+              },
+            }),
+          }],
+        },
+      }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    const question = planned({ id: "question-1", sequence: 1, category: "technical" });
+    const evaluation = await evaluateAnswer(
+      question,
+      null,
+      { role: "Senior Full Stack Engineer", seniority: "Senior", expertise: ["Node.js"], narrative: null },
+      "REST is fine for this, I'd just add pagination.",
+      "",
+    );
+
+    expect(evaluation.answerTier).toBe("shallow");
+  });
+
+  describe("backend/full-stack answer tiers", () => {
+    const backendQuestion = planned({
+      id: "backend-question-1",
+      sequence: 1,
+      category: "technical",
+      competencyId: "backend-api-design",
+      competencyName: "API design",
+      difficulty: "senior",
+      prompt: "How would you version a public REST API without breaking existing clients?",
+    });
+
+    it.each([
+      ["incorrect", "You'd just delete the old endpoint and tell clients to update."],
+      ["incomplete", "I'd add a new /v2 path for the breaking change."],
+      ["shallow", "I'd version with a /v2 path, keep /v1 running, and pick a sunset date."],
+      ["strong", "I'd version with a /v2 path, keep /v1 running behind a deprecation header, pick a sunset date communicated in advance, and add contract tests so a v1 regression fails CI before it reaches a client."],
+    ] as const)("classifies a %s backend answer as answerTier %s", async (tier, answer) => {
+      vi.stubEnv("GEMINI_API_KEY", "private-test-key");
+      vi.stubEnv("GEMINI_MODEL", "models/gemini-3.6-flash");
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+        candidates: [{
+          content: {
+            parts: [{
+              text: JSON.stringify({
+                read: "answered",
+                evaluation: { ...sampleGroundedEvaluation(), answerTier: tier },
+              }),
+            }],
+          },
+        }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+      const evaluation = await evaluateAnswer(
+        backendQuestion,
+        null,
+        { role: "Senior Full Stack Engineer", seniority: "Senior", expertise: ["Node.js", "Postgres"], narrative: null },
+        answer,
+        "",
+      );
+
+      expect(evaluation.answerTier).toBe(tier);
+    });
   });
 
   describe("discovery answers with no source evidence target", () => {
@@ -802,6 +880,7 @@ describe("nextTurn / evaluateAnswer", () => {
                     confidence: "It states the example directly.",
                     relevance: "It answers the discovery prompt.",
                   },
+                  answerTier: "shallow",
                 },
               }),
             }],
@@ -874,6 +953,7 @@ describe("nextTurn / evaluateAnswer", () => {
                     practicalExperience: "ok", tradeOffAwareness: "ok", communication: "ok",
                     confidence: "ok", relevance: "ok",
                   },
+                  answerTier: "shallow",
                 },
               }),
             }],
@@ -959,6 +1039,7 @@ describe("nextTurn / evaluateAnswer", () => {
                   confidence: "It states the ownership directly.",
                   relevance: "It answers the checkout migration question.",
                 },
+                answerTier: "strong",
               },
             }),
           }],
