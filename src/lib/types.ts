@@ -253,6 +253,16 @@ export type FollowUpDraft = {
   parentQuestionId?: string | null;
 };
 
+/**
+ * The assessor's depth/seniority read on one answer, separate from both the
+ * 0-10 `dimensions` scores and `AssessmentRead` (which is about whether an
+ * attempt happened at all, not how good it was). Named after issue #21's own
+ * four categories so a fixture written against the issue reads directly
+ * against this type: "strong" is that issue's "strong", not `Difficulty`'s
+ * "senior" question-difficulty level, which is a different axis entirely.
+ */
+export type AnswerTier = "incorrect" | "incomplete" | "shallow" | "strong";
+
 export type Evaluation = {
   score: number;
   questionId?: string | null;
@@ -299,6 +309,8 @@ export type Evaluation = {
     | "relevance",
     string
   >>;
+  /** Optional depth/seniority read — present on every `GroundedEvaluation`, optional here for evaluations built before this field existed. */
+  answerTier?: AnswerTier;
 };
 
 /** A fully grounded interview evaluation with answer-relevance and claim evidence. */
@@ -307,6 +319,7 @@ export type GroundedEvaluation = Evaluation & {
   supportedClaims: string[];
   expectedSignalsPresent: string[];
   unsupportedClaims: string[];
+  answerTier: AnswerTier;
   dimensionReasons: Record<
     | "correctness"
     | "depth"
@@ -971,6 +984,7 @@ export type PracticeRecommendationSignal = {
     | "progress_weakness"
     | "applied_opportunity"
     | "first_practice"
+    | "coverage_gap"
     | "fallback";
   label: string;
   detail: string;

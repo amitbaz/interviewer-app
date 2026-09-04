@@ -1,3 +1,4 @@
+import { BACKEND_SENIORITY_CALIBRATION, BACKEND_TOPIC_AREAS } from "@/lib/backend-topics";
 import { dimensionFor, type ReadinessDimension } from "@/lib/readiness-dimensions";
 import { weakestConfidentDimension } from "@/lib/readiness";
 import type {
@@ -414,6 +415,34 @@ function buildAppliedOpportunityRecommendation(
   });
 }
 
+/**
+ * A one-time nudge toward backend/full-stack practice for a candidate who has
+ * never generated any backend evidence at all. `weakestConfidentDimension`
+ * (readiness.ts) deliberately excludes a zero-evidence dimension from ever
+ * being called a "weakness" (issue #14's guard against treating an unknown as
+ * a weak spot), so without this branch backend could never surface here on
+ * its own. This is self-resolving: once the recommended round produces its
+ * first backend evidence, `backend`'s confidence stops being null and this
+ * branch never fires again for that candidate -- `weakestConfidentDimension`
+ * takes over from there like it does for every other dimension.
+ */
+function buildBackendCoverageGapRecommendation(): PracticeRecommendation {
+  const signal: PracticeRecommendationSignal = {
+    kind: "coverage_gap",
+    label: "coverage gap",
+    detail: "no backend/full-stack practice evidence yet",
+  };
+  return withCommonFields("targeted_drill", {
+    primaryFocus: `Introduce backend/full-stack: ${BACKEND_TOPIC_AREAS[0]}`,
+    secondaryFocus: BACKEND_SENIORITY_CALIBRATION,
+    rationale: "Relay has no backend/full-stack practice evidence yet, so this introduces the area before it can be scored as a strength or a weakness.",
+    estimatedMinutes: 15,
+    primaryOpportunityId: null,
+    supportingOpportunityIds: [],
+    signals: [signal],
+  });
+}
+
 function buildFirstPracticeRecommendation(): PracticeRecommendation {
   const signal: PracticeRecommendationSignal = {
     kind: "first_practice",
@@ -461,11 +490,16 @@ function buildFallbackRecommendation(): PracticeRecommendation {
  * 2. any interviewing opportunity without a near-term date;
  * 3. a confirmed/corrected coach observation with importance >= 0.6;
  * 4. an applied/interviewing opportunity with zero confirmed career stories;
- * 5. the weakest readiness dimension with confidence (evidence) behind it,
+ * 5. a one-time backend/full-stack coverage-gap nudge, once at least one
+ *    other dimension has evidence but backend has none (issue #21) --
+ *    checked ahead of the weakest-dimension branch below so a single
+ *    confident non-backend dimension is never mistaken for "the weakness"
+ *    while backend itself remains a complete unknown;
+ * 6. the weakest readiness dimension with confidence (evidence) behind it,
  *    mapped back to the competency to practise;
- * 6. an applied opportunity;
- * 7. zero completed practice sessions;
- * 8. fallback to a full simulation.
+ * 7. an applied opportunity;
+ * 8. zero completed practice sessions;
+ * 9. fallback to a full simulation.
  *
  * Terminal opportunity statuses (`offer`, `rejected`, `withdrawn`, `closed`)
  * never create urgency and are excluded up front. `recentPlans` is accepted
@@ -495,6 +529,12 @@ export function recommendPractice(input: PracticeRecommendationInput): PracticeR
   const activeApplication = pickActiveApplicationOpportunity(activeOpportunities);
   if (activeApplication && !hasConfirmedStory) {
     return buildStoryGapRecommendation(activeApplication, activeOpportunities);
+  }
+
+  const hasAnyConfidentDimension = readiness.dimensions.some((entry) => entry.confidence !== null);
+  const backendDimension = readiness.dimensions.find((entry) => entry.dimension === "backend");
+  if (hasAnyConfidentDimension && backendDimension?.confidence === null) {
+    return buildBackendCoverageGapRecommendation();
   }
 
   const weakestDimension = weakestConfidentDimension(readiness);

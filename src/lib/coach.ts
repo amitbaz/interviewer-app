@@ -11,6 +11,7 @@ import type { InterviewRound } from "@/lib/interview-rounds";
 import { deterministicLine, validateInterviewerLine } from "@/lib/interviewer-voice";
 import { MAX_CV_PDF_BYTES } from "@/lib/upload-limits";
 import type {
+  AnswerTier,
   AssessmentRead,
   AssistanceRecord,
   BlueprintQuestion,
@@ -50,6 +51,7 @@ const profileSchema = z.object({
   expertise: z.array(z.string()).min(1).max(8), characteristics: z.array(z.string()).min(1).max(6),
   competencies: z.array(z.object({ name: z.string().min(1), relevance: z.number().min(0).max(1) })).min(1),
 });
+const answerTierEnum = z.enum(["incorrect", "incomplete", "shallow", "strong"]);
 const groundedEvaluationSchema = z.object({
   score: z.number().min(0).max(10), competency: z.string().optional(),
   relevance: z.number().min(0).max(10),
@@ -62,6 +64,7 @@ const groundedEvaluationSchema = z.object({
   expectedSignalsPresent: z.array(z.string()).default([]),
   unsupportedClaims: z.array(z.string()).default([]),
   dimensionReasons: z.object(dimensionReasonShape),
+  answerTier: answerTierEnum,
 });
 // The assessor scores privately and reports a coarse read. It no longer
 // authors questions: speech is a separate call that never sees this rubric.
@@ -567,6 +570,18 @@ function groundedEvaluationFor(
   const communication = clampScore(5 + (sentences.length > 0 ? 0.7 : 0) + (supported.length > 0 ? 0.6 : 0) - unsupportedPenalty * 0.1);
   const confidence = clampScore(4.6 + (hasHedging(trimmed) ? -1.2 : 1.1) + (/[\d%]/.test(trimmed) ? 0.7 : 0) + (supported.length > 0 ? 0.5 : 0));
   const score = clampScore((correctness + depth + clarity + structure + practicalScore + tradeOffScore + communication + confidence + relevance) / dimensions.length);
+  // Heuristic tier for the deterministic (non-model) path, mirroring
+  // `assessorPrompt`'s four categories from the signals this function already
+  // computes: an unsupported claim reads as a wrong core claim, a missing
+  // expected signal as an incomplete answer, and trade-off language as the
+  // mark of senior depth once the answer is otherwise grounded.
+  const answerTier: AnswerTier = unsupported.length > 0
+    ? "incorrect"
+    : expectedSignalsPresent.length < question.expectedSignals.length
+      ? "incomplete"
+      : hasTradeOffLanguage(trimmed) && supported.length > 0
+        ? "strong"
+        : "shallow";
 
   return {
     score,
@@ -611,6 +626,7 @@ function groundedEvaluationFor(
       answerSentences: sentences,
       answer: trimmed,
     }),
+    answerTier,
   };
 }
 
@@ -659,8 +675,11 @@ function validateGroundedModelEvaluation(
   const materiallyUngrounded = normalized.supportedClaims.length === 0
     && answerSignals.length === 0;
 
+  // answerTier is a depth/seniority read, orthogonal to whether the model's
+  // claims are grounded in evidence -- keep the model's classification even
+  // when the rest of its evaluation is discarded as untrusted.
   return materiallyUngrounded
-    ? { evaluation: fallback, trusted: false }
+    ? { evaluation: { ...fallback, answerTier: value.answerTier }, trusted: false }
     : { evaluation: normalized, trusted: true };
 }
 
@@ -1546,6 +1565,7 @@ function normalizeGroundedEvaluation(question: PlannedQuestion, value: z.infer<t
     expectedSignalsPresent: normalizeStrings(value.expectedSignalsPresent),
     unsupportedClaims: normalizeStrings(value.unsupportedClaims),
     dimensionReasons: value.dimensionReasons,
+    answerTier: value.answerTier,
   };
 }
 
@@ -1573,6 +1593,12 @@ function assessorPrompt(
     "  stuck     - did not attempt the question: said they do not know, cannot",
     "              find words, are blanking, or asked to move on.",
     "`stuck` is about the absence of an attempt, never about a weak attempt.",
+    "Separately, classify the answer's depth with `answerTier`:",
+    "  incorrect  - the core technical claim is wrong",
+    "  incomplete - correct as far as it goes, but skips a required part of the objective",
+    "  shallow    - technically correct and complete, but lacks the trade-off reasoning or judgment a senior answer needs",
+    "  strong     - correct, complete, and shows senior-level judgment and trade-off awareness",
+    "Grade `answerTier` against this question's own difficulty and rubric criteria, not a fixed absolute bar.",
     hasSourceEvidenceTarget(question)
       ? ""
       : "Grounding rule: question.evidenceIds is empty, so this is a discovery/general objective. Treat first-person career details in the candidate's answer as newly supplied session evidence. Do not mark them unsupported merely because they were absent from the source profile. Never invent missing details; improved answers may only reuse facts actually supplied by the candidate or already grounded by the question context.",

@@ -396,6 +396,27 @@ describe("recommendPractice", () => {
     expect(result.primaryOpportunityId).toBeNull();
   });
 
+  it("introduces backend/full-stack practice once another dimension has evidence but backend has none", () => {
+    const frontendOnlyReadiness = calculateReadiness(
+      Array.from({ length: 4 }, (_, index) => evidence({
+        questionEvaluationId: `frontend-${index}`,
+        competencyName: "React architecture",
+        score: 8,
+      })),
+      now,
+    );
+    const result = recommendPractice({ ...baseInput, readiness: frontendOnlyReadiness });
+    expect(result.format).toBe("targeted_drill");
+    expect(result.primaryFocus).toContain("backend");
+    expect(result.secondaryFocus).toContain("frontend-leaning");
+    expect(result.signals[0]).toMatchObject({ kind: "coverage_gap" });
+  });
+
+  it("does not introduce backend once backend itself has any evidence, even as the weakest dimension", () => {
+    const result = recommendPractice({ ...baseInput, readiness: backendAndSystemDesignReadiness });
+    expect(result.signals[0].kind).toBe("progress_weakness");
+  });
+
   it("never lets a terminal opportunity create urgency even with a near-term interview date", () => {
     const terminalStatuses: OpportunityStatus[] = ["offer", "rejected", "withdrawn", "closed"];
     for (const status of terminalStatuses) {
