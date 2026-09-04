@@ -79,12 +79,50 @@ describe("deriveCoverageState", () => {
     expect(complete[0].status).toBe("satisfied");
   });
 
-  it("marks a target parked when its last intent was a park rescue", () => {
+  it("marks a target parked when its row was set aside to come back to", () => {
     const asked = question("q1", {
       askedIntent: { kind: "rescue", targetId: "a", style: "park", hook: null },
+      setAsideAt: "2026-09-01T00:00:00.000Z",
+      setAsideReason: "parked",
     });
     const state = deriveCoverageState([target("a")], [asked], []);
     expect(state[0].status).toBe("parked");
+  });
+
+  it("marks a target parked when one of its rows was set aside to come back to", () => {
+    const state = deriveCoverageState(
+      [target("a")],
+      [question("a", { askedIntent: { kind: "open", targetId: "a" }, setAsideAt: "2026-09-04T09:01:00.000Z", setAsideReason: "parked" })],
+      [],
+    );
+    expect(state[0].status).toBe("parked");
+  });
+
+  it("marks a target skipped when it was set aside for good", () => {
+    const state = deriveCoverageState(
+      [target("a")],
+      [question("a", { askedIntent: { kind: "open", targetId: "a" }, setAsideAt: "2026-09-04T09:01:00.000Z", setAsideReason: "rescue-budget-spent" })],
+      [],
+    );
+    expect(state[0].status).toBe("skipped");
+  });
+
+  it("does not mark the destination of a park as parked itself", () => {
+    const state = deriveCoverageState(
+      [target("b")],
+      [question("b", { askedIntent: { kind: "rescue", targetId: "b", style: "park", hook: null, parkedTargetId: "a" } })],
+      [],
+    );
+    expect(state[0].status).toBe("open");
+  });
+
+  it("reopens a target whose row was asked again", () => {
+    const state = deriveCoverageState(
+      [target("a")],
+      [question("a", { askedIntent: { kind: "advance", targetId: "a", reason: "satisfied" }, setAsideAt: null, setAsideReason: null })],
+      [],
+    );
+    expect(state[0].status).toBe("open");
   });
 
   it("collects every intent already issued for a target", () => {
