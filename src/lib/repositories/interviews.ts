@@ -513,6 +513,13 @@ const PAGE_SIZE = 1000;
  * Reads an entire owned table in blocks. PostgREST caps a single response, and
  * readiness must see all history, so silently truncating here would quietly
  * corrupt every downstream score.
+ *
+ * The `.order("id", ...)` is load-bearing, not cosmetic: `.range()` pages by
+ * asking Postgres for rows N..M of "the" result set, but without a stable
+ * unique sort key there is no guarantee that ordering is identical across the
+ * separate requests backing each page, so a row can be skipped or duplicated
+ * right at a page boundary -- the exact failure this unbounded read exists to
+ * avoid.
  */
 async function selectAllPages(
   supabase: SupabaseClient,
@@ -523,7 +530,7 @@ async function selectAllPages(
   const rows: Row[] = [];
   for (let page = 0; ; page += 1) {
     const { data, error } = await refine(
-      supabase.from(table).select("*").eq("user_id", userId),
+      supabase.from(table).select("*").eq("user_id", userId).order("id", { ascending: true }),
     ).range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1);
     if (error) throw new RepositoryError("Could not load readiness evidence.", error.code);
     const batch = (data ?? []) as Row[];

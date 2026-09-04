@@ -1829,12 +1829,15 @@ function rpcHydrationClient(
 
 /**
  * A generic, table-backed Supabase double for read-only paged queries: each
- * `.eq()`/`.in()` narrows the in-memory row set for that table, and
- * `.range()` is the terminal call (matching `selectAllPages`'s paging),
- * resolving to `{ data, error: null }`. Tables not passed in behave as
- * empty. Unlike `tableStub`/`careerContextSupabase`, this mock does not
- * distinguish "which query is running" -- it just filters rows -- which is
- * enough for `listReadinessEvidence`'s straight-line reads.
+ * `.eq()`/`.in()` narrows the in-memory row set for that table, `.order()`
+ * sorts it (real sorting, not a no-op -- `selectAllPages` relies on a stable
+ * sort to keep row order identical across the separate `.range()` calls that
+ * back each page), and `.range(from, to)` is the terminal call, slicing the
+ * sorted/filtered rows and resolving to `{ data, error: null }`. Tables not
+ * passed in behave as empty. Unlike `tableStub`/`careerContextSupabase`,
+ * this mock does not distinguish "which query is running" -- it just
+ * filters/sorts/slices rows -- which is enough for `listReadinessEvidence`'s
+ * straight-line reads, while still exercising real multi-page paging.
  */
 function mockSupabase(tables: Record<string, Row[]>) {
   const from = vi.fn((table: string) => {
@@ -1850,7 +1853,16 @@ function mockSupabase(tables: Record<string, Row[]>) {
         rows = rows.filter((row) => allowed.has(row[field]));
         return builder;
       },
-      range: async () => ({ data: rows, error: null }),
+      order: (field: string, options?: { ascending?: boolean }) => {
+        const direction = options?.ascending === false ? -1 : 1;
+        rows = [...rows].sort((a, b) => {
+          const left = String(a[field]);
+          const right = String(b[field]);
+          return left < right ? -direction : left > right ? direction : 0;
+        });
+        return builder;
+      },
+      range: async (from: number, to: number) => ({ data: rows.slice(from, to + 1), error: null }),
     };
     return builder;
   });
@@ -2024,5 +2036,36 @@ describe("listReadinessEvidence", () => {
     const evidence = await listReadinessEvidence(supabase as never, "user-1");
 
     expect(evidence).toEqual([]);
+  });
+
+  it("pages through more rows than a single request can hold, with no duplicates and none dropped", async () => {
+    // `selectAllPages` requests 1000 rows per page; seed one row over that so a
+    // single table's read genuinely spans two `.range()` calls. Rows are
+    // generated rather than hand-written, and this exercises the real
+    // production PAGE_SIZE rather than an injected smaller one, so the test
+    // proves the actual paging boundary rather than a stand-in for it.
+    const rowCount = 1001;
+    const sessions: Row[] = [
+      { id: "session-1", user_id: "user-1", status: "completed", mode: "real", degraded: false },
+    ];
+    const questions: Row[] = Array.from({ length: rowCount }, (_, index) => ({
+      id: `question-${index}`, user_id: "user-1", session_id: "session-1", category: "technical",
+      competency_id: null, assistance: [], non_answer: false,
+    }));
+    const evaluations: Row[] = Array.from({ length: rowCount }, (_, index) => ({
+      id: `eval-${index}`, user_id: "user-1", question_id: `question-${index}`, overall_score: 5,
+      created_at: "2026-09-01T10:00:00.000Z",
+    }));
+    const supabase = mockSupabase({
+      interview_sessions: sessions,
+      interview_questions: questions,
+      question_evaluations: evaluations,
+      competencies: [],
+    });
+
+    const evidence = await listReadinessEvidence(supabase as never, "user-1");
+
+    expect(evidence).toHaveLength(rowCount);
+    expect(new Set(evidence.map((row) => row.questionEvaluationId)).size).toBe(rowCount);
   });
 });
